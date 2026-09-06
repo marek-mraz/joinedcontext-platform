@@ -479,3 +479,142 @@ spec:
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// T-0285, CC-08: a symlinked file whose target is inside the root is a file and loads;
+/// the containment check is unchanged and still refuses a target outside.
+#[test]
+fn a_symlinked_file_inside_the_root_loads() {
+    let root = unique_temp_dir("symlink-inside");
+    // `.real/` is a dot-directory so the manifest is reachable once, through the link only —
+    // the way a ConfigMap keeps its versions under `..data`.
+    let real = root.join(".real");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(
+        real.join("org.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata:
+  name: my-city
+  namespace: org
+spec:
+  domain: banskabystrica.sk
+  locales: ["sk"]
+  defaultLocale: sk
+"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(real.join("org.yaml"), root.join("org.yaml")).unwrap();
+
+    let repo = Repository::load(&root).expect("a link inside the root loads");
+    assert_eq!(repo.len(), 1, "the linked manifest loads exactly once");
+    assert!(repo.misplaced().is_empty(), "{:?}", repo.misplaced());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// T-0285: the exact layout of a Kubernetes ConfigMap or Secret volume — every file a
+/// symlink into `..data/`, itself a symlink to a dotted version directory — loads every
+/// manifest once. A test with plain files only cannot fail on this bug.
+#[test]
+fn a_configmap_style_volume_of_symlinks_loads_every_manifest_once() {
+    let root = unique_temp_dir("symlink-configmap");
+    let version = root.join("..2026_09_06_17_00_00.000000000");
+    std::fs::create_dir_all(version.join("projects/doprava")).unwrap();
+    std::fs::write(
+        version.join("org.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata:
+  name: my-city
+  namespace: org
+spec:
+  domain: banskabystrica.sk
+  locales: ["sk"]
+  defaultLocale: sk
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        version.join("projects/doprava/project.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Project
+metadata:
+  name: doprava
+  namespace: org
+spec:
+  organizationRef: my-city
+"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&version, root.join("..data")).unwrap();
+    std::os::unix::fs::symlink("..data/org.yaml", root.join("org.yaml")).unwrap();
+    // A directory symlink inside the root is followed, never silently ignored.
+    std::os::unix::fs::symlink("..data/projects", root.join("projects")).unwrap();
+
+    let repo = Repository::load(&root).expect("the ConfigMap layout loads");
+    assert_eq!(repo.len(), 2, "one Organization and one Project, each once");
+    assert!(repo
+        .get(&ResourceId::new(
+            "joinedcontext.com",
+            "Project",
+            Some("org".to_owned()),
+            "doprava"
+        ))
+        .is_some());
+    assert!(
+        repo.misplaced().is_empty(),
+        "the path is the link's path, which is where the manifest belongs: {:?}",
+        repo.misplaced()
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// T-0285: a dangling link is skipped with a warning; it never fails the load and never
+/// counts as a file, and the manifests beside it still load.
+#[test]
+fn a_dangling_link_is_skipped_and_the_rest_loads() {
+    let root = unique_temp_dir("symlink-dangling");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("org.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata:
+  name: my-city
+  namespace: org
+spec:
+  domain: banskabystrica.sk
+  locales: ["sk"]
+  defaultLocale: sk
+"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(root.join("missing.yaml"), root.join("gone.yaml")).unwrap();
+
+    let repo = Repository::load(&root).expect("a dangling link does not fail the load");
+    assert_eq!(repo.len(), 1);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// T-0285, CC-08: a directory link whose target leaves the root is refused before the walk
+/// descends into it.
+#[test]
+fn a_directory_link_outside_the_root_is_refused() {
+    let root = unique_temp_dir("symlink-dir-root");
+    let outside = unique_temp_dir("symlink-dir-outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("x.yaml"), "").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("projects")).unwrap();
+
+    let err = Repository::load(&root).expect_err("a directory link out of the root must fail");
+    assert!(
+        matches!(err, LoadError::PathEscapesRepository { .. }),
+        "{err:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside);
+}

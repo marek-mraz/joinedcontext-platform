@@ -186,15 +186,27 @@ impl Repository {
         })?;
 
         let mut entries = Vec::new();
-        let mut it = WalkDir::new(root).follow_links(false).into_iter();
+        // Links are followed: a Kubernetes ConfigMap or Secret volume is nothing but symlinks
+        // into `..data/`, and a repository mounted that way has to load. Every link is still
+        // checked against the root below, so a link out of the tree is refused, not followed
+        // (CC-08); a loop is an error WalkDir reports.
+        let mut it = WalkDir::new(root).follow_links(true).into_iter();
 
         loop {
             let entry = match it.next() {
                 None => break,
                 Some(Ok(entry)) => entry,
                 Some(Err(err)) => {
+                    let path = err.path().unwrap_or(root).to_path_buf();
+                    // Following links, walkdir reports a dangling link as an error on the
+                    // link itself: nothing to read, so it is skipped with a warning.
+                    if path.is_symlink() {
+                        let rel = path.strip_prefix(root).unwrap_or(&path).display();
+                        tracing::warn!(path = %rel, %err, "unreadable link skipped");
+                        continue;
+                    }
                     return Err(LoadError::Io {
-                        path: err.path().unwrap_or(root).to_path_buf(),
+                        path,
                         source: err.into(),
                     });
                 }
@@ -202,6 +214,24 @@ impl Repository {
 
             if entry.depth() == 0 {
                 continue;
+            }
+
+            let rel_path = entry
+                .path()
+                .strip_prefix(root)
+                .unwrap_or(entry.path())
+                .to_path_buf();
+            // The containment check runs on the resolved target, link or not, before the walk
+            // descends: a link whose target leaves the root is refused, never followed (CC-08).
+            match entry.path().canonicalize() {
+                Ok(canonical) if canonical.starts_with(&canonical_root) => {}
+                Ok(_) => return Err(LoadError::PathEscapesRepository { path: rel_path }),
+                Err(source) => {
+                    return Err(LoadError::Io {
+                        path: rel_path,
+                        source,
+                    })
+                }
             }
 
             if entry.file_type().is_dir()
@@ -228,34 +258,15 @@ impl Repository {
                 .unwrap_or(entry.path())
                 .to_path_buf();
 
-            if entry.path_is_symlink() {
-                match entry.path().canonicalize() {
-                    Ok(canonical) => {
-                        if !canonical.starts_with(&canonical_root) {
-                            return Err(LoadError::PathEscapesRepository { path: rel_path });
-                        }
-                    }
-                    Err(_) => {
-                        return Err(LoadError::PathEscapesRepository { path: rel_path });
-                    }
+            // What the entry is comes from the target, never from the link itself (walkdir
+            // reports the target's type when links are followed): with the link's own type a
+            // ConfigMap-mounted repository loaded as empty, silently, and an empty endpoint
+            // table looks exactly like a routing bug (EP-03).
+            if !entry.file_type().is_file() {
+                if !entry.file_type().is_dir() {
+                    tracing::warn!(path = %rel_path.display(), "entry is neither a file nor a directory, skipped");
                 }
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-            } else {
-                let canonical = entry
-                    .path()
-                    .canonicalize()
-                    .map_err(|source| LoadError::Io {
-                        path: rel_path.clone(),
-                        source,
-                    })?;
-                if !canonical.starts_with(&canonical_root) {
-                    return Err(LoadError::PathEscapesRepository { path: rel_path });
-                }
-                if !entry.file_type().is_file() {
-                    continue;
-                }
+                continue;
             }
 
             let file_name = match entry.file_name().to_str() {
