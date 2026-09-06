@@ -6,6 +6,13 @@
       "additionalProperties": false,
       "description": "An `Authorization` header whose value is assembled from a secret (CC-06).",
       "properties": {
+        "header": {
+          "description": "The header the credential is written into, `Authorization` when absent.\n\nAn open-data feed that authenticates with an API key usually wants it in a header of its own; without this the only way to reach such a feed would be to write the key into `headers` as a value, which is what MF-35 exists to prevent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "headerRef": {
           "allOf": [
             {
@@ -15,7 +22,7 @@
           "description": "Where the credential comes from."
         },
         "scheme": {
-          "description": "The scheme written before the secret, `Bearer` when absent.",
+          "description": "The scheme written before the secret.\n\n`Bearer` when absent on `Authorization`, and nothing at all on any other header: a vendor key header takes the bare key and refuses a scheme in front of it. An explicit scheme always wins.",
           "type": [
             "string",
             "null"

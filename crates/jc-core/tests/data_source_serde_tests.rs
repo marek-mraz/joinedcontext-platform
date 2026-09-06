@@ -280,3 +280,46 @@ targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:ep-air
     let spec: PipelineSpec = serde_norway::from_str(&wrong_kind).expect("parses");
     assert!(spec.validate().is_err(), "the reference names its kind");
 }
+
+/// T-0321, MF-35: an API key in a vendor header is the common shape of an open-data feed. The
+/// header is named in the manifest and the credential still comes from the secret store, so the
+/// feed is reachable without writing the key into `headers` as a value.
+#[test]
+fn a_credential_may_name_the_header_it_is_written_into() {
+    let source = DataSource::from_yaml(HTTP).expect("parses");
+    let authorization = source.spec.http.as_ref().unwrap().authorization.as_ref();
+    let authorization = authorization.expect("the fixture authorizes");
+    assert_eq!(authorization.header_name(), "Authorization");
+    assert_eq!(authorization.scheme_prefix(), "Bearer");
+
+    let vendor = HTTP.replace(
+        "authorization: { scheme: Bearer, headerRef: { name: aq-api, key: token } }",
+        "authorization: { header: digitransit-subscription-key, headerRef: { name: aq-api, key: key } }",
+    );
+    let source = DataSource::from_yaml(&vendor).expect("parses");
+    source.validate().expect("a vendor header is a header");
+    let authorization = source.spec.http.as_ref().unwrap().authorization.clone();
+    let authorization = authorization.expect("the fixture authorizes");
+    assert_eq!(authorization.header_name(), "digitransit-subscription-key");
+    // A key header takes the bare key: `Bearer ` in front of it is what the feed refuses.
+    assert_eq!(authorization.scheme_prefix(), "");
+}
+
+/// A header name that is not a token could carry a second header or a value past the colon
+/// into the rendered config, so it is refused where every other name is (MF-35).
+#[test]
+fn a_header_name_that_is_not_a_token_is_refused() {
+    for bad in ["x-key: injected\r\nX-Other", "x key", "", "x-key:"] {
+        let yaml = HTTP.replace(
+            "authorization: { scheme: Bearer, headerRef: { name: aq-api, key: token } }",
+            &format!(
+                "authorization: {{ header: \"{bad}\", headerRef: {{ name: aq-api, key: key }} }}"
+            ),
+        );
+        let source = DataSource::from_yaml(&yaml).expect("parses");
+        assert!(
+            source.validate().is_err(),
+            "{bad:?} is not a header name a manifest may write"
+        );
+    }
+}

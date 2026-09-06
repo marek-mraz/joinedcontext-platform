@@ -186,14 +186,14 @@ fn http(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
         headers.insert(key(name), text(value));
     }
     if let Some(authorization) = &connection.authorization {
-        let scheme = authorization.scheme.as_deref().unwrap_or("Bearer");
-        headers.insert(
-            key("Authorization"),
-            text(&format!(
-                "{scheme} {}",
-                interpolation(context.source, &authorization.header_ref)
-            )),
-        );
+        // A vendor key header takes the bare key, so the scheme is a prefix only when there is
+        // one to write (MF-35, Architecture/08 §6).
+        let value = interpolation(context.source, &authorization.header_ref);
+        let value = match authorization.scheme_prefix() {
+            "" => value,
+            scheme => format!("{scheme} {value}"),
+        };
+        headers.insert(key(authorization.header_name()), text(&value));
     }
     if !headers.is_empty() {
         out.insert(key("headers"), Value::Mapping(headers));

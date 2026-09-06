@@ -224,3 +224,30 @@ fn a_bento_file_that_is_not_a_mapping_is_refused_by_name() {
         Err(RenderError::Parse(_))
     ));
 }
+
+/// T-0321, MF-35: a feed whose key goes in a vendor header renders that header with the bare
+/// interpolation. `Bearer ` in front of an API key is what such a feed refuses, so the scheme
+/// is written only where there is one.
+#[test]
+fn a_credential_that_names_its_header_renders_that_header_without_a_scheme() {
+    let vendor = HTTP.replace(
+        "authorization: { scheme: Bearer, headerRef: { name: aq-api, key: token } }",
+        "authorization: { header: digitransit-subscription-key, headerRef: { name: aq-api, key: key } }",
+    );
+    let input = rendered(&source(&vendor), "hsl-gbfs");
+    assert!(
+        input.contains("digitransit-subscription-key: ${DS_HSL_GBFS_KEY}"),
+        "the vendor header carries the bare interpolation:\n{input}"
+    );
+    assert!(
+        !input.contains("Authorization:"),
+        "nothing writes an Authorization header the manifest never asked for:\n{input}"
+    );
+
+    // An explicit scheme still wins, on any header.
+    let signed = HTTP.replace(
+        "authorization: { scheme: Bearer, headerRef: { name: aq-api, key: token } }",
+        "authorization: { header: x-api-key, scheme: Token, headerRef: { name: aq-api, key: key } }",
+    );
+    assert!(rendered(&source(&signed), "hsl-gbfs").contains("x-api-key: Token ${DS_HSL_GBFS_KEY}"));
+}

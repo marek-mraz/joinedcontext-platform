@@ -150,11 +150,38 @@ impl GtfsFeed {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Authorization {
-    /// The scheme written before the secret, `Bearer` when absent.
+    /// The header the credential is written into, `Authorization` when absent.
+    ///
+    /// An open-data feed that authenticates with an API key usually wants it in a header of
+    /// its own; without this the only way to reach such a feed would be to write the key into
+    /// `headers` as a value, which is what MF-35 exists to prevent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// The scheme written before the secret.
+    ///
+    /// `Bearer` when absent on `Authorization`, and nothing at all on any other header: a
+    /// vendor key header takes the bare key and refuses a scheme in front of it. An explicit
+    /// scheme always wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
     /// Where the credential comes from.
     pub header_ref: SecretRef,
+}
+
+impl Authorization {
+    /// The header this credential is written into.
+    pub fn header_name(&self) -> &str {
+        self.header.as_deref().unwrap_or("Authorization")
+    }
+
+    /// The scheme written in front of the credential, empty when the header takes a bare value.
+    pub fn scheme_prefix(&self) -> &str {
+        match &self.scheme {
+            Some(scheme) => scheme,
+            None if self.header_name().eq_ignore_ascii_case("Authorization") => "Bearer",
+            None => "",
+        }
+    }
 }
 
 /// How the runner trusts the feed's certificate.
@@ -253,6 +280,9 @@ impl DataSourceSpec {
             DataSourceType::Http => {
                 let http = self.http.as_ref().expect("checked above");
                 url(&http.url, HTTP_SCHEMES, "spec.http.url")?;
+                if let Some(authorization) = &http.authorization {
+                    header_name(authorization.header_name())?;
+                }
                 verb(http.verb.as_deref())
             }
             DataSourceType::WebSocket => url(
@@ -355,6 +385,24 @@ fn url(value: &str, schemes: &'static [&'static str], field: &'static str) -> Re
         value: value.to_owned(),
         reason: "the URL scheme is not one this connection type speaks",
     })
+}
+
+/// An RFC 9110 field name: a non-empty token, so a manifest cannot smuggle a second header or
+/// a value past the colon into the name.
+fn header_name(value: &str) -> Result<()> {
+    const TOKEN_PUNCTUATION: &str = "!#$%&'*+-.^_`|~";
+    let is_token = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || TOKEN_PUNCTUATION.contains(c));
+    match is_token {
+        true => Ok(()),
+        false => Err(Error::Name {
+            field: "spec.http.authorization.header",
+            value: value.to_owned(),
+            reason: "a header name is a token: letters, digits and !#$%&'*+-.^_`|~",
+        }),
+    }
 }
 
 fn verb(value: Option<&str>) -> Result<()> {
