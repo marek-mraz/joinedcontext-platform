@@ -133,7 +133,79 @@ async fn missing() -> Response<Body> {
     ProblemDetails::not_found().into_response()
 }
 
+/// The ETSI resource tree, with every refusal rendered the way an NGSI-LD client reads it.
 async fn ngsi_ld(
+    State(gateway): State<Arc<Gateway>>,
+    Path((slug, rest)): Path<(String, String)>,
+    request: Request,
+) -> Response<Body> {
+    as_ngsi_ld_error(ngsi_ld_inner(State(gateway), Path((slug, rest)), request).await).await
+}
+
+/// The error types of CIM 009 clause 5.5.2 the gateway's own refusals map to, by status.
+///
+/// The clause defines no type for 401, 403 (other than the two query-size ones), 415 or
+/// 502, so those keep the joinedcontext type URI: a made-up ETSI URI would be a lie a
+/// client could act on, and a joinedcontext one is at least documented.
+fn ngsi_ld_error_type(status: u16) -> Option<&'static str> {
+    Some(match status {
+        400 => "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
+        404 => "https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound",
+        409 => "https://uri.etsi.org/ngsi-ld/errors/AlreadyExists",
+        422 => "https://uri.etsi.org/ngsi-ld/errors/OperationNotSupported",
+        500 => "https://uri.etsi.org/ngsi-ld/errors/InternalError",
+        503 => "https://uri.etsi.org/ngsi-ld/errors/LdContextNotAvailable",
+        _ => return None,
+    })
+}
+
+/// Re-renders a problem document the way CIM 009 clause 5.5.3 wants it (T-0272).
+///
+/// The clause is explicit: errors on the NGSI-LD surface use `application/json`, not the
+/// RFC 7807 media type, and carry `type`, `title` and `detail`. The broker already answers
+/// that way; this makes the gateway's own refusals indistinguishable from it, so a client
+/// that keys on `type` learns the same thing whichever of the two refused. The Portal API
+/// keeps `application/problem+json`: a different surface, a different contract.
+async fn as_ngsi_ld_error(response: Response<Body>) -> Response<Body> {
+    let is_problem = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with(jc_core::PROBLEM_JSON));
+    if !is_problem {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024).await else {
+        return ProblemDetails::internal().into_response();
+    };
+    let Ok(mut problem) = serde_json::from_slice::<Value>(&bytes) else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+
+    if let Some(members) = problem.as_object_mut() {
+        if let Some(etsi) = ngsi_ld_error_type(parts.status.as_u16()) {
+            members.insert("type".to_owned(), Value::String(etsi.to_owned()));
+        }
+        // Clause 6.3.3: `detail` is one of the three terms an error carries; a refusal that
+        // names no reason still says so in a sentence rather than omitting the member.
+        if !members.contains_key("detail") {
+            let title = members.get("title").cloned().unwrap_or(Value::Null);
+            members.insert("detail".to_owned(), title);
+        }
+    }
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    match serde_json::to_vec(&problem) {
+        Ok(rendered) => proxy::with_body(parts, rendered),
+        Err(_) => Response::from_parts(parts, Body::from(bytes)),
+    }
+}
+
+async fn ngsi_ld_inner(
     State(gateway): State<Arc<Gateway>>,
     Path((slug, _rest)): Path<(String, String)>,
     mut request: Request,
@@ -219,6 +291,13 @@ async fn ngsi_ld(
             .into_response();
     };
 
+    // A payload the surface does not accept is refused for its media type, before anything
+    // tries to parse it (CIM 009 clauses 6.3.2 and 6.3.5). Stricter than forwarding, not
+    // looser: the write guard sees every body that gets past this line.
+    if operation.is_write() && !sent.is_empty() && !accepted_payload(&parts.headers) {
+        return unsupported_media_type().into_response();
+    }
+
     if operation.is_write() && !sent.is_empty() {
         if let Some(problem) =
             refuse_write(&sent, &path, &constraints, &endpoint, &gateway.org_domain)
@@ -243,6 +322,33 @@ async fn ngsi_ld(
     };
 
     project_answer(answer, operation, &constraints).await
+}
+
+/// The request payload media types the NGSI-LD surface accepts (CIM 009 clause 6.3.5).
+const PAYLOAD_TYPES: &[&str] = &[
+    "application/json",
+    "application/ld+json",
+    "application/merge-patch+json",
+];
+
+/// Whether the request names a payload media type the surface accepts, parameters aside.
+fn accepted_payload(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().unwrap_or_default().trim())
+        .is_some_and(|media| {
+            PAYLOAD_TYPES
+                .iter()
+                .any(|accepted| media.eq_ignore_ascii_case(accepted))
+        })
+}
+
+/// 415, the answer to a payload in a media type the surface does not take (clause 6.3.2).
+fn unsupported_media_type() -> ProblemDetails {
+    ProblemDetails::new(415, "unsupported-media-type", "Unsupported Media Type").with_detail(
+        "the request payload must be application/json, application/ld+json or application/merge-patch+json",
+    )
 }
 
 /// GW1 and R20: a refused read of one entity is indistinguishable from a miss; everything

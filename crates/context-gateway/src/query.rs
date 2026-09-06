@@ -132,13 +132,47 @@ fn joined(params: &[(String, String)], names: &[&str]) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(";"))
 }
 
+/// The parameters a compound geo or temporal filter is made of, and the only names a `;`
+/// may introduce inside one (CIM 009 clauses 4.10 and 4.11).
+const COMPOUND_MEMBERS: &[&str] = &[
+    "georel",
+    "geometry",
+    "coordinates",
+    "geoproperty",
+    "timerel",
+    "timeAt",
+    "endTimeAt",
+    "timeproperty",
+];
+
 /// Splits a `Policy`'s single-string form back into the wire parameters.
+///
+/// A `;` separates parameters only when a parameter name follows it. `georel` carries its
+/// own `;` inside its value — `near;maxDistance==2000` is one value, clause 4.10 — and
+/// splitting on every `;` sent `maxDistance` upstream as a query parameter of its own,
+/// which the broker rightly refused, so no `near` geoquery ever passed the gateway.
 fn split_compound(compound: &str) -> Vec<(String, String)> {
-    compound
-        .split(';')
-        .filter_map(|part| part.split_once('='))
-        .map(|(name, value)| (name.trim().to_owned(), value.trim().to_owned()))
-        .collect()
+    let mut out = Vec::new();
+    let mut rest = compound;
+    while !rest.is_empty() {
+        let end = rest
+            .match_indices(';')
+            .map(|(at, _)| at)
+            .find(|&at| {
+                let after = &rest[at + 1..];
+                COMPOUND_MEMBERS.iter().any(|name| {
+                    after
+                        .strip_prefix(name)
+                        .is_some_and(|tail| tail.starts_with('='))
+                })
+            })
+            .unwrap_or(rest.len());
+        if let Some((name, value)) = rest[..end].split_once('=') {
+            out.push((name.trim().to_owned(), value.trim().to_owned()));
+        }
+        rest = rest.get(end + 1..).unwrap_or_default();
+    }
+    out
 }
 
 fn split_list(value: Option<&str>) -> BTreeSet<String> {
@@ -276,6 +310,47 @@ mod tests {
             first(&sent, "danger"),
             None,
             "an unlisted parameter is dropped"
+        );
+    }
+
+    /// T-0271, CIM 009 clause 4.10: `georel=near;maxDistance==2000` is one value with a `;`
+    /// inside it. It has to leave as one `georel` parameter, or the broker refuses the
+    /// `maxDistance` it was never meant to see and no `near` query passes the gateway.
+    #[test]
+    fn a_near_georel_keeps_its_distance_inside_the_value() {
+        let params = parse(
+            "georel=near%3BmaxDistance%3D%3D2000&geometry=Point&coordinates=%5B19.15%2C48.74%5D",
+        );
+        assert_eq!(
+            requested(&params).geo_q.as_deref(),
+            Some("georel=near;maxDistance==2000;geometry=Point;coordinates=[19.15,48.74]")
+        );
+
+        let constraints = Constraints {
+            geo_q: requested(&params).geo_q,
+            ..Constraints::default()
+        };
+        let sent = parse(&upstream(&params, &constraints));
+        assert_eq!(first(&sent, "georel"), Some("near;maxDistance==2000"));
+        assert_eq!(first(&sent, "geometry"), Some("Point"));
+        assert_eq!(first(&sent, "coordinates"), Some("[19.15,48.74]"));
+        assert_eq!(
+            first(&sent, "maxDistance"),
+            None,
+            "the distance is part of georel, never a parameter of its own"
+        );
+        assert_eq!(sent.len(), 3);
+
+        // The grant's form is the same string and splits the same way.
+        assert_eq!(
+            split_compound("georel=within;geometry=Polygon;coordinates=[[[0,0],[1,0],[1,1],[0,0]]];timerel=after;timeAt=P-1D"),
+            vec![
+                ("georel".to_owned(), "within".to_owned()),
+                ("geometry".to_owned(), "Polygon".to_owned()),
+                ("coordinates".to_owned(), "[[[0,0],[1,0],[1,1],[0,0]]]".to_owned()),
+                ("timerel".to_owned(), "after".to_owned()),
+                ("timeAt".to_owned(), "P-1D".to_owned()),
+            ]
         );
     }
 }

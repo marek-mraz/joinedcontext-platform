@@ -331,10 +331,19 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     assert!(problem["type"]
         .as_str()
         .is_some_and(|t| t.ends_with("forbidden")));
+    // CIM 009 clause 6.3.3 carries `detail`; GW1 and R20 say it names no rule: not the
+    // policy, not its assignee, not the attribute that was outside the grant.
     assert!(
-        problem.get("detail").is_none(),
-        "the body must not name the rule"
+        problem["detail"].is_string(),
+        "clause 6.3.3: detail is carried"
     );
+    let rendered = body_text(&body);
+    for named in ["public-air", "did:web", "pm10", "assigner", "assignee"] {
+        assert!(
+            !rendered.contains(named),
+            "the body names the rule: {rendered}"
+        );
+    }
 
     // A write into another organization's URN space is a bad request (PF-10, PF-42).
     let mut foreign = station(None);
@@ -342,9 +351,12 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     let (status, body) = call(&app, post(PUBLIC_SLUG, "/entities", &foreign)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let problem: Value = serde_json::from_slice(&body).expect("problem+json");
-    assert!(problem["type"]
-        .as_str()
-        .is_some_and(|t| t.ends_with("urn-scheme")));
+    // CIM 009 clause 5.5.3: the type is an ETSI one, so a client that tells BadRequestData
+    // from InvalidRequest learns the same thing whether the gateway or the broker refused.
+    assert_eq!(
+        problem["type"],
+        json!("https://uri.etsi.org/ngsi-ld/errors/BadRequestData")
+    );
 
     // An endpoint the anonymous caller is not the audience of answers 401, not 403: it is
     // a missing identity, not a refused one (EP-14).
@@ -576,4 +588,8 @@ fn authorized(request: Request<Body>, token: &str) -> Request<Body> {
         axum::http::HeaderValue::from_str(&format!("Bearer {token}")).expect("a header value"),
     );
     Request::from_parts(parts, body)
+}
+
+fn body_text(body: &[u8]) -> String {
+    String::from_utf8_lossy(body).into_owned()
 }
