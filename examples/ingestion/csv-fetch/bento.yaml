@@ -18,7 +18,7 @@ pipeline:
         format: json_array
 
     - mapping: |
-        let id = "urn:ngsi-ld:OffStreetParking:banskabystrica.sk:doprava:%s".format(this.kod)
+        let id = "urn:ngsi-ld:OffStreetParking:banskabystrica.sk:doprava:" + this.kod.string()
         let total = this.kapacita.number()
         let free = this.volne.number()
         root = {

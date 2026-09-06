@@ -33,7 +33,7 @@ pipeline:
                     "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
                     "https://smartdatamodels.org/context.jsonld"
                   ],
-                  "id": "urn:ngsi-ld:Vehicle:banskabystrica.sk:doprava:%s".format($v.vehicle.id),
+                  "id": "urn:ngsi-ld:Vehicle:banskabystrica.sk:doprava:" + $v.vehicle.id.string(),
                   "type": "Vehicle",
                   "location": {
                     "type": "GeoProperty",
@@ -62,7 +62,7 @@ pipeline:
                   "fleetVehicleId": { "type": "Property", "value": $v.vehicle.id },
                   "refTrip": {
                     "type": "Relationship",
-                    "object": "urn:ngsi-ld:Trip:banskabystrica.sk:doprava:%s".format($v.trip.tripId),
+                    "object": "urn:ngsi-ld:Trip:banskabystrica.sk:doprava:" + $v.trip.tripId.string(),
                     "observedAt": $seen
                   }
                 }
@@ -78,7 +78,7 @@ pipeline:
                     "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
                     "https://smartdatamodels.org/context.jsonld"
                   ],
-                  "id": "urn:ngsi-ld:Trip:banskabystrica.sk:doprava:%s".format($u.trip.tripId),
+                  "id": "urn:ngsi-ld:Trip:banskabystrica.sk:doprava:" + $u.trip.tripId.string(),
                   "type": "Trip",
                   "route": { "type": "Property", "value": $u.trip.routeId },
                   "startTime": { "type": "Property", "value": $u.trip.startTime },
