@@ -7,6 +7,7 @@ pub mod apisix;
 pub mod bento;
 pub mod blueprints;
 pub mod commands;
+pub mod csr;
 pub mod diff;
 pub mod lanes;
 pub mod loader;

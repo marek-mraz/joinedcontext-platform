@@ -40,6 +40,7 @@ const ORDER: &[(u8, &str)] = &[
     (WAVE_EXPOSURE, "CkanInstance"),
     (WAVE_EXPOSURE, "Endpoint"),
     (WAVE_FEDERATION, "SharedSpaceReference"),
+    (WAVE_FEDERATION, "ContextSourceRegistration"),
     (WAVE_FEDERATION, "DataOffer"),
     (WAVE_FEDERATION, "DataAgreement"),
     // A DataSource converges before the pipelines that render their input from it.

@@ -3,6 +3,7 @@
 pub mod app;
 pub mod blueprint;
 pub mod ckan;
+pub mod csr;
 pub mod data_model;
 pub mod data_source;
 pub mod dataspace;
@@ -21,6 +22,7 @@ pub use app::{
 };
 pub use blueprint::{BlueprintSpec, BlueprintTemplate, RiskClass};
 pub use ckan::{CkanInstanceSpec, CkanPublication, DataStore, DataStoreRefresh, Publication};
+pub use csr::{ContextSourceRegistrationSpec, Federation, FederationIdentity, RegistrationMode};
 pub use data_model::{
     DataModelLifecycle, DataModelSource, DataModelSpec, GeneratedArtifacts, RemoteSource, SemVer,
 };

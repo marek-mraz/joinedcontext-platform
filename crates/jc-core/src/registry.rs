@@ -72,6 +72,7 @@ catalogue!(
     crate::kinds::ScopeDefinitionSpec,
     crate::kinds::EndpointSpec,
     crate::kinds::SharedSpaceReferenceSpec,
+    crate::kinds::ContextSourceRegistrationSpec,
     crate::kinds::ServiceAccountSpec,
     crate::kinds::PipelineSpec,
     crate::kinds::DataSourceSpec,
