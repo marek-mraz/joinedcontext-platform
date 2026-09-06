@@ -98,6 +98,13 @@ def compile_context(source: str | Path) -> dict[str, Any]:
             # A language map: {"sk": "…", "en": "…"}. A value type here would fight the map.
             entry.pop("@type", None)
             entry["@container"] = "@language"
+        elif entry.get("@type") == "@id":
+            # LinkML writes `@type: @id` for every slot whose range is a class, which is
+            # right for a Relationship and wrong for a JsonProperty: an imported `address`
+            # carries an inline object, and a context that calls it an IRI makes every
+            # consumer resolve the object as one and lose it. The `ngsi_ld_kind` annotation
+            # is what decides (DM-05), so an inherited `@id` typing is taken back off.
+            entry.pop("@type")
 
         # The kind itself stays out of the term definition: JSON-LD 1.1 rejects a term
         # definition carrying a key it does not know, and an invalid @context expands to

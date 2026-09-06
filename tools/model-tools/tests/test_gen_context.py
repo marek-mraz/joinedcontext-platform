@@ -37,6 +37,20 @@ def test_a_relationship_expands_to_an_iri_and_not_to_a_string(senzor):
     assert objects == [URIRef(device)], "a relationship nobody can follow is a string"
 
 
+def test_an_inline_object_is_not_typed_as_an_iri(senzor):
+    """LinkML types every class-ranged slot `@type: @id`, which is right for a Relationship
+    and wrong for a JsonProperty: an imported `address` carries the object inline, and a
+    consumer that reads the context as written resolves it as an IRI and loses the value.
+    The `ngsi_ld_kind` annotation decides (DM-05)."""
+    document = compile_context(senzor)
+    assert document["@context"]["address"].get("@type") != "@id"
+
+    address = {"streetAddress": "Namestie SNP 1"}
+    graph = _expanded(document, {"type": "AirQualityObserved", "address": address})
+    objects = list(graph.objects(None, URIRef(f"{BB}address")))
+    assert objects and not isinstance(objects[0], URIRef), "the object was read as a reference"
+
+
 def test_a_language_property_expands_to_one_literal_per_locale(senzor):
     document = compile_context(senzor)
     assert document["@context"]["label"]["@container"] == "@language"

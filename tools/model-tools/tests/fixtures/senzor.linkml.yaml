@@ -18,7 +18,16 @@ classes:
     class_uri: bb:AirQualityObserved
     description: One air quality reading of one sensor.
     is_a: Entity
-    slots: [temperature, reliability, refDevice, label]
+    slots: [temperature, reliability, refDevice, label, address]
+  Address:
+    class_uri: bb:Address
+    description: A nested object with a shape, carried inline and not by reference.
+    attributes:
+      streetAddress:
+        slot_uri: bb:streetAddress
+        range: string
+        annotations:
+          ngsi_ld_kind: Property
   FreeForm:
     class_uri: bb:FreeForm
     description: A class that still accepts attributes the model does not declare.
@@ -55,6 +64,12 @@ slots:
     description: What the sensor is called, per locale.
     annotations:
       ngsi_ld_kind: LanguageProperty
+  address:
+    slot_uri: bb:address
+    description: Where the sensor stands, as an inline object rather than a reference.
+    range: Address
+    annotations:
+      ngsi_ld_kind: JsonProperty
 
 enums:
   ReliabilityLevel:

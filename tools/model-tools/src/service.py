@@ -133,6 +133,7 @@ def import_sdm(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
             fetched["context"],
             fetched["example"],
             fetched["provenance"],
+            fetched.get("commons"),
         )
     except Exception as err:  # noqa: BLE001 - upstream being down is the wizard's message too
         return 200, {"generatorVersion": generator_version(), "errors": [str(err)]}

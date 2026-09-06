@@ -28,16 +28,22 @@ def sdm_schema() -> dict:
 
 
 @pytest.fixture
-def sdm_properties(sdm_schema) -> dict:
+def sdm_commons() -> dict:
+    """The shared commons document every catalogue schema `$ref`s."""
+    return json.loads((FIXTURES / "sdm-common-schema.json").read_text())
+
+
+@pytest.fixture
+def sdm_properties(sdm_schema, sdm_commons) -> dict:
     """The attributes the fixture schema declares, read the way the importer reads them.
 
     A catalogue schema is an `allOf` of the shared commons and one inline branch, so the
-    attributes are never at the top level. Tests compose them the same way the importer does,
-    rather than each knowing the layout.
+    attributes are never at the top level, and the commons branch is a `$ref`. Tests compose
+    them the same way the importer does, rather than each knowing the layout.
     """
-    from import_sdm import _composed
+    from import_sdm import _composed, resolve
 
-    return _composed(sdm_schema, "properties")
+    return _composed(resolve(sdm_schema, sdm_commons), "properties")
 
 
 @pytest.fixture

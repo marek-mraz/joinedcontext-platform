@@ -18,6 +18,7 @@ from import_sdm import (
     _get,
     convert,
     fetch,
+    resolve,
     resolve_commit,
     split_identifier,
 )
@@ -26,8 +27,8 @@ MODEL = "dataModel.Environment/AirQualityObserved"
 
 
 @pytest.fixture
-def imported(sdm_schema, sdm_context, sdm_provenance) -> dict:
-    return convert(MODEL, sdm_schema, sdm_context, None, sdm_provenance)
+def imported(sdm_schema, sdm_context, sdm_provenance, sdm_commons) -> dict:
+    return convert(MODEL, sdm_schema, sdm_context, None, sdm_provenance, sdm_commons)
 
 
 def test_the_identifier_is_split_into_repository_and_model():
@@ -182,3 +183,122 @@ def test_the_context_is_fetched_from_the_repository_root(monkeypatch, sdm_schema
     assert f"{base}/AirQualityObserved/schema.json" in asked
     assert f"{base}/AirQualityObserved/examples/example-normalized.jsonld" in asked
     assert fetched["provenance"]["path"] == "AirQualityObserved/schema.json"
+
+
+def test_the_shared_commons_are_imported(imported, sdm_commons):
+    """DM-11: `name`, `owner`, `dataProvider` and the rest of GSMA-Commons are what a
+    federation partner sends. A catalogue schema `$ref`s them instead of spelling them out,
+    so an import that reads only the inline branch drops every one of them."""
+    commons = set(sdm_commons["definitions"]["GSMA-Commons"]["properties"]) - {"id"}
+    assert commons <= set(imported["slots"]), sorted(commons - set(imported["slots"]))
+    assert imported["slots"]["dateCreated"]["range"] == "datetime"
+    assert imported["slots"]["owner"]["annotations"]["ngsi_ld_kind"] == "ListProperty"
+
+
+def test_the_commons_come_from_the_allowlisted_repository(monkeypatch, sdm_schema, sdm_context, sdm_commons):
+    """The catalogue writes that `$ref` against `smart-data-models.github.io`, a host the
+    DM-10 allowlist does not cover. The same document is in the `data-models` repository,
+    which it does, so the fix is a URL and not a second host in the allowlist."""
+    commit = "8c4f2b1a9e6d0f3c5b7a1d2e4f6a8b0c2d4e6f80"
+    asked: list[str] = []
+
+    class Answer:
+        status_code = 200
+
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        def json(self):
+            if "/commits/" in self.url:
+                return {"sha": commit}
+            if self.url.endswith("common-schema.json"):
+                return sdm_commons
+            if self.url.endswith("schema.json"):
+                return sdm_schema
+            return sdm_context
+
+    def get(url: str, timeout: int | None = None):
+        asked.append(url)
+        assert "github.io" not in url, url
+        return Answer(url)
+
+    monkeypatch.setattr("import_sdm.requests.get", get)
+    fetched = fetch(MODEL)
+
+    assert (
+        f"https://raw.githubusercontent.com/smart-data-models/data-models/{commit}/common-schema.json"
+        in asked
+    )
+    assert fetched["commons"] == sdm_commons
+    # DM-08 pins every fetched artifact, and the commons are a document of their own in a
+    # repository of their own: an import whose commons are whatever master held that
+    # afternoon is not reproducible.
+    assert commit in fetched["provenance"]["commons"]
+
+    document = convert(MODEL, sdm_schema, sdm_context, None, fetched["provenance"], sdm_commons)
+    assert commit in document["annotations"]["spec.source.commons"]
+
+
+def test_a_reference_to_anything_but_the_commons_is_left_alone():
+    """`resolve` is a resolver for one known document, not a general one. A `$ref` naming
+    something else stays a `$ref` — it must never turn into a fetch."""
+    elsewhere = {"$ref": "https://example.invalid/other.json#/definitions/Thing"}
+    assert resolve({"properties": {"x": elsewhere}}, {"definitions": {}}) == {
+        "properties": {"x": elsewhere}
+    }
+
+
+def test_a_reference_that_points_at_itself_terminates():
+    """A malformed commons document must cost an error message, never a hung import."""
+    commons = {
+        "definitions": {
+            "Loop": {"$ref": "https://x/data-models/common-schema.json#/definitions/Loop"}
+        }
+    }
+    resolved = resolve(
+        {"$ref": "https://x/data-models/common-schema.json#/definitions/Loop"}, commons
+    )
+    assert isinstance(resolved, dict)
+
+
+def test_a_nested_object_keeps_its_shape(imported):
+    """schema-automator names a range for a nested object and defines no class for it, so the
+    range had to be dropped and the shape went with it. The shape is in the JSON Schema."""
+    assert imported["slots"]["address"]["range"] == "Address"
+    address = imported["classes"]["Address"]
+    assert set(address["attributes"]) == {
+        "streetAddress", "addressLocality", "addressCountry", "areaServed",
+    }
+    assert address["attributes"]["streetAddress"]["required"] is True
+    # Nested inside nested: the object under `areaServed` becomes a class of its own.
+    assert address["attributes"]["areaServed"]["range"] == "AreaServed"
+    assert set(imported["classes"]["AreaServed"]["attributes"]) == {"name"}
+
+
+def test_a_nested_attribute_cites_its_upstream_like_every_other_term(imported):
+    """DM-04/DM-16: without the citation the generator refuses the model for minting
+    `streetAddress` under the catalogue's own namespace."""
+    attribute = imported["classes"]["Address"]["attributes"]["streetAddress"]
+    assert attribute["annotations"][UPSTREAM_ANNOTATION]
+    compile_context(yaml.safe_dump(imported))
+
+
+def test_a_reference_is_read_from_the_description_where_the_catalogue_writes_it(imported):
+    """DM-05: Smart Data Models annotates no kinds and its `@context` is a flat term-to-IRI
+    map, so a reference the context does not type imports as a Property — a `@context` binding
+    a consumer cannot follow. The catalogue writes the kind as the first word of the
+    description, and that is where it is read from."""
+    assert imported["slots"]["refWeatherObserved"]["annotations"]["ngsi_ld_kind"] == "Relationship"
+
+
+def test_a_description_with_no_kind_in_front_stays_a_property(imported):
+    """Reading a kind out of prose is a heuristic, so it fails safe: no recognised word and a
+    full stop, no change."""
+    assert imported["slots"]["airQualityLevel"]["annotations"]["ngsi_ld_kind"] == "Property"
+
+
+def test_the_shape_outranks_the_description(imported):
+    """The catalogue describes `address` as "Property." and it is an object. The description is
+    the only source that can be wrong, so it is consulted last and only where the shape says
+    nothing."""
+    assert imported["slots"]["address"]["annotations"]["ngsi_ld_kind"] == "JsonProperty"
