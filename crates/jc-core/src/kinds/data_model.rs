@@ -336,7 +336,7 @@ fn validate_relative_path(path: &str, field_name: &'static str) -> Result<()> {
     Ok(())
 }
 
-/// Desired specification of a [`DataModel`] resource (DM-01..DM-53).
+/// Desired specification of a [`DataModel`][crate::kinds::DataModel] resource (DM-01..DM-53).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DataModelSpec {

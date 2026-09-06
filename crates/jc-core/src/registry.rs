@@ -1,6 +1,6 @@
 //! Runtime catalogue of every manifest kind (MF-06, CC-12, Architecture/06 section 2).
 //!
-//! [`ResourceEnvelope`][crate::envelope::ResourceEnvelope] is generic over one kind, so a
+//! [`ResourceEnvelope`] is generic over one kind, so a
 //! kind-generic consumer — the Portal resource API serving `/api/v1/projects/{project}/{plural}`,
 //! `jcctl` resolving a file path, the import wizard — cannot reach the per-kind constants
 //! through the type system. This module is the reflective view over them: the same

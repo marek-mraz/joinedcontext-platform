@@ -183,7 +183,7 @@ impl MappingTest {
     }
 }
 
-/// Desired specification of a [`Mapping`][crate::kinds::mapping::Mapping] resource (DM-33..DM-42).
+/// Desired specification of a [`Mapping`][crate::kinds::Mapping] resource (DM-33..DM-42).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct MappingSpec {
