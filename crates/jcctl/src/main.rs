@@ -3,16 +3,18 @@
 //! `schema export` (MF-09, CC-12) and `validate` (CC-12, MF-09, TS-18) are implemented;
 //! `plan`, `apply`, `drift`, `export` and `serve` follow in the jcctl-plan-apply group.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl schema export [--out <dir>]";
+const USAGE: &str =
+    "usage: jcctl validate --repo-dir <path>\n       jcctl schema export [--out <dir>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
 
     match words.as_slice() {
+        ["validate", "--repo-dir", dir] => validate(Path::new(dir)),
         ["schema", "export", rest @ ..] => match out_dir(rest) {
             Some(out) => match export_schemas(&out) {
                 Ok(count) => {
@@ -33,6 +35,28 @@ fn main() -> ExitCode {
             eprintln!("{USAGE}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Reports every invalid manifest under `dir`, one per line (API/03 section 1).
+///
+/// Exit code 1 covers both an invalid manifest and an unreadable repository: API/03
+/// section 3 gives `validate` no separate code for a bad manifest.
+fn validate(dir: &Path) -> ExitCode {
+    let report = jcctl::commands::validate::run(dir);
+    for finding in &report.findings {
+        eprintln!("{finding}");
+    }
+    if report.is_valid() {
+        println!("{} manifests valid", report.checked);
+        ExitCode::SUCCESS
+    } else {
+        eprintln!(
+            "{} manifests valid, {} invalid",
+            report.checked,
+            report.findings.len()
+        );
+        ExitCode::FAILURE
     }
 }
 
