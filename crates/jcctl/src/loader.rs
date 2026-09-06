@@ -177,97 +177,110 @@ pub struct Repository {
     resources: BTreeMap<ResourceId, LoadedResource>,
 }
 
+/// Every regular file under `root`, in deterministic path order (CC-08).
+///
+/// Links are followed, but anything resolving outside the root is refused rather than read:
+/// both the manifest loader and the secret store walk the repository this way, so the
+/// containment rule has one implementation, not one per caller.
+pub(crate) fn walk_files(root: &Path) -> Result<Vec<walkdir::DirEntry>, LoadError> {
+    let canonical_root = root.canonicalize().map_err(|source| LoadError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+
+    let mut entries = Vec::new();
+    // Links are followed: a Kubernetes ConfigMap or Secret volume is nothing but symlinks
+    // into `..data/`, and a repository mounted that way has to load. Every link is still
+    // checked against the root below, so a link out of the tree is refused, not followed
+    // (CC-08); a loop is an error WalkDir reports.
+    let mut it = WalkDir::new(root).follow_links(true).into_iter();
+
+    loop {
+        let entry = match it.next() {
+            None => break,
+            Some(Ok(entry)) => entry,
+            Some(Err(err)) => {
+                let path = err.path().unwrap_or(root).to_path_buf();
+                // Following links, walkdir reports a dangling link as an error on the
+                // link itself: nothing to read, so it is skipped with a warning.
+                if path.is_symlink() {
+                    let rel = path.strip_prefix(root).unwrap_or(&path).display();
+                    tracing::warn!(path = %rel, %err, "unreadable link skipped");
+                    continue;
+                }
+                return Err(LoadError::Io {
+                    path,
+                    source: err.into(),
+                });
+            }
+        };
+
+        if entry.depth() == 0 {
+            continue;
+        }
+
+        let rel_path = entry
+            .path()
+            .strip_prefix(root)
+            .unwrap_or(entry.path())
+            .to_path_buf();
+        // The containment check runs on the resolved target, link or not, before the walk
+        // descends: a link whose target leaves the root is refused, never followed (CC-08).
+        match entry.path().canonicalize() {
+            Ok(canonical) if canonical.starts_with(&canonical_root) => {}
+            Ok(_) => return Err(LoadError::PathEscapesRepository { path: rel_path }),
+            Err(source) => {
+                return Err(LoadError::Io {
+                    path: rel_path,
+                    source,
+                })
+            }
+        }
+
+        if entry.file_type().is_dir()
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|s| s.starts_with('.'))
+        {
+            it.skip_current_dir();
+            continue;
+        }
+
+        entries.push(entry);
+    }
+
+    entries.sort_by(|a, b| a.path().cmp(b.path()));
+
+    // What an entry is comes from the target, never from the link itself (walkdir reports
+    // the target's type when links are followed): with the link's own type a
+    // ConfigMap-mounted repository loaded as empty, silently, and an empty endpoint table
+    // looks exactly like a routing bug (EP-03).
+    entries.retain(|entry| {
+        if entry.file_type().is_file() {
+            return true;
+        }
+        if !entry.file_type().is_dir() {
+            let rel = entry.path().strip_prefix(root).unwrap_or(entry.path());
+            tracing::warn!(path = %rel.display(), "entry is neither a file nor a directory, skipped");
+        }
+        false
+    });
+
+    Ok(entries)
+}
+
 impl Repository {
     /// Loads and indexes an organization repository from a directory path (CC-08, MF-06).
     pub fn load(root: &Path) -> Result<Self, LoadError> {
-        let canonical_root = root.canonicalize().map_err(|source| LoadError::Io {
-            path: root.to_path_buf(),
-            source,
-        })?;
-
-        let mut entries = Vec::new();
-        // Links are followed: a Kubernetes ConfigMap or Secret volume is nothing but symlinks
-        // into `..data/`, and a repository mounted that way has to load. Every link is still
-        // checked against the root below, so a link out of the tree is refused, not followed
-        // (CC-08); a loop is an error WalkDir reports.
-        let mut it = WalkDir::new(root).follow_links(true).into_iter();
-
-        loop {
-            let entry = match it.next() {
-                None => break,
-                Some(Ok(entry)) => entry,
-                Some(Err(err)) => {
-                    let path = err.path().unwrap_or(root).to_path_buf();
-                    // Following links, walkdir reports a dangling link as an error on the
-                    // link itself: nothing to read, so it is skipped with a warning.
-                    if path.is_symlink() {
-                        let rel = path.strip_prefix(root).unwrap_or(&path).display();
-                        tracing::warn!(path = %rel, %err, "unreadable link skipped");
-                        continue;
-                    }
-                    return Err(LoadError::Io {
-                        path,
-                        source: err.into(),
-                    });
-                }
-            };
-
-            if entry.depth() == 0 {
-                continue;
-            }
-
-            let rel_path = entry
-                .path()
-                .strip_prefix(root)
-                .unwrap_or(entry.path())
-                .to_path_buf();
-            // The containment check runs on the resolved target, link or not, before the walk
-            // descends: a link whose target leaves the root is refused, never followed (CC-08).
-            match entry.path().canonicalize() {
-                Ok(canonical) if canonical.starts_with(&canonical_root) => {}
-                Ok(_) => return Err(LoadError::PathEscapesRepository { path: rel_path }),
-                Err(source) => {
-                    return Err(LoadError::Io {
-                        path: rel_path,
-                        source,
-                    })
-                }
-            }
-
-            if entry.file_type().is_dir()
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|s| s.starts_with('.'))
-            {
-                it.skip_current_dir();
-                continue;
-            }
-
-            entries.push(entry);
-        }
-
-        entries.sort_by(|a, b| a.path().cmp(b.path()));
-
         let mut resources: BTreeMap<ResourceId, LoadedResource> = BTreeMap::new();
 
-        for entry in entries {
+        for entry in walk_files(root)? {
             let rel_path = entry
                 .path()
                 .strip_prefix(root)
                 .unwrap_or(entry.path())
                 .to_path_buf();
-
-            // What the entry is comes from the target, never from the link itself (walkdir
-            // reports the target's type when links are followed): with the link's own type a
-            // ConfigMap-mounted repository loaded as empty, silently, and an empty endpoint
-            // table looks exactly like a routing bug (EP-03).
-            if !entry.file_type().is_file() {
-                if !entry.file_type().is_dir() {
-                    tracing::warn!(path = %rel_path.display(), "entry is neither a file nor a directory, skipped");
-                }
-                continue;
-            }
 
             let file_name = match entry.file_name().to_str() {
                 Some(s) => s,
@@ -278,7 +291,12 @@ impl Repository {
                 continue;
             }
 
-            if file_name.ends_with(".linkml.yaml") || file_name == "bento.yaml" {
+            // An encrypted secrets file is YAML but not a manifest, and its values are
+            // decrypted by the secret store, not read here (CC-06).
+            if file_name.ends_with(".linkml.yaml")
+                || file_name == "bento.yaml"
+                || crate::secrets::sops::is_encrypted_file(file_name)
+            {
                 continue;
             }
 
