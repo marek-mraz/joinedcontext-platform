@@ -1,6 +1,7 @@
 //! The manifest kinds of `apiVersion: joinedcontext.com/v1alpha1` (MF-01, Architecture/06).
 
 pub mod app;
+pub mod blueprint;
 pub mod data_model;
 pub mod dataspace;
 pub mod endpoint;
@@ -16,6 +17,7 @@ pub use app::{
     AppBuild, AppClass, AppLifecycle, AppLimits, AppSource, AppSpec, AppVisibility,
     ContentSecurityPolicy, DataNeed, GeoConstraint, GeoWithin, GitSource, TemporalConstraint,
 };
+pub use blueprint::{BlueprintSpec, BlueprintTemplate, RiskClass};
 pub use data_model::{
     DataModelLifecycle, DataModelSource, DataModelSpec, GeneratedArtifacts, RemoteSource, SemVer,
 };
@@ -73,6 +75,8 @@ pub type DataModel = crate::envelope::ResourceEnvelope<DataModelSpec>;
 pub type Mapping = crate::envelope::ResourceEnvelope<MappingSpec>;
 /// `kind: App` as a whole manifest.
 pub type App = crate::envelope::ResourceEnvelope<AppSpec>;
+/// `kind: Blueprint` as a whole manifest.
+pub type Blueprint = crate::envelope::ResourceEnvelope<BlueprintSpec>;
 /// `kind: SyncSource` as a whole manifest.
 pub type SyncSource = crate::envelope::ResourceEnvelope<SyncSourceSpec>;
 /// `kind: Bundle` as a whole manifest.

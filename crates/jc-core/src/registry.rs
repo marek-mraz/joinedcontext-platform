@@ -75,6 +75,7 @@ catalogue!(
     crate::kinds::ServiceAccountSpec,
     crate::kinds::PipelineSpec,
     crate::kinds::AppSpec,
+    crate::kinds::BlueprintSpec,
     crate::kinds::DataSpaceParticipantSpec,
     crate::kinds::DataOfferSpec,
     crate::kinds::DataAgreementSpec,
