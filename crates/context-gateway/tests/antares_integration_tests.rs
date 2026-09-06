@@ -24,6 +24,8 @@ const ORG: &str = "banskabystrica.sk";
 const PUBLIC_SLUG: &str = "k4y7pq2mzt6vhx3nbwrs5cjd8f";
 const MEMBERS_SLUG: &str = "t9x2wqvn7mzc4hd6bkp3rjs5ga";
 const WRITER_SLUG: &str = "p3mq8vzt5xkc2nhw7brj4gd6sy";
+/// The dev seed's shape: a public grant that narrows nothing (T-0379).
+const OPEN_SLUG: &str = "mluyob4nz52lok3ssk7pgn5vwt";
 const STATION: &str =
     "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:station-integration-01";
 
@@ -149,10 +151,26 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
     }
 }
 
+/// The grant the dev cluster actually seeds: anonymous read, and nothing narrowed. It is the
+/// case `public_grant` never covered, because that one names a type and so always selected.
+fn unrestricted_grant() -> PolicySpec {
+    serde_norway::from_str(
+        r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+operations: [queryEntity, retrieveEntity]
+"#,
+    )
+    .expect("the grant parses")
+}
+
 fn gateway(broker_url: String) -> axum::Router {
+    let mut open = endpoint(OPEN_SLUG, Audience::Public);
+    open.policies = vec![unrestricted_grant()];
     let gateway = Gateway::new(Broker::new(broker_url), Box::new(PolicyPdp), ORG).serve([
         endpoint(PUBLIC_SLUG, Audience::Public),
         endpoint(MEMBERS_SLUG, Audience::Organization),
+        open,
     ]);
     router(std::sync::Arc::new(gateway))
 }
@@ -284,6 +302,35 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     assert_eq!(features[0]["geometry"]["type"], json!("Point"));
     assert_eq!(features[0]["properties"]["pm10"], json!(34.2));
     assert!(features[0]["properties"].get("operatorPhone").is_none());
+
+    // T-0379: the same bare download on the endpoint whose grant narrows nothing, which is
+    // the shape the dev cluster seeds. Against a real broker this was a 400 under CIM 009
+    // 5.7.2, because the gateway forwarded a query that selected nothing at all.
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri(format!("/api/endpoint/{OPEN_SLUG}/file.geojson"))
+            .body(Body::empty())
+            .expect("a request"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "bare geojson on an unrestricted grant: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let collection: Value = serde_json::from_slice(&body).expect("a FeatureCollection");
+    assert_eq!(
+        collection["features"].as_array().map(Vec::len),
+        Some(1),
+        "the dataset is the selection: {collection}"
+    );
+
+    // The NGSI-LD surface of the very same endpoint keeps the broker's refusal, so the
+    // download's convenience is not a hole in the API's conformance.
+    let (status, _) = call(&app, get(OPEN_SLUG, "/entities")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // DEMO step 4: what the anonymous caller may do, from the same PDP (EP-55).
     let (status, body) = call(

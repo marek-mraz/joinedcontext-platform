@@ -78,9 +78,31 @@ pub fn passthrough(params: &[(String, String)]) -> String {
     render(&kept(params))
 }
 
+/// Whether the query the gateway is about to send selects anything at all.
+///
+/// CIM 009 5.7.2 refuses a query carrying none of `type`, `attrs`, `q` and `georel`, and a
+/// broker that answers one anyway is being more permissive than the specification. None of
+/// those four names is in [`PASSTHROUGH`], so the caller's own parameters can never supply a
+/// selector: after the PDP has spoken, the constraint set is the whole answer.
+pub fn selects(constraints: &Constraints) -> bool {
+    !constraints.types.is_empty()
+        || !constraints.attrs.is_empty()
+        || constraints.q.is_some()
+        || constraints.geo_q.is_some()
+}
+
 /// The query string sent upstream: the caller's harmless parameters, plus the constraint
 /// set, which replaces every dimension a grant can narrow (GW2).
-pub fn upstream(params: &[(String, String)], constraints: &Constraints) -> String {
+///
+/// `fallback_types` is the selector of last resort, used only when nothing above selects.
+/// A file download passes the types the space holds so that asking for the dataset is itself
+/// the selection (EP-09); the NGSI-LD surface passes nothing, because an unselected query
+/// there is a `400` and should stay one.
+pub fn upstream(
+    params: &[(String, String)],
+    constraints: &Constraints,
+    fallback_types: &[String],
+) -> String {
     let mut out = kept(params);
 
     if !constraints.types.is_empty() {
@@ -101,6 +123,10 @@ pub fn upstream(params: &[(String, String)], constraints: &Constraints) -> Strin
         .flatten()
     {
         out.extend(split_compound(compound));
+    }
+
+    if !selects(constraints) && !fallback_types.is_empty() {
+        out.push(("type".to_owned(), fallback_types.join(",")));
     }
 
     render(&out)
@@ -268,7 +294,7 @@ mod tests {
             geo_q: request.geo_q.clone(),
             ..Constraints::default()
         };
-        let upstream = parse(&upstream(&params, &constraints));
+        let upstream = parse(&upstream(&params, &constraints, &[]));
         assert_eq!(first(&upstream, "georel"), Some("within"));
         assert_eq!(first(&upstream, "geometry"), Some("Polygon"));
         assert_eq!(first(&upstream, "coordinates"), Some("[[0,0]]"));
@@ -296,7 +322,7 @@ mod tests {
             granted_scopes: Some("/geo/SK/BB".to_owned()),
             ..Constraints::default()
         };
-        let sent = parse(&upstream(&params, &constraints));
+        let sent = parse(&upstream(&params, &constraints, &[]));
 
         assert_eq!(first(&sent, "type"), Some("AirQualityObserved"));
         assert_eq!(first(&sent, "attrs"), Some("pm10"));
@@ -330,7 +356,7 @@ mod tests {
             geo_q: requested(&params).geo_q,
             ..Constraints::default()
         };
-        let sent = parse(&upstream(&params, &constraints));
+        let sent = parse(&upstream(&params, &constraints, &[]));
         assert_eq!(first(&sent, "georel"), Some("near;maxDistance==2000"));
         assert_eq!(first(&sent, "geometry"), Some("Point"));
         assert_eq!(first(&sent, "coordinates"), Some("[19.15,48.74]"));

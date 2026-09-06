@@ -6,6 +6,7 @@
 
 #![allow(dead_code)]
 
+use axum::response::IntoResponse;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use context_gateway::auth::token::Verifier;
@@ -128,6 +129,11 @@ pub struct Hop {
 ///
 /// `pages` are answered in order and the last one repeats, so a test can hand back one
 /// full page followed by a short one and watch the gateway page through them (EP-44).
+///
+/// It refuses an unselected entity query the way CIM 009 5.7.2 requires, with the same
+/// problem document a real broker sends. A stub that answered one would be more permissive
+/// than the thing it stands in for, and a gateway bug that only a real broker catches is a
+/// bug that reaches the cluster (T-0379).
 pub struct BrokerStub {
     /// The base URL to build a [`context_gateway::proxy::Broker`] from.
     pub url: String,
@@ -150,10 +156,12 @@ impl BrokerStub {
                 );
                 async move {
                     let headers = request.headers().clone();
+                    let path = request.uri().path().to_owned();
+                    let query = request.uri().query().unwrap_or_default().to_owned();
                     let mut hops = recorder.lock().expect("no poisoned lock");
                     hops.push(Hop {
-                        path: request.uri().path().to_owned(),
-                        query: request.uri().query().unwrap_or_default().to_owned(),
+                        path: path.clone(),
+                        query: query.clone(),
                         tenant: headers
                             .get("NGSILD-Tenant")
                             .and_then(|value| value.to_str().ok())
@@ -165,8 +173,30 @@ impl BrokerStub {
                             .any(|value| value.as_bytes() == b"somebody-elses-space"),
                     });
                     let pages = served.lock().expect("no poisoned lock");
-                    let index = (hops.len() - 1).min(pages.len().saturating_sub(1));
+
+                    // `GET /types` is how a caller asks what a tenant holds; the answer is
+                    // built from the entities this stub was given, so it never disagrees
+                    // with them.
+                    if path == "/ngsi-ld/v1/types" {
+                        return entity_type_list(&pages).into_response();
+                    }
+
+                    // CIM 009 5.7.2: a query over the collection must select something.
+                    if path == "/ngsi-ld/v1/entities" && !selects(&query) {
+                        return unselected_query().into_response();
+                    }
+
+                    // Only a page request consumes a page, so a `/types` hop on the way in
+                    // does not shift what the next entity query gets back.
+                    let served_pages = hops
+                        .iter()
+                        .filter(|hop| hop.path == "/ngsi-ld/v1/entities")
+                        .count();
+                    let index = served_pages
+                        .saturating_sub(1)
+                        .min(pages.len().saturating_sub(1));
                     axum::Json(pages.get(index).cloned().unwrap_or_else(|| json!([])))
+                        .into_response()
                 }
             },
         ));
@@ -188,4 +218,40 @@ impl BrokerStub {
     pub fn hops(&self) -> Vec<Hop> {
         self.hops.lock().expect("no poisoned lock").clone()
     }
+}
+
+/// Whether a query selects at all (CIM 009 5.7.2).
+fn selects(query: &str) -> bool {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .any(|(name, value)| !value.is_empty() && matches!(name, "type" | "attrs" | "q" | "georel"))
+}
+
+/// The refusal a conformant broker sends for an unselected query, word for word.
+fn unselected_query() -> (axum::http::StatusCode, axum::Json<Value>) {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        axum::Json(json!({
+            "type": "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
+            "title": "BadRequestData",
+            "status": 400,
+            "detail": "query needs at least one of type, attrs, q, georel (5.7.2)",
+        })),
+    )
+}
+
+/// The `EntityTypeList` of everything the stub was handed, deduplicated and ordered.
+fn entity_type_list(pages: &[Value]) -> axum::Json<Value> {
+    let types: std::collections::BTreeSet<&str> = pages
+        .iter()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|entity| entity["type"].as_str())
+        .collect();
+    axum::Json(json!({
+        "id": "urn:ngsi-ld:EntityTypeList:stub",
+        "type": "EntityTypeList",
+        "typeList": types.into_iter().collect::<Vec<_>>(),
+    }))
 }

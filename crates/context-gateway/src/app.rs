@@ -440,7 +440,7 @@ async fn serve_ngsi_ld(
     let sent_query = if operation.is_write() {
         query::passthrough(&params)
     } else {
-        query::upstream(&params, &constraints)
+        query::upstream(&params, &constraints, &[])
     };
     let target = format!("/ngsi-ld/v1{path}?{sent_query}");
     let answer = match gateway
@@ -1110,10 +1110,54 @@ async fn file_geojson(
     }
 }
 
+/// Every entity type the pinned tenant holds, as the broker's own `EntityTypeList` reports it.
+///
+/// Used only as the selector of last resort for a file download. It can only narrow: the PDP
+/// has already decided what this caller may see, and every constraint it produced is applied
+/// either upstream or on the way back. An empty list means an empty space, which is an empty
+/// file rather than an error.
+async fn dataset_types(
+    gateway: &Gateway,
+    headers: &HeaderMap,
+) -> Result<Vec<String>, Box<Response<Body>>> {
+    let answer = gateway
+        .broker
+        .send(
+            axum::http::Method::GET,
+            "/ngsi-ld/v1/types",
+            headers.clone(),
+            Body::empty(),
+        )
+        .await
+        .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
+
+    let (parts, body) = answer.into_parts();
+    if !parts.status.is_success() {
+        return Err(Box::new(Response::from_parts(parts, body)));
+    }
+    let bytes = axum::body::to_bytes(body, MAX_BODY)
+        .await
+        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
+    let list: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
+
+    Ok(list["typeList"]
+        .as_array()
+        .map(|types| {
+            types
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Queries the entities behind an endpoint through the PDP, projected (GW11, R9).
 ///
-/// This is the read half of the NGSI-LD handler, reused by every representation that is a
-/// different rendering of the same query.
+/// This is the read half of the `file.*` downloads, shared by every representation that is a
+/// different rendering of the same dataset. The NGSI-LD surface does not come through here:
+/// it forwards the caller's own query, and an unselected one stays the `400` the
+/// specification asks for.
 async fn query_entities(
     gateway: &Gateway,
     endpoint: &Endpoint,
@@ -1136,9 +1180,24 @@ async fn query_entities(
     tenancy::pin_tenant(request, &endpoint.space)
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
 
+    // Nothing the caller sent and nothing the grants added selects anything, and a query that
+    // selects nothing is a `400` upstream (CIM 009 5.7.2). A download is not a query though:
+    // asking for `file.geojson` is asking for the dataset, so the selector is every type the
+    // space holds (EP-09, EP-07). It can only narrow, never widen: the PDP has already spoken.
+    let fallback = if query::selects(&constraints) {
+        Vec::new()
+    } else {
+        let types = dataset_types(gateway, request.headers()).await?;
+        // A space holding nothing is an empty file, not a `400` and not a second broker call.
+        if types.is_empty() {
+            return Ok((Value::Array(Vec::new()), constraints.restricted));
+        }
+        types
+    };
+
     let target = format!(
         "/ngsi-ld/v1/entities?{}",
-        query::upstream(params, &constraints)
+        query::upstream(params, &constraints, &fallback)
     );
     let answer = gateway
         .broker
@@ -1431,7 +1490,17 @@ async fn paged_entities(
         .filter(|(name, _)| name != "limit" && name != "offset")
         .cloned()
         .collect();
-    let narrowed = query::upstream(&windowless, &constraints);
+    // The same selector of last resort as `query_entities`: a download names a dataset.
+    let fallback = if query::selects(&constraints) {
+        Vec::new()
+    } else {
+        let types = dataset_types(gateway, request.headers()).await?;
+        if types.is_empty() {
+            return Ok((Value::Array(Vec::new()), constraints.restricted));
+        }
+        types
+    };
+    let narrowed = query::upstream(&windowless, &constraints, &fallback);
     let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
 
     let mut collected: Vec<Value> = Vec::new();
