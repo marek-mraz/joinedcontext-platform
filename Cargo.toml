@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/jc-core", "crates/context-gateway", "crates/jcctl"]
+
+[workspace.package]
+edition = "2021"
+license = "EUPL-1.2"
+repository = "https://github.com/marek-mraz/joinedcontext-platform"
+
+[workspace.dependencies]
+# pinned per crate when the first code lands; see docs_new/Architecture/14-components.md
