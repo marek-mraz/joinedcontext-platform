@@ -20,6 +20,32 @@ pub trait Kind:
     const PLURAL: &'static str;
     /// Target scope (Organization or Project).
     const SCOPE: Scope;
+
+    /// Kind-specific validation of the spec against its own metadata.
+    ///
+    /// The default checks nothing; every kind that has invariants of its own implements it,
+    /// so [`ResourceEnvelope::validate`] is the single entry point for `jcctl`, the Portal
+    /// API and CI.
+    fn validate_spec(&self, _meta: &ObjectMeta) -> Result<()> {
+        Ok(())
+    }
+
+    /// Path of this resource inside the organization repository (MF-06, Architecture/06 section 1).
+    ///
+    /// The default is `projects/{namespace}/{plural}/{name}.yaml` for project-scoped kinds
+    /// and `{plural}/{name}.yaml` for organization-scoped ones; kinds whose directory nests
+    /// deeper (ContextSpace, Endpoint, Policy) override it.
+    fn repo_path(&self, meta: &ObjectMeta) -> String {
+        let name = &meta.name;
+        let plural = Self::PLURAL;
+        match Self::SCOPE {
+            Scope::Organization => format!("{plural}/{name}.yaml"),
+            Scope::Project => {
+                let ns = meta.namespace.as_deref().unwrap_or_default();
+                format!("projects/{ns}/{plural}/{name}.yaml")
+            }
+        }
+    }
 }
 
 /// Target scope hierarchy of a manifest kind.
@@ -80,6 +106,33 @@ pub fn de_kind<'de, S: Kind, D: serde::Deserializer<'de>>(
     Ok(s)
 }
 
+/// Validates a list of ISO 639-1 locales and the fallback that must be among them (PF-25).
+pub fn validate_locales(locales: &[String], default_locale: &str) -> Result<()> {
+    if locales.is_empty() {
+        return Err(Error::Name {
+            field: "locales",
+            value: String::new(),
+            reason: "locales list must not be empty",
+        });
+    }
+    names::validate_locale(default_locale)?;
+    let mut seen = std::collections::BTreeSet::new();
+    for loc in locales {
+        names::validate_locale(loc)?;
+        if !seen.insert(loc.as_str()) {
+            return Err(Error::Name {
+                field: "locales",
+                value: loc.clone(),
+                reason: "duplicate locale in locales list",
+            });
+        }
+    }
+    if !seen.contains(default_locale) {
+        return Err(Error::MissingFallbackLocale(default_locale.to_string()));
+    }
+    Ok(())
+}
+
 impl<S: Kind> ResourceEnvelope<S> {
     /// Creates a new resource envelope with default [`API_VERSION`] and [`Kind::KIND`].
     pub fn new(metadata: ObjectMeta, spec: S) -> Self {
@@ -127,7 +180,7 @@ impl<S: Kind> ResourceEnvelope<S> {
             }
         }
 
-        Ok(())
+        self.spec.validate_spec(&self.metadata)
     }
 
     /// Strips status in-place (MF-04).
@@ -144,15 +197,7 @@ impl<S: Kind> ResourceEnvelope<S> {
     /// Derives the canonical repository file path for this resource (MF-06).
     pub fn resource_path(&self) -> Result<String> {
         self.validate()?;
-        let name = &self.metadata.name;
-        let plural = S::PLURAL;
-        match S::SCOPE {
-            Scope::Organization => Ok(format!("{plural}/{name}.yaml")),
-            Scope::Project => {
-                let ns = self.metadata.namespace.as_deref().unwrap_or_default();
-                Ok(format!("projects/{ns}/{plural}/{name}.yaml"))
-            }
-        }
+        Ok(self.spec.repo_path(&self.metadata))
     }
 
     /// Serializes envelope to YAML, unconditionally stripping server status (MF-04).

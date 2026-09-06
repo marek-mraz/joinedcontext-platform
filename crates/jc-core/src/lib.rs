@@ -11,13 +11,18 @@
 pub mod envelope;
 pub mod error;
 pub mod i18n;
+pub mod kinds;
 pub mod names;
 pub mod urn;
 
 pub use envelope::{
-    annotations, de_api_version, de_kind, Condition, Kind, ObjectMeta, Phase, Ref,
-    ResourceEnvelope, Scope, SecretRef, Status, TypedRef, API_VERSION,
+    annotations, de_api_version, de_kind, validate_locales, Condition, Kind, ObjectMeta, Phase,
+    Ref, ResourceEnvelope, Scope, SecretRef, Status, TypedRef, API_VERSION,
 };
 pub use error::{Error, Result, UrnError};
 pub use i18n::MultiLanguageMap;
+pub use kinds::{
+    Contact, ContactRole, ContextSpace, ContextSpaceSpec, Organization, OrganizationSpec, Project,
+    ProjectSpec, Quotas,
+};
 pub use urn::Urn;
