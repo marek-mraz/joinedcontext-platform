@@ -33,7 +33,7 @@ pipeline:
                     "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
                     "https://smartdatamodels.org/context.jsonld"
                   ],
-                  "id": "urn:ngsi-ld:Vehicle:banskabystrica.sk:doprava:" + $v.vehicle.id.string(),
+                  "id": "urn:ngsi-ld:Vehicle:hel.fi:transport:" + $v.vehicle.id.string(),
                   "type": "Vehicle",
                   "location": {
                     "type": "GeoProperty",
@@ -62,7 +62,7 @@ pipeline:
                   "fleetVehicleId": { "type": "Property", "value": $v.vehicle.id },
                   "refTrip": {
                     "type": "Relationship",
-                    "object": "urn:ngsi-ld:Trip:banskabystrica.sk:doprava:" + $v.trip.tripId.string(),
+                    "object": "urn:ngsi-ld:Trip:hel.fi:transport:" + $v.trip.tripId.string(),
                     "observedAt": $seen
                   }
                 }
@@ -78,7 +78,7 @@ pipeline:
                     "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
                     "https://smartdatamodels.org/context.jsonld"
                   ],
-                  "id": "urn:ngsi-ld:Trip:banskabystrica.sk:doprava:" + $u.trip.tripId.string(),
+                  "id": "urn:ngsi-ld:Trip:hel.fi:transport:" + $u.trip.tripId.string(),
                   "type": "Trip",
                   "route": { "type": "Property", "value": $u.trip.routeId },
                   "startTime": { "type": "Property", "value": $u.trip.startTime },
@@ -105,7 +105,7 @@ pipeline:
 
 output:
   http_client:
-    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-mhd/ngsi-ld/v1/entityOperations/upsert
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-transit/ngsi-ld/v1/entityOperations/upsert
     verb: POST
     headers:
       Content-Type: application/ld+json

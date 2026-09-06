@@ -14,7 +14,7 @@ tests:
                 "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
                 "https://smartdatamodels.org/context.jsonld"
               ],
-              "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:station-1",
+              "id": "urn:ngsi-ld:AirQualityObserved:hel.fi:air-quality:station-1",
               "type": "AirQualityObserved",
               "dateObserved": { "type": "Property", "value": "2026-09-06T21:00:00Z" },
               "location": {

@@ -11,6 +11,10 @@ repository (PL-01), plus the `DataSource` the pipeline reads from (MF-35).
 | `csv-fetch/` | a CSV export over HTTPS | 45 s, CronJob every minute | `OffStreetParking` |
 | `gtfs-rt/` | a GTFS-realtime protobuf feed | 15 s, resident | `Vehicle` and `Trip` |
 
+All four write into the documented demonstration instance: organization `hel.fi`, project
+`helsinki`, spaces `air-quality` and `transport`. The MQTT and the GTFS-realtime recipe are two
+views of the same fleet and mint the same ids, so a deployment runs one of them, not both.
+
 ## What is in a folder
 
 `datasource.yaml` is the connection: where the data comes from and, when the feed needs one,

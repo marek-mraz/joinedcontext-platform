@@ -4,14 +4,14 @@ apiVersion: joinedcontext.com/v1alpha1
 kind: DataSource
 metadata:
   name: aq-opendata
-  namespace: bb-ovzdusie
+  namespace: helsinki
   title:
-    sk: Otvorené dáta o ovzduší
+    fi: Ilmanlaadun avoin data
     en: Air quality open data
 spec:
   type: http
   http:
-    url: https://opendata.banskabystrica.sk/api/v1/air-quality/stations.json
+    url: https://opendata.hel.fi/api/v1/air-quality/stations.json
     verb: GET
     headers:
       Accept: application/json

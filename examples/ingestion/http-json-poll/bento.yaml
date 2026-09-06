@@ -18,7 +18,7 @@ pipeline:
         root = if this.exists("measurements") { this } else { deleted() }
 
     - mapping: |
-        let id = "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:" + this.station_id.string()
+        let id = "urn:ngsi-ld:AirQualityObserved:hel.fi:air-quality:" + this.station_id.string()
         root = {
           "@context": [
             "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",

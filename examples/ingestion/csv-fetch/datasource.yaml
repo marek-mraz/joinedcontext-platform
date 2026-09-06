@@ -3,15 +3,15 @@
 apiVersion: joinedcontext.com/v1alpha1
 kind: DataSource
 metadata:
-  name: parkoviska-csv
-  namespace: bb-doprava
+  name: parking-csv
+  namespace: helsinki
   title:
-    sk: Obsadenosť parkovísk (CSV)
+    fi: Pysäköinnin käyttöaste (CSV)
     en: Car park occupancy (CSV)
 spec:
   type: http
   http:
-    url: https://opendata.banskabystrica.sk/parkoviska/obsadenost.csv
+    url: https://opendata.hel.fi/parking/occupancy.csv
     verb: GET
     headers:
       Accept: text/csv

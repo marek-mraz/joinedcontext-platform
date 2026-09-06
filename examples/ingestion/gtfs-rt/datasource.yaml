@@ -4,13 +4,13 @@
 apiVersion: joinedcontext.com/v1alpha1
 kind: DataSource
 metadata:
-  name: mhd-gtfs-rt
-  namespace: bb-doprava
+  name: hsl-gtfs-rt
+  namespace: helsinki
   title:
-    sk: MHD Banská Bystrica, GTFS-realtime
-    en: Banská Bystrica public transport, GTFS-realtime
+    fi: HSL, GTFS-realtime
+    en: Helsinki region public transport, GTFS-realtime
 spec:
   type: gtfs-rt
   gtfsRt:
-    url: https://gtfs.banskabystrica.sk/realtime/vehiclepositions.pb
+    url: https://gtfs.hsl.fi/realtime/vehiclepositions.pb
     feed: vehiclePositions

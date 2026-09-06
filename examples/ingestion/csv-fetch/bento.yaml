@@ -18,9 +18,9 @@ pipeline:
         format: json_array
 
     - mapping: |
-        let id = "urn:ngsi-ld:OffStreetParking:banskabystrica.sk:doprava:" + this.kod.string()
-        let total = this.kapacita.number()
-        let free = this.volne.number()
+        let id = "urn:ngsi-ld:OffStreetParking:hel.fi:transport:" + this.id.string()
+        let total = this.capacity.number()
+        let free = this.free.number()
         root = {
           "@context": [
             "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
@@ -28,7 +28,7 @@ pipeline:
           ],
           "id": $id,
           "type": "OffStreetParking",
-          "name": { "type": "Property", "value": this.nazov },
+          "name": { "type": "Property", "value": this.name },
           "location": {
             "type": "GeoProperty",
             "value": { "type": "Point", "coordinates": [ this.lon.number(), this.lat.number() ] }
@@ -37,12 +37,12 @@ pipeline:
           "availableSpotNumber": {
             "type": "Property",
             "value": $free,
-            "observedAt": this.cas
+            "observedAt": this.at
           },
           "occupancy": {
             "type": "Property",
             "value": if $total > 0 { ((($total - $free) / $total) * 100).round() / 100 } else { 0 },
-            "observedAt": this.cas
+            "observedAt": this.at
           }
         }
 

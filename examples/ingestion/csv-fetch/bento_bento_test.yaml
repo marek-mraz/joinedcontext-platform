@@ -7,9 +7,9 @@ tests:
     target_processors: '/pipeline/processors'
     input_batch:
       - content: |
-          kod,nazov,lat,lon,kapacita,volne,cas
-          p-namestie,Námestie SNP,48.7359,19.1462,120,30,2026-09-06T21:00:00Z
-          p-europa,Europa SC,48.7275,19.1338,400,400,2026-09-06T21:00:00Z
+          id,name,lat,lon,capacity,free,at
+          p-kamppi,Kamppi,60.1690,24.9310,120,30,2026-09-06T21:00:00Z
+          p-kluuvi,Kluuvi,60.1700,24.9450,400,400,2026-09-06T21:00:00Z
     output_batches:
       - - json_equals: [
             {
@@ -17,12 +17,12 @@ tests:
                 "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
                 "https://smartdatamodels.org/context.jsonld"
               ],
-              "id": "urn:ngsi-ld:OffStreetParking:banskabystrica.sk:doprava:p-namestie",
+              "id": "urn:ngsi-ld:OffStreetParking:hel.fi:transport:p-kamppi",
               "type": "OffStreetParking",
-              "name": { "type": "Property", "value": "Námestie SNP" },
+              "name": { "type": "Property", "value": "Kamppi" },
               "location": {
                 "type": "GeoProperty",
-                "value": { "type": "Point", "coordinates": [19.1462, 48.7359] }
+                "value": { "type": "Point", "coordinates": [24.9310, 60.1690] }
               },
               "totalSpotNumber": { "type": "Property", "value": 120 },
               "availableSpotNumber": {
@@ -37,12 +37,12 @@ tests:
                 "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
                 "https://smartdatamodels.org/context.jsonld"
               ],
-              "id": "urn:ngsi-ld:OffStreetParking:banskabystrica.sk:doprava:p-europa",
+              "id": "urn:ngsi-ld:OffStreetParking:hel.fi:transport:p-kluuvi",
               "type": "OffStreetParking",
-              "name": { "type": "Property", "value": "Europa SC" },
+              "name": { "type": "Property", "value": "Kluuvi" },
               "location": {
                 "type": "GeoProperty",
-                "value": { "type": "Point", "coordinates": [19.1338, 48.7275] }
+                "value": { "type": "Point", "coordinates": [24.9450, 60.1700] }
               },
               "totalSpotNumber": { "type": "Property", "value": 400 },
               "availableSpotNumber": {
@@ -58,5 +58,5 @@ tests:
     target_processors: '/pipeline/processors'
     input_batch:
       - content: |
-          kod,nazov,lat,lon,kapacita,volne,cas
+          id,name,lat,lon,capacity,free,at
     output_batches: []

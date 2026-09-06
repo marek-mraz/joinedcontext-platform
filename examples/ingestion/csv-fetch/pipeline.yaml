@@ -3,16 +3,16 @@
 apiVersion: joinedcontext.com/v1alpha1
 kind: Pipeline
 metadata:
-  name: parkoviska-csv-fetch
-  namespace: bb-doprava
+  name: parking-csv-fetch
+  namespace: helsinki
   title:
     en: Car park occupancy from a CSV export
 spec:
   class: auto
   period: 45s
   source:
-    dataSourceRef: { kind: DataSource, name: parkoviska-csv }
-  targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:doprava:ep-parking
+    dataSourceRef: { kind: DataSource, name: parking-csv }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:transport:ep-parking
   quotas:
     maxMemoryMb: 64
     cpuMillicores: 100

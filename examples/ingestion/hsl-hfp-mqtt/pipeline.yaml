@@ -3,14 +3,14 @@ apiVersion: joinedcontext.com/v1alpha1
 kind: Pipeline
 metadata:
   name: hsl-hfp-vehicles
-  namespace: hsl-transport
+  namespace: helsinki
   title:
     en: HSL buses into the transport space
 spec:
   class: auto
   source:
     dataSourceRef: { kind: DataSource, name: hsl-hfp }
-  targetEndpoint: urn:ngsi-ld:Endpoint:hsl.fi:transport:ep-vehicles
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:transport:ep-vehicles
   quotas:
     maxMemoryMb: 128
     cpuMillicores: 250

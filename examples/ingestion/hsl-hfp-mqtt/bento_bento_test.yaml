@@ -17,7 +17,7 @@ tests:
                 "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
                 "https://smartdatamodels.org/context.jsonld"
               ],
-              "id": "urn:ngsi-ld:Vehicle:hsl.fi:transport:22-787",
+              "id": "urn:ngsi-ld:Vehicle:hel.fi:transport:22-787",
               "type": "Vehicle",
               "location": {
                 "type": "GeoProperty",
@@ -108,5 +108,5 @@ tests:
       - - bloblang: |
             this.length() == 30 &&
               this.map_each(e -> e.id).unique().length() == 30 &&
-              this.any(e -> e.id == "urn:ngsi-ld:Vehicle:hsl.fi:transport:22-701") &&
-              this.all(e -> e.id.re_match("^urn:ngsi-ld:Vehicle:hsl\\.fi:transport:[0-9]+-[0-9]+$"))
+              this.any(e -> e.id == "urn:ngsi-ld:Vehicle:hel.fi:transport:22-701") &&
+              this.all(e -> e.id.re_match("^urn:ngsi-ld:Vehicle:hel\\.fi:transport:[0-9]+-[0-9]+$"))

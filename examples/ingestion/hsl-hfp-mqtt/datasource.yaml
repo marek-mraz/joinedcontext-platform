@@ -4,7 +4,7 @@ apiVersion: joinedcontext.com/v1alpha1
 kind: DataSource
 metadata:
   name: hsl-hfp
-  namespace: hsl-transport
+  namespace: helsinki
   title:
     en: HSL high-frequency positioning
     fi: HSL:n suurtaajuinen paikannus

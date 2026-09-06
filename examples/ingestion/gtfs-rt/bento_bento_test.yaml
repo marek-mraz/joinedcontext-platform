@@ -17,7 +17,7 @@ tests:
                 "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
                 "https://smartdatamodels.org/context.jsonld"
               ],
-              "id": "urn:ngsi-ld:Vehicle:banskabystrica.sk:doprava:22-701",
+              "id": "urn:ngsi-ld:Vehicle:hel.fi:transport:22-701",
               "type": "Vehicle",
               "location": {
                 "type": "GeoProperty",
@@ -36,7 +36,7 @@ tests:
               "fleetVehicleId": { "type": "Property", "value": "22-701" },
               "refTrip": {
                 "type": "Relationship",
-                "object": "urn:ngsi-ld:Trip:banskabystrica.sk:doprava:t-1",
+                "object": "urn:ngsi-ld:Trip:hel.fi:transport:t-1",
                 "observedAt": "2026-09-06T21:00:00Z"
               }
             },
@@ -45,7 +45,7 @@ tests:
                 "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
                 "https://smartdatamodels.org/context.jsonld"
               ],
-              "id": "urn:ngsi-ld:Trip:banskabystrica.sk:doprava:t-1",
+              "id": "urn:ngsi-ld:Trip:hel.fi:transport:t-1",
               "type": "Trip",
               "route": { "type": "Property", "value": "r-2550" },
               "startTime": { "type": "Property", "value": "07:45:00" },

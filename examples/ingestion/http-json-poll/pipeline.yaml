@@ -4,7 +4,7 @@ apiVersion: joinedcontext.com/v1alpha1
 kind: Pipeline
 metadata:
   name: aq-http-poll
-  namespace: bb-ovzdusie
+  namespace: helsinki
   title:
     en: Air quality by polling the open-data API
 spec:
@@ -12,7 +12,7 @@ spec:
   period: 5m
   source:
     dataSourceRef: { kind: DataSource, name: aq-opendata }
-  targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:ep-air
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:air-quality:ep-air
   quotas:
     maxMemoryMb: 64
     cpuMillicores: 100
