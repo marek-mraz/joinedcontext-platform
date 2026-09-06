@@ -82,8 +82,8 @@ pub fn passthrough(params: &[(String, String)]) -> String {
 ///
 /// CIM 009 5.7.2 refuses a query carrying none of `type`, `attrs`, `q` and `georel`, and a
 /// broker that answers one anyway is being more permissive than the specification. None of
-/// those four names is in [`PASSTHROUGH`], so the caller's own parameters can never supply a
-/// selector: after the PDP has spoken, the constraint set is the whole answer.
+/// those four names is in the passthrough allow list, so the caller's own parameters can
+/// never supply a selector: after the PDP has spoken, the constraint set is the whole answer.
 pub fn selects(constraints: &Constraints) -> bool {
     !constraints.types.is_empty()
         || !constraints.attrs.is_empty()
