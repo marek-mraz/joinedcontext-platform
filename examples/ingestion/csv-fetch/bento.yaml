@@ -18,7 +18,10 @@ pipeline:
         format: json_array
 
     - mapping: |
-        let id = "urn:ngsi-ld:OffStreetParking:hel.fi:transport:" + this.id.string()
+        # The domain comes from the reconciler, never from this file (PF-44).
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "OffStreetParking", $domain, "transport", this.id.string())
         let total = this.capacity.number()
         let free = this.free.number()
         root = {

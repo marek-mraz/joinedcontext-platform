@@ -18,6 +18,17 @@ const GTFS_IMPORT_PATH: &str = "/opt/bento/gtfs-realtime";
 /// The protobuf message every GTFS-realtime feed is wrapped in.
 const GTFS_MESSAGE: &str = "transit_realtime.FeedMessage";
 
+/// The environment variable a mapping mints the `{orgDomain}` of an id from (PF-44, PF-42).
+///
+/// The reconciler resolves it from the project's Organization and injects it into the runner,
+/// and a mapping reads it with `env("JC_ORG_DOMAIN")`. It is an environment variable rather
+/// than a Bloblang helper because a pipeline file has to stay native Bento that runs unmodified
+/// under `bento lint` and `bento test` (PL-03), and stock Bloblang has no function registry a
+/// reconciler could extend without a plugin and a forked runner binary. The gain is the same:
+/// a pipeline never writes a domain of its own, so a project moved to another Organization
+/// mints its ids under the new one without an edit (Architecture/03 §3).
+pub const ORG_DOMAIN_VAR: &str = "JC_ORG_DOMAIN";
+
 /// What the renderer needs beyond the connection itself.
 #[derive(Debug, Clone, Copy)]
 pub struct InputContext<'a> {

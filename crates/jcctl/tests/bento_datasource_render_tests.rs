@@ -110,7 +110,8 @@ spec:
 const AUTHORED: &str = r#"pipeline:
   processors:
   - mapping: |
-      root.id = jc_urn("AirQualityObserved", "ovzdusie", this.station)
+      let domain = env("JC_ORG_DOMAIN")
+      root.id = "urn:ngsi-ld:%v:%v:%v:%v".format("AirQualityObserved", $domain, "ovzdusie", this.station)
 output:
   http_client:
     url: ${JC_ENDPOINT_URL}/entityOperations/upsert
@@ -152,7 +153,10 @@ fn no_rendered_input_contains_a_credential() {
 fn the_authors_processors_and_output_come_back_untouched() {
     let out = render(AUTHORED, &source(MQTT), &context("mqtt-mesto")).expect("renders");
     assert!(out.starts_with("input:"), "the input comes first:\n{out}");
-    assert!(out.contains("jc_urn(\"AirQualityObserved\", \"ovzdusie\", this.station)"));
+    assert!(out.contains("env(\"JC_ORG_DOMAIN\")"));
+    assert!(out.contains(
+        "\"urn:ngsi-ld:%v:%v:%v:%v\".format(\"AirQualityObserved\", $domain, \"ovzdusie\", this.station)"
+    ));
     assert!(out.contains("${JC_ENDPOINT_URL}/entityOperations/upsert"));
 
     // The author's half survives a round trip through the renderer unchanged.

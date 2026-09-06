@@ -5,6 +5,10 @@
 tests:
   - name: one CSV file becomes one entity per row
     target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden ids below are the ones that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
     input_batch:
       - content: |
           id,name,lat,lon,capacity,free,at

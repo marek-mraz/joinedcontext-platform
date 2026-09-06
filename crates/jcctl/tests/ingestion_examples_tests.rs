@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use jc_core::envelope::ResourceEnvelope;
 use jc_core::kinds::{DataSourceSpec, DataSourceType, Pipeline};
-use jcctl::bento::{render, InputContext};
+use jcctl::bento::{render, InputContext, ORG_DOMAIN_VAR};
 use jcctl::pipelines::{runtime_of, Runtime};
 
 /// Every example folder, and the connection type it is there to demonstrate.
@@ -224,5 +224,54 @@ fn no_example_carries_a_credential() {
                 );
             }
         }
+    }
+}
+
+/// The demonstration instance every example writes into (`examples/ingestion/README.md`).
+const DEMO_ORG_DOMAIN: &str = "hel.fi";
+
+/// PF-44, PF-42: the `{orgDomain}` of a minted id reaches the mapping through the runner's
+/// environment, which the reconciler fills from the project's Organization.
+///
+/// Bloblang cannot be executed from here, so what is checked is the chain that makes the claim
+/// true: no `bento.yaml` writes a domain, every id it mints is the four-segment template with
+/// the domain slot read from the environment, and the golden tests that assert a whole URN put
+/// the domain there themselves. A pipeline moved to another Organization therefore mints under
+/// the new domain without an edit, and one that tried to write a foreign domain would be
+/// refused by the gateway at admission (Architecture/03 §3).
+#[test]
+fn the_domain_of_a_minted_id_comes_from_the_environment_and_never_from_the_pipeline_file() {
+    let injection = format!("env(\"{ORG_DOMAIN_VAR}\")");
+    for (example, _) in EXAMPLES {
+        let bento = read(example, "bento.yaml");
+        assert!(
+            !bento.contains(DEMO_ORG_DOMAIN),
+            "{example}/bento.yaml writes the organization domain into the pipeline (PF-44)"
+        );
+        assert!(
+            bento.contains(&injection),
+            "{example}/bento.yaml mints an id without {injection} (PF-44)"
+        );
+        for line in bento.lines().filter(|line| line.contains("urn:ngsi-ld:")) {
+            assert!(
+                line.contains("urn:ngsi-ld:%v:%v:%v:%v"),
+                "{example}/bento.yaml builds an id from a prefix instead of the four-segment \
+                 template, so a segment could be missing or swapped: {line}"
+            );
+        }
+
+        let golden = read(example, "bento_bento_test.yaml");
+        assert!(
+            golden.contains(&format!("{ORG_DOMAIN_VAR}: {DEMO_ORG_DOMAIN}")),
+            "{example}/bento_bento_test.yaml expects ids it never supplies a domain for"
+        );
+        assert!(
+            golden.contains(&format!("urn:ngsi-ld:Vehicle:{DEMO_ORG_DOMAIN}:"))
+                || golden.contains(&format!(
+                    "urn:ngsi-ld:AirQualityObserved:{DEMO_ORG_DOMAIN}:"
+                ))
+                || golden.contains(&format!("urn:ngsi-ld:OffStreetParking:{DEMO_ORG_DOMAIN}:")),
+            "{example}/bento_bento_test.yaml asserts no minted id at all"
+        );
     }
 }

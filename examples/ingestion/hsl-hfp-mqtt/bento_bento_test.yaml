@@ -8,6 +8,10 @@
 tests:
   - name: one journey frame becomes one Vehicle entity
     target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden ids below are the ones that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
     input_batch:
       - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":787,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
     output_batches:
@@ -68,6 +72,10 @@ tests:
   # carries. The last frame repeats a bus that was already admitted, and it stays admitted.
   - name: a stream of thirty-four buses yields exactly the first thirty
     target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden ids below are the ones that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
     input_batch:
       - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":701,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
       - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":702,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'

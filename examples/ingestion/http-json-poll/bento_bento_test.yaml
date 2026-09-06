@@ -5,6 +5,10 @@
 tests:
   - name: one response page becomes one entity per station that has a reading
     target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden ids below are the ones that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
     input_batch:
       - content: '[{"station_id":"station-1","measured_at":"2026-09-06T21:00:00Z","lat":48.7359,"lon":19.1462,"measurements":{"pm10":18.4,"pm25":11.2}},{"station_id":"station-2","measured_at":"2026-09-06T21:00:00Z","lat":48.74,"lon":19.15}]'
     output_batches:

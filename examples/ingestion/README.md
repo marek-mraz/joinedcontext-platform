@@ -31,6 +31,13 @@ what you read here is the transformation and the write, which is the part a revi
 about. For a `gtfs-rt` source the reconciler also prepends the protobuf decoder, which is why
 the GTFS mapping starts from plain JSON.
 
+Every example mints its entity ids from `env("JC_ORG_DOMAIN")` rather than from a domain written
+into the file. The reconciler resolves that variable from the project's Organization and injects it
+into the runner, so a project moved to another Organization mints under the new domain without an
+edit and no pipeline can claim a domain that is not its own (PF-44, PF-42). The golden tests supply
+the variable themselves: every case that asserts a whole URN carries an `environment:` block with
+the demonstration instance's `hel.fi`.
+
 ## Running the tests
 
 ```bash

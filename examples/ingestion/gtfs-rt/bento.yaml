@@ -27,13 +27,15 @@ pipeline:
           processors:
             - mapping: |
                 let v = this.vehicle
+                # The domain comes from the reconciler, never from this file (PF-44).
+                let domain = env("JC_ORG_DOMAIN")
                 let seen = $v.timestamp.number().ts_format("2006-01-02T15:04:05Z", "UTC")
                 root = {
                   "@context": [
                     "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
                     "https://smartdatamodels.org/context.jsonld"
                   ],
-                  "id": "urn:ngsi-ld:Vehicle:hel.fi:transport:" + $v.vehicle.id.string(),
+                  "id": "urn:ngsi-ld:%v:%v:%v:%v".format("Vehicle", $domain, "transport", $v.vehicle.id.string()),
                   "type": "Vehicle",
                   "location": {
                     "type": "GeoProperty",
@@ -62,7 +64,7 @@ pipeline:
                   "fleetVehicleId": { "type": "Property", "value": $v.vehicle.id },
                   "refTrip": {
                     "type": "Relationship",
-                    "object": "urn:ngsi-ld:Trip:hel.fi:transport:" + $v.trip.tripId.string(),
+                    "object": "urn:ngsi-ld:%v:%v:%v:%v".format("Trip", $domain, "transport", $v.trip.tripId.string()),
                     "observedAt": $seen
                   }
                 }
@@ -71,6 +73,7 @@ pipeline:
           processors:
             - mapping: |
                 let u = this.tripUpdate
+                let domain = env("JC_ORG_DOMAIN")
                 let seen = $u.timestamp.number().ts_format("2006-01-02T15:04:05Z", "UTC")
                 let next = $u.stopTimeUpdate.index(0).catch({})
                 root = {
@@ -78,7 +81,7 @@ pipeline:
                     "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
                     "https://smartdatamodels.org/context.jsonld"
                   ],
-                  "id": "urn:ngsi-ld:Trip:hel.fi:transport:" + $u.trip.tripId.string(),
+                  "id": "urn:ngsi-ld:%v:%v:%v:%v".format("Trip", $domain, "transport", $u.trip.tripId.string()),
                   "type": "Trip",
                   "route": { "type": "Property", "value": $u.trip.routeId },
                   "startTime": { "type": "Property", "value": $u.trip.startTime },

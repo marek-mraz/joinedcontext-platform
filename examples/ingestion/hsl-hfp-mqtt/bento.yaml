@@ -45,10 +45,11 @@ pipeline:
     - mapping: |
         root = if meta("slot").number() > 30 { deleted() } else { this }
 
-    # The entity. `jc_urn(type, space, localId)` is the reconciler-injected helper (PF-44);
-    # the example mints the same string inline so that it also runs under `bento test`.
+    # The entity. The reconciler injects `JC_ORG_DOMAIN` into the runner from the project's
+    # Organization, so the domain is never written into a pipeline file (PF-44, PF-42).
     - mapping: |
-        let id = "urn:ngsi-ld:Vehicle:hel.fi:transport:" + "%v-%v".format(this.oper, this.veh)
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format("Vehicle", $domain, "transport", meta("vehicle"))
         root = {
           "@context": [
             "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",

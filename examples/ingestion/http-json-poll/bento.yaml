@@ -18,7 +18,10 @@ pipeline:
         root = if this.exists("measurements") { this } else { deleted() }
 
     - mapping: |
-        let id = "urn:ngsi-ld:AirQualityObserved:hel.fi:air-quality:" + this.station_id.string()
+        # The domain comes from the reconciler, never from this file (PF-44).
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "AirQualityObserved", $domain, "air-quality", this.station_id.string())
         root = {
           "@context": [
             "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
