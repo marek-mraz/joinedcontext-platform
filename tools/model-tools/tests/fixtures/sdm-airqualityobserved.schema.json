@@ -4,15 +4,59 @@
   "title": "Smart Data Models - Air Quality Observed",
   "description": "An observation of air quality conditions at a certain place and time.",
   "type": "object",
-  "properties": {
-    "id": {"type": "string", "format": "uri"},
-    "type": {"type": "string", "enum": ["AirQualityObserved"]},
-    "dateObserved": {"type": "string", "format": "date-time", "description": "The date and time of this observation in ISO8601 UTC format."},
-    "temperature": {"type": "number", "description": "Temperature of the item."},
-    "airQualityIndex": {"type": "number", "description": "Air quality index."},
-    "reliability": {"type": "string", "enum": ["low", "medium", "high"], "description": "Reliability of the observation."},
-    "location": {"type": "object", "description": "Geojson reference to the item."},
-    "refDevice": {"type": "string", "format": "uri", "description": "A reference to the device which captured this observation."}
-  },
-  "required": ["id", "type", "dateObserved"]
+  "allOf": [
+    {
+      "$ref": "https://smart-data-models.github.io/data-models/common-schema.json#/definitions/GSMA-Commons"
+    },
+    {
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uri"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "AirQualityObserved"
+          ]
+        },
+        "dateObserved": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The date and time of this observation in ISO8601 UTC format."
+        },
+        "temperature": {
+          "type": "number",
+          "description": "Temperature of the item."
+        },
+        "airQualityIndex": {
+          "type": "number",
+          "description": "Air quality index."
+        },
+        "reliability": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "description": "Reliability of the observation."
+        },
+        "location": {
+          "type": "object",
+          "description": "Geojson reference to the item."
+        },
+        "refDevice": {
+          "type": "string",
+          "format": "uri",
+          "description": "A reference to the device which captured this observation."
+        }
+      }
+    }
+  ],
+  "required": [
+    "id",
+    "type",
+    "dateObserved"
+  ]
 }

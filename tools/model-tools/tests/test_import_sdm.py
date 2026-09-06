@@ -84,10 +84,10 @@ def test_provenance_records_repository_path_and_commit(imported, sdm_provenance)
     assert annotations["spec.source.commit"] == sdm_provenance["commit"]
 
 
-def test_every_upstream_slot_is_kept(imported, sdm_schema):
+def test_every_upstream_slot_is_kept(imported, sdm_properties):
     """DM-11: a slot nobody uses locally is still what a federation partner sends."""
     core = {"id", "type", "location"}
-    upstream = set(sdm_schema["properties"]) - core
+    upstream = set(sdm_properties) - core
     assert upstream <= set(imported["slots"])
 
 
@@ -130,9 +130,9 @@ def test_enums_are_carried_and_dead_ones_dropped(imported):
     assert "type_options" not in imported["enums"]
 
 
-def test_descriptions_survive_the_conversion(imported, sdm_schema):
+def test_descriptions_survive_the_conversion(imported, sdm_properties):
     assert imported["slots"]["temperature"]["description"] == (
-        sdm_schema["properties"]["temperature"]["description"]
+        sdm_properties["temperature"]["description"]
     )
 
 
@@ -147,3 +147,38 @@ def test_the_imported_model_is_a_model_the_generators_accept(imported):
     assert properties["refDevice"]["x-ngsi-ld-kind"] == "Relationship"
     # Inherited from ngsi-ld-core rather than redeclared.
     assert properties["location"]["x-ngsi-ld-kind"] == "GeoProperty"
+
+
+def test_the_context_is_fetched_from_the_repository_root(monkeypatch, sdm_schema, sdm_context):
+    """The catalogue publishes one `@context` per subject repository, at its root; the schema
+    and the example are per model. Fetching the context under the model answers 404 for every
+    model in the catalogue, which is why the layout is pinned by a test and not by memory."""
+    commit = "8c4f2b1a9e6d0f3c5b7a1d2e4f6a8b0c2d4e6f80"
+    asked: list[str] = []
+
+    class Answer:
+        status_code = 200
+
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        def json(self):
+            if "/commits/" in self.url:
+                return {"sha": commit}
+            if self.url.endswith("schema.json"):
+                return sdm_schema
+            return sdm_context
+
+    def get(url: str, timeout: int | None = None):
+        asked.append(url)
+        assert not url.endswith("AirQualityObserved/context.jsonld"), url
+        return Answer(url)
+
+    monkeypatch.setattr("import_sdm.requests.get", get)
+    fetched = fetch(MODEL)
+
+    base = f"https://raw.githubusercontent.com/smart-data-models/dataModel.Environment/{commit}"
+    assert f"{base}/context.jsonld" in asked
+    assert f"{base}/AirQualityObserved/schema.json" in asked
+    assert f"{base}/AirQualityObserved/examples/example-normalized.jsonld" in asked
+    assert fetched["provenance"]["path"] == "AirQualityObserved/schema.json"

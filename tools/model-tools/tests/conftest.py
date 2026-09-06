@@ -28,6 +28,19 @@ def sdm_schema() -> dict:
 
 
 @pytest.fixture
+def sdm_properties(sdm_schema) -> dict:
+    """The attributes the fixture schema declares, read the way the importer reads them.
+
+    A catalogue schema is an `allOf` of the shared commons and one inline branch, so the
+    attributes are never at the top level. Tests compose them the same way the importer does,
+    rather than each knowing the layout.
+    """
+    from import_sdm import _composed
+
+    return _composed(sdm_schema, "properties")
+
+
+@pytest.fixture
 def sdm_context() -> dict:
     return json.loads((FIXTURES / "sdm-airqualityobserved.context.jsonld").read_text())
 

@@ -34,8 +34,10 @@ API_BASE = f"https://api.github.com/repos/{SDM_ORG}/"
 #: before a socket exists, whatever produced it (DM-10, DM-18).
 ALLOWED_PREFIXES = (RAW_BASE, API_BASE)
 
-#: The four documents an import needs. `model.yaml` carries the attribute registry entries and
-#: is fetched when the model publishes one; the other three are mandatory.
+#: The documents an import needs, at the paths the catalogue publishes them under. The schema
+#: and the example are per model; the `@context` is **one per subject repository, at its
+#: root**, because every model of a subject shares the same term definitions. Fetching it as
+#: `{model}/context.jsonld` answers 404 for every model in the catalogue.
 SCHEMA_FILE = "schema.json"
 CONTEXT_FILE = "context.jsonld"
 EXAMPLE_FILE = "examples/example-normalized.jsonld"
@@ -51,6 +53,17 @@ SEGMENT = re.compile(r"^(?!\.)[A-Za-z0-9._-]{1,128}$")
 #: Attributes that belong to every NGSI-LD entity and therefore to the shared import, not to
 #: the imported model (DM-09).
 CORE_SLOTS = ("id", "type", "location", "observedAt")
+
+#: Everything `linkml:types` defines, which is every range an imported model may name without
+#: declaring it. LinkML refuses to load a schema whose slot has an unrecognized range, so a
+#: range outside this set has to be an enum or a class the document itself carries.
+LINKML_TYPES = frozenset(
+    {
+        "boolean", "curie", "date", "date_or_datetime", "datetime", "decimal", "double",
+        "float", "integer", "jsonpath", "jsonpointer", "ncname", "nodeidentifier",
+        "objectidentifier", "sparqlpath", "string", "time", "uri", "uriorcurie",
+    }
+)
 
 REQUEST_TIMEOUT = 20
 
@@ -107,12 +120,13 @@ def fetch(model: str, ref: str = "master") -> dict[str, Any]:
     subject, name = split_identifier(model)
     commit = resolve_commit(subject, ref)
 
-    def document(filename: str) -> Any:
-        return _get(f"{RAW_BASE}{subject}/{commit}/{name}/{filename}").json()
+    def document(filename: str, *, of_the_model: bool = True) -> Any:
+        under = f"{name}/" if of_the_model else ""
+        return _get(f"{RAW_BASE}{subject}/{commit}/{under}{filename}").json()
 
     return {
         "schema": document(SCHEMA_FILE),
-        "context": document(CONTEXT_FILE),
+        "context": document(CONTEXT_FILE, of_the_model=False),
         # A model without a published example is still importable; the example only seeds the
         # editor's preview and the golden test of a later Mapping.
         "example": _example(subject, name, commit),
@@ -178,6 +192,42 @@ def _iri(slot_name: str, context: dict[str, Any]) -> str | None:
     return None
 
 
+def _composed(schema_json: dict[str, Any], key: str) -> dict[str, Any] | list[Any]:
+    """`properties` or `required` of a catalogue schema, whichever branch declares them.
+
+    A Smart Data Models schema declares almost nothing at its top level: it is an `allOf` of
+    the shared commons, by `$ref`, and one inline branch carrying the model's own attributes.
+    Reading only the top level imports a model with no slots at all.
+
+    The `$ref`ed commons are not merged here. They live on `smart-data-models.github.io`,
+    which the DM-10 allowlist does not cover, so importing them is a decision about the
+    allowlist and not a line of code (T-0405).
+    """
+    merged: dict[str, Any] = {}
+    order: list[Any] = []
+    for branch in [*(schema_json.get("allOf") or []), schema_json]:
+        if not isinstance(branch, dict):
+            continue
+        value = branch.get(key)
+        if isinstance(value, dict):
+            merged.update(value)
+        elif isinstance(value, list):
+            order.extend(item for item in value if item not in order)
+    return order if key == "required" else merged
+
+
+def _flattened(schema_json: dict[str, Any]) -> dict[str, Any]:
+    """The catalogue schema as one object, with the `allOf` branches merged into the top.
+
+    schema-automator derives the ranges and the enums, and it reads the top level too, so a
+    schema handed over unflattened produces a model with no slots, no ranges and no enums.
+    """
+    flat = {key: value for key, value in schema_json.items() if key != "allOf"}
+    flat["properties"] = _composed(schema_json, "properties")
+    flat["required"] = _composed(schema_json, "required")
+    return flat
+
+
 def _automator_schema(schema_json: dict[str, Any], name: str) -> dict[str, Any]:
     """schema-automator's LinkML output for one JSON Schema, as plain data (DM-09)."""
     from linkml_runtime.dumpers import yaml_dumper
@@ -209,8 +259,10 @@ def convert(
     context = context_jsonld.get("@context", {}) if isinstance(context_jsonld, dict) else {}
     if not isinstance(context, dict):
         raise ImportError_("the fetched context.jsonld has no object under @context")
-    automator = _automator_schema(schema_json, name)
-    properties = (schema_json.get("properties") or {}) if isinstance(schema_json, dict) else {}
+    flat = _flattened(schema_json) if isinstance(schema_json, dict) else {}
+    automator = _automator_schema(flat, name)
+    properties = flat.get("properties") or {}
+    required = flat.get("required") or []
     upstream = f"{provenance['repository']}@{provenance['commit']}"
 
     slots: dict[str, Any] = {}
@@ -222,7 +274,7 @@ def convert(
         slot: dict[str, Any] = {
             "description": definition.get("description") or imported.get("description"),
             "range": _range_of(definition, imported),
-            "required": slot_name in (schema_json.get("required") or []),
+            "required": slot_name in required,
             "annotations": {
                 "ngsi_ld_kind": _kind_of(slot_name, definition, context),
                 # The IRI below is upstream's; this is the citation that says so (DM-04).
@@ -237,6 +289,15 @@ def convert(
     # Enums schema-automator derived for a core slot (`type`) have no slot left to serve.
     referenced = {slot.get("range") for slot in slots.values()}
     enums = {k: v for k, v in (automator.get("enums") or {}).items() if k in referenced}
+
+    # schema-automator names a nested object as a range (`address: Address`) and then defines
+    # no such class, and LinkML refuses to load a schema with an unrecognized range, so the
+    # whole import would compile to nothing. The attribute is kept and falls back to the
+    # document's default range; what it loses is the shape of the nested object (T-0405).
+    resolvable = LINKML_TYPES | set(enums) | {name}
+    for slot in slots.values():
+        if slot.get("range") and slot["range"] not in resolvable:
+            del slot["range"]
 
     # Without a prefix every IRI is written out in full and every generator warns about it;
     # the upstream namespaces are known here, so they are declared once.

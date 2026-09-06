@@ -8,9 +8,11 @@ Smart Data Models allowlist of `import_sdm` (DM-10). Everything here obeys that.
 from __future__ import annotations
 
 import importlib.metadata as metadata
+import os
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import Any, Iterator
 
 import jsonasobj2
 from linkml_runtime import SchemaView
@@ -58,8 +60,12 @@ JSONLD_KEYWORD_ANNOTATION = "jsonld_keyword"
 
 #: The shared imports Model Tools ships. A model writes `imports: [ngsi-ld-core]` and gets
 #: `id`, `type`, `location` and `observedAt` (DM-09); resolving it from the image is what keeps
-#: generation working with no network at all (DM-18).
-SHIPPED_MODELS = Path(__file__).resolve().parent.parent / "models"
+#: generation working with no network at all (DM-18). The folder sits beside `src/` in the
+#: repository and is copied to its own path in the image, which is what `MODEL_TOOLS_MODELS`
+#: names: an installed module has no repository around it to walk up into.
+SHIPPED_MODELS = Path(
+    os.environ.get("MODEL_TOOLS_MODELS") or Path(__file__).resolve().parent.parent / "models"
+)
 # The loader appends `.yaml` to whatever an import maps to, so the entry stops at the stem.
 IMPORT_MAP = {"ngsi-ld-core": str(SHIPPED_MODELS / "ngsi-ld-core.linkml")}
 
@@ -68,23 +74,33 @@ class ModelError(Exception):
     """A model the generators refuse. The message is shown to the person editing it."""
 
 
-def load(source: str | Path) -> SchemaView:
-    """Read a LinkML schema from a file path or from the YAML text itself.
+@contextmanager
+def as_path(source: str | Path) -> Iterator[str]:
+    """A file path for a schema given either as a path or as the YAML text itself.
 
     The editor holds the document in memory and has no file to point at, while CI has a path
     and no reason to read it twice; `SchemaView` accepts a path, so text is spooled to a
-    temporary file that is removed as soon as the schema is parsed.
+    temporary file that is removed as soon as the caller is done with it. The service renders
+    four artifacts from one source and spools it once, which is also what makes the four
+    report the same parse error rather than four paths' worth of the same one.
     """
     text = str(source)
-    if "\n" in text or not Path(text).exists():
-        with NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as handle:
-            handle.write(text)
-            source = handle.name
-        try:
-            return _view(source)
-        finally:
-            Path(source).unlink(missing_ok=True)
-    return _view(text)
+    if "\n" not in text and Path(text).exists():
+        yield text
+        return
+    with NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as handle:
+        handle.write(text)
+        path = handle.name
+    try:
+        yield path
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def load(source: str | Path) -> SchemaView:
+    """Read a LinkML schema from a file path or from the YAML text itself."""
+    with as_path(source) as path:
+        return _view(path)
 
 
 def _view(path: str) -> SchemaView:
