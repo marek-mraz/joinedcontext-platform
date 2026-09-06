@@ -133,7 +133,7 @@
               "type": "null"
             }
           ],
-          "description": "The WebSocket connection, present when `type` is `web-socket`."
+          "description": "The WebSocket connection, present when `type` is `websocket`."
         }
       },
       "required": [
@@ -161,7 +161,7 @@
         {
           "description": "A WebSocket the runner keeps open.",
           "enum": [
-            "web-socket"
+            "websocket"
           ],
           "type": "string"
         },

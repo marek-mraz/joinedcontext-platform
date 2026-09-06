@@ -46,7 +46,7 @@ metadata:
   name: aq-stream
   namespace: bb-ovzdusie
 spec:
-  type: web-socket
+  type: websocket
   webSocket:
     url: wss://feed.banskabystrica.sk/aq
     openMessage: '{"subscribe":"aq"}'
@@ -83,6 +83,33 @@ fn every_connection_type_round_trips() {
             .unwrap_or_else(|e| panic!("{name} re-parse: {e}"));
         assert_eq!(parsed, again, "{name} does not survive a round trip");
     }
+}
+
+/// T-0393: the wire value is `websocket`, one word, and `web-socket` is not an alias.
+///
+/// The kind is documented before it is written (CC-11), so a manifest copied out of
+/// `Architecture/08 §6` has to parse. Keeping the kebab-case spelling alive as a second
+/// accepted value would be the friendlier change and the wrong one: two spellings for one type
+/// is two things to write in every Portal form, every example and every locale bundle, and the
+/// day they disagree is the day a manifest means different things to the reconciler and the UI.
+#[test]
+fn the_websocket_type_is_one_word() {
+    let parsed = DataSource::from_yaml(WEB_SOCKET).expect("the documented spelling parses");
+    parsed.validate().expect("valid");
+    assert_eq!(parsed.spec.source_type, DataSourceType::WebSocket);
+    assert_eq!(DataSourceType::WebSocket.to_string(), "websocket");
+    assert!(
+        serde_norway::to_string(&parsed)
+            .expect("serialize")
+            .contains("type: websocket"),
+        "what is written back is what the documentation shows"
+    );
+
+    let kebab = WEB_SOCKET.replace("type: websocket", "type: web-socket");
+    assert!(
+        DataSource::from_yaml(&kebab).is_err(),
+        "the old kebab-case spelling is refused, not silently accepted"
+    );
 }
 
 #[test]

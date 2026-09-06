@@ -27,18 +27,24 @@ pub enum DataSourceType {
     /// An HTTP resource the runner polls.
     Http,
     /// A WebSocket the runner keeps open.
+    // Spelled out rather than left to `kebab-case`, which would make it `web-socket`. The
+    // documented wire value is one word (`Architecture/08 §6`) and the documentation is the
+    // contract (CC-11), so the rename lives here and the other three variants are unaffected.
+    // A plain comment, not a doc comment: this paragraph is about the code and would otherwise
+    // be published as the variant's description in `schemas/kinds/DataSource.json`.
+    #[serde(rename = "websocket")]
     WebSocket,
     /// A GTFS-realtime protobuf feed, polled over HTTP and decoded by the runner.
     GtfsRt,
 }
 
 impl DataSourceType {
-    /// The kebab-case wire name, as written in `spec.type`.
+    /// The wire name, as written in `spec.type`.
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Mqtt => "mqtt",
             Self::Http => "http",
-            Self::WebSocket => "web-socket",
+            Self::WebSocket => "websocket",
             Self::GtfsRt => "gtfs-rt",
         }
     }
@@ -176,7 +182,7 @@ pub struct DataSourceSpec {
     /// The HTTP connection, present when `type` is `http`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<HttpConnection>,
-    /// The WebSocket connection, present when `type` is `web-socket`.
+    /// The WebSocket connection, present when `type` is `websocket`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_socket: Option<WebSocketConnection>,
     /// The GTFS-realtime connection, present when `type` is `gtfs-rt`.

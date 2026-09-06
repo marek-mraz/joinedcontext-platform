@@ -84,7 +84,7 @@ const WEB_SOCKET: &str = r#"apiVersion: joinedcontext.com/v1alpha1
 kind: DataSource
 metadata: { name: aq-stream, namespace: bb-ovzdusie }
 spec:
-  type: web-socket
+  type: websocket
   webSocket:
     url: wss://feed.banskabystrica.sk/aq
     openMessage: '{"subscribe":"aq"}'
