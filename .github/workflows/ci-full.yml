@@ -1,0 +1,38 @@
+name: ci-full
+# the slow lane: runs after every push to main, nightly and on demand; never a PR gate.
+# agents watch it with tasks/ci and fix red runs first.
+on:
+  push:
+    branches: [main]
+  schedule: [{ cron: "17 2 * * *" }]
+  workflow_dispatch:
+permissions: { contents: read }
+concurrency: { group: "ci-full-${{ github.ref }}", cancel-in-progress: false }
+jobs:
+  test-all:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-targets --all-features
+      - run: cargo doc --workspace --no-deps
+        env: { RUSTDOCFLAGS: "-D warnings" }
+  supply-chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with: { tool: "cargo-audit,cargo-deny" }
+      - run: cargo audit
+      - run: cargo deny check advisories bans licenses sources
+  trivy-fs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@0.28.0
+        with: { scan-type: fs, severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }
