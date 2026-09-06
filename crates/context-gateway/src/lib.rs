@@ -14,6 +14,7 @@ pub mod app;
 pub mod auth;
 pub mod config;
 pub mod handlers;
+pub mod mcp;
 pub mod middleware;
 pub mod operations;
 pub mod pdp;

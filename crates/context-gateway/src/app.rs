@@ -21,12 +21,12 @@ use crate::pdp::{geo, projection, temporal, Pdp};
 use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, Model, SlugResolver, Space};
 use crate::translators::{geojson, tabular};
-use crate::{handlers, middleware::tenancy, operations, query};
+use crate::{handlers, mcp, middleware::tenancy, operations, query};
 use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::header::AUTHORIZATION;
-use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{any, get, post};
 use axum::Router;
@@ -142,6 +142,7 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
     Router::new()
         .route("/api/endpoint/{slug}/ngsi-ld/v1/{*rest}", any(ngsi_ld))
         .route("/api/endpoint/{slug}/access", get(access))
+        .route("/api/endpoint/{slug}/mcp", post(mcp_message))
         .route("/api/endpoint/{slug}/access/check", post(access_check))
         .route("/api/endpoint/{slug}/file.geojson", get(file_geojson))
         .route("/api/endpoint/{slug}/file.csv", get(file_csv))
@@ -213,6 +214,47 @@ async fn space_ngsi_ld(
     )
     .map(|(space, subject)| (Arc::clone(&space.endpoint), subject));
     let prefix = format!("/cs/{space}/ngsi-ld/v1");
+    as_ngsi_ld_error(serve_ngsi_ld(&gateway, admitted, &prefix, request).await).await
+}
+
+/// Runs one NGSI-LD request through the very pipeline the HTTP surfaces run (T-0166, SP-16).
+///
+/// The MCP façade turns a tool call into the NGSI-LD request it stands for and hands it
+/// here, so the PDP, the query narrowing, the write guard and the response projection are
+/// literally the same code for an agent as for any other client, and discovery can never
+/// drift from enforcement.
+///
+/// `path` is the part under `/ngsi-ld/v1`, already percent-encoded; only the caller's own
+/// token crosses over, because a header of the MCP request describes that request and not
+/// this one.
+pub async fn ngsi_ld_request(
+    gateway: Arc<Gateway>,
+    slug: &str,
+    method: Method,
+    path: &str,
+    query: &str,
+    body: Option<Vec<u8>>,
+    authorization: Option<HeaderValue>,
+) -> Response<Body> {
+    let prefix = format!("/api/endpoint/{slug}/ngsi-ld/v1");
+    let uri = match query.is_empty() {
+        true => format!("{prefix}{path}"),
+        false => format!("{prefix}{path}?{query}"),
+    };
+    let mut builder = axum::http::Request::builder().method(method).uri(uri);
+    if let Some(token) = authorization {
+        builder = builder.header(AUTHORIZATION, token);
+    }
+    if body.is_some() {
+        builder = builder.header(axum::http::header::CONTENT_TYPE, "application/json");
+    }
+    let Ok(request) = builder.body(body.map_or_else(Body::empty, Body::from)) else {
+        return ProblemDetails::bad_request()
+            .with_detail("the arguments do not form a request this endpoint can serve")
+            .into_response();
+    };
+
+    let admitted = admit(&gateway, slug, Some(Representation::Mcp), request.headers());
     as_ngsi_ld_error(serve_ngsi_ld(&gateway, admitted, &prefix, request).await).await
 }
 
@@ -668,6 +710,42 @@ fn admit(
     Ok((endpoint, subject))
 }
 
+/// The endpoint's own MCP instance: one JSON-RPC message in, one out (T-0166, EP-24, SP-14).
+///
+/// Streamable HTTP without a session: no `GET` stream to open, nothing kept between calls,
+/// so a grant withdrawn a second ago is already gone from the next `tools/list` (SP-19).
+async fn mcp_message(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, subject) = match admit(
+        &gateway,
+        &slug,
+        Some(Representation::Mcp),
+        request.headers(),
+    ) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+
+    let authorization = request.headers().get(AUTHORIZATION).cloned();
+    let (_, body) = request.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
+        return mcp::endpoint_facade::parse_error();
+    };
+    let Ok(message) = serde_json::from_slice::<Value>(&bytes) else {
+        return mcp::endpoint_facade::parse_error();
+    };
+
+    match mcp::endpoint_facade::handle(gateway, endpoint, subject, authorization, message).await {
+        Some(answer) => mcp::endpoint_facade::json_response(StatusCode::OK, &answer),
+        // A notification is acknowledged and nothing more: there is no state to change.
+        None => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
 /// What the caller may do here, from the same PDP that enforces it (T-0163, EP-55).
 async fn access(
     State(gateway): State<Arc<Gateway>>,
@@ -872,7 +950,7 @@ fn matches_etag(headers: &HeaderMap, etag: &str) -> bool {
 }
 
 /// The lowercase hex sha256 of a body, which is what every `ETag` here is.
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     ring::digest::digest(&ring::digest::SHA256, bytes)
         .as_ref()
         .iter()
