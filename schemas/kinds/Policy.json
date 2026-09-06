@@ -550,6 +550,25 @@
         }
       ]
     },
+    "PolicyEffect": {
+      "description": "Whether a policy grants access or takes it away (GW4, GW8).\n\nA prohibition subtracts from a grant that stays in force. It is not how a resource is kept private in the first place: the default verdict is already DENY (GW5), so a type nobody was granted is closed without any policy naming it.",
+      "oneOf": [
+        {
+          "description": "The policy grants the operations it lists (the default).",
+          "enum": [
+            "permission"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The policy denies them, and is evaluated before any permission (GW4).",
+          "enum": [
+            "prohibition"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "PolicySpec": {
       "additionalProperties": false,
       "description": "Desired specification of a [`Policy`][crate::kinds::Policy] resource (ADR 002, R1..R9).",
@@ -573,6 +592,15 @@
             }
           ],
           "description": "Reference to the target ContextSpace."
+        },
+        "effect": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PolicyEffect"
+            }
+          ],
+          "default": "permission",
+          "description": "Whether this policy grants or takes away (GW4, GW8)."
         },
         "geoQ": {
           "description": "Residual geographic query filter string (R7, GW11, EP-56).",

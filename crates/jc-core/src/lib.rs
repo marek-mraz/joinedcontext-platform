@@ -33,13 +33,13 @@ pub use kinds::{
     GeneratedArtifacts, GeoConstraint, GeoWithin, GitOrigin, GitSource, KubernetesBinding, Mapping,
     MappingSpec, MappingTest, NativeBlock, NativeLanguage, Operation, OperationGroup, OperationRef,
     Organization, OrganizationSpec, Output, OutputMode, Owner, Pipeline, PipelineClass,
-    PipelineQuotas, PipelineSource, PipelineSpec, PlatformApiOrigin, Policy, PolicySpec, Principal,
-    PrincipalKind, Project, ProjectSpec, Quotas, RateLimits, RegistrationInfo, RemoteSource,
-    Representation, RoleBinding, RoleScope, Schedule, ScopeDefinition, ScopeDefinitionSpec, SemVer,
-    ServiceAccount, ServiceAccountLimits, ServiceAccountSpec, SharedSpaceReference,
-    SharedSpaceReferenceSpec, SourceQuery, SubscriptionTrigger, SyncMode, SyncOrigin, SyncSource,
-    SyncSourceSpec, TemporalConstraint, TemporalWindow, Trigger, Validity, VocabularyAlignment,
-    Workload,
+    PipelineQuotas, PipelineSource, PipelineSpec, PlatformApiOrigin, Policy, PolicyEffect,
+    PolicySpec, Principal, PrincipalKind, Project, ProjectSpec, Quotas, RateLimits,
+    RegistrationInfo, RemoteSource, Representation, RoleBinding, RoleScope, Schedule,
+    ScopeDefinition, ScopeDefinitionSpec, SemVer, ServiceAccount, ServiceAccountLimits,
+    ServiceAccountSpec, SharedSpaceReference, SharedSpaceReferenceSpec, SourceQuery,
+    SubscriptionTrigger, SyncMode, SyncOrigin, SyncSource, SyncSourceSpec, TemporalConstraint,
+    TemporalWindow, Trigger, Validity, VocabularyAlignment, Workload,
 };
 pub use registry::{by_kind, by_plural, KindInfo, KINDS};
 pub use urn::Urn;

@@ -302,6 +302,90 @@ pub enum OperationGroup {
 }
 
 impl OperationGroup {
+    /// The operations this group stands for, CIM 009 Table 4.20-2 verbatim (R8).
+    ///
+    /// A grant naming a group grants exactly these; the list is the vocabulary's, not a
+    /// convenience shorthand, so it is never widened locally.
+    pub const fn operations(&self) -> &'static [Operation] {
+        /// The consumption and subscription operations plus the EntityMap support ones.
+        const FEDERATION: &[Operation] = &[
+            Operation::RetrieveEntity,
+            Operation::QueryEntity,
+            Operation::QueryBatch,
+            Operation::RetrieveEntityTypes,
+            Operation::RetrieveEntityTypeDetails,
+            Operation::RetrieveEntityTypeInfo,
+            Operation::RetrieveAttrTypes,
+            Operation::RetrieveAttrTypeDetails,
+            Operation::RetrieveAttrTypeInfo,
+            Operation::CreateSubscription,
+            Operation::UpdateSubscription,
+            Operation::RetrieveSubscription,
+            Operation::QuerySubscription,
+            Operation::DeleteSubscription,
+            Operation::RetrieveEntityMap,
+            Operation::UpdateEntityMap,
+            Operation::DeleteEntityMap,
+            Operation::CreateEntityMapQueryEntity,
+        ];
+        /// `federationOps` without the EntityMap support operations.
+        const ASSOCIATION: &[Operation] = &[
+            Operation::RetrieveEntity,
+            Operation::QueryEntity,
+            Operation::QueryBatch,
+            Operation::RetrieveEntityTypes,
+            Operation::RetrieveEntityTypeDetails,
+            Operation::RetrieveEntityTypeInfo,
+            Operation::RetrieveAttrTypes,
+            Operation::RetrieveAttrTypeDetails,
+            Operation::RetrieveAttrTypeInfo,
+            Operation::CreateSubscription,
+            Operation::UpdateSubscription,
+            Operation::RetrieveSubscription,
+            Operation::QuerySubscription,
+            Operation::DeleteSubscription,
+        ];
+        const UPDATE: &[Operation] = &[
+            Operation::UpdateEntity,
+            Operation::UpdateAttrs,
+            Operation::ReplaceEntity,
+            Operation::ReplaceAttrs,
+        ];
+        const RETRIEVE: &[Operation] = &[Operation::RetrieveEntity, Operation::QueryEntity];
+        const REDIRECTION: &[Operation] = &[
+            Operation::CreateEntity,
+            Operation::UpdateEntity,
+            Operation::AppendAttrs,
+            Operation::UpdateAttrs,
+            Operation::DeleteAttrs,
+            Operation::DeleteEntity,
+            Operation::MergeEntity,
+            Operation::ReplaceEntity,
+            Operation::ReplaceAttrs,
+            Operation::RetrieveEntity,
+            Operation::QueryEntity,
+            Operation::PurgeEntity,
+            Operation::RetrieveEntityTypes,
+            Operation::RetrieveEntityTypeDetails,
+            Operation::RetrieveEntityTypeInfo,
+            Operation::RetrieveAttrTypes,
+            Operation::RetrieveAttrTypeDetails,
+            Operation::RetrieveAttrTypeInfo,
+            Operation::RetrieveEntityMap,
+            Operation::UpdateEntityMap,
+            Operation::DeleteEntityMap,
+            Operation::CreateEntityMapQueryEntity,
+        ];
+
+        match self {
+            Self::FederationOps => FEDERATION,
+            Self::AssociationOps => ASSOCIATION,
+            Self::UpdateOps => UPDATE,
+            Self::RetrieveOps => RETRIEVE,
+            Self::RedirectionOps => REDIRECTION,
+        }
+    }
+
     /// Whether the group stands for at least one operation that changes context data (R8).
     ///
     /// `updateOps` is the update family; `redirectionOps` forwards every operation, writes
@@ -447,6 +531,28 @@ pub struct EntitySelector {
     pub id_pattern: Option<String>,
 }
 
+/// Whether a policy grants access or takes it away (GW4, GW8).
+///
+/// A prohibition subtracts from a grant that stays in force. It is not how a resource is
+/// kept private in the first place: the default verdict is already DENY (GW5), so a type
+/// nobody was granted is closed without any policy naming it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum PolicyEffect {
+    /// The policy grants the operations it lists (the default).
+    #[default]
+    Permission,
+    /// The policy denies them, and is evaluated before any permission (GW4).
+    Prohibition,
+}
+
+impl PolicyEffect {
+    /// Whether this policy takes access away rather than granting it.
+    pub const fn is_prohibition(self) -> bool {
+        matches!(self, Self::Prohibition)
+    }
+}
+
 /// Specification of target entity types, properties, and relationships (R6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -479,6 +585,9 @@ pub struct Validity {
 pub struct PolicySpec {
     /// Reference to the target ContextSpace.
     pub context_space_ref: Ref,
+    /// Whether this policy grants or takes away (GW4, GW8).
+    #[serde(default)]
+    pub effect: PolicyEffect,
     /// Granting data owner (e.g. `did:web:banskabystrica.sk`).
     pub assigner: String,
     /// Grantee principal receiving permissions.

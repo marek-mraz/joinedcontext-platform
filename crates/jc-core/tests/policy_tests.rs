@@ -323,3 +323,31 @@ fn scope_definition_taxonomy_hierarchy_rules() {
     };
     assert!(double_slash.validate().is_err());
 }
+
+/// GW4 and GW8: a policy says whether it grants or takes away, and the default is the
+/// grant, so every manifest written before the field existed keeps its meaning.
+#[test]
+fn effect_defaults_to_permission_and_round_trips() {
+    use jc_core::kinds::PolicyEffect;
+
+    let granted = Policy::from_yaml(GOLDEN_POLICY).expect("the golden policy parses");
+    assert_eq!(granted.spec.effect, PolicyEffect::Permission);
+    assert!(!granted.spec.effect.is_prohibition());
+
+    let denied = Policy::from_yaml(
+        &GOLDEN_POLICY.replace("  assigner:", "  effect: prohibition\n  assigner:"),
+    )
+    .expect("a prohibition parses");
+    denied.validate().expect("a prohibition is a valid policy");
+    assert!(denied.spec.effect.is_prohibition());
+
+    let round_tripped = Policy::from_yaml(&denied.to_yaml().expect("serializes"))
+        .expect("a prohibition survives a round trip");
+    assert_eq!(round_tripped.spec.effect, PolicyEffect::Prohibition);
+
+    assert!(
+        Policy::from_yaml(&GOLDEN_POLICY.replace("  assigner:", "  effect: forbid\n  assigner:"))
+            .is_err(),
+        "only the two documented effects parse"
+    );
+}

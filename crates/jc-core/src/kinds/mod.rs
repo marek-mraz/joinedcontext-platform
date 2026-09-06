@@ -36,8 +36,8 @@ pub use pipeline::{
     PipelineSpec, SourceQuery, SubscriptionTrigger, TemporalWindow, Trigger,
 };
 pub use policy::{
-    EntitySelector, Operation, OperationGroup, OperationRef, PolicySpec, Principal, PrincipalKind,
-    RegistrationInfo, ScopeDefinitionSpec, Validity,
+    EntitySelector, Operation, OperationGroup, OperationRef, PolicyEffect, PolicySpec, Principal,
+    PrincipalKind, RegistrationInfo, ScopeDefinitionSpec, Validity,
 };
 pub use service_account::{
     Credential, CredentialKind, KubernetesBinding, Owner, RoleBinding, RoleScope,
