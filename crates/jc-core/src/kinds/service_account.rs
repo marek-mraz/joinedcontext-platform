@@ -146,15 +146,11 @@ impl Kind for ServiceAccountSpec {
     const KIND: &'static str = "ServiceAccount";
     const PLURAL: &'static str = "serviceaccounts";
     const SCOPE: Scope = Scope::Project;
+    const PATH_TEMPLATE: &'static str = "projects/{project}/access/serviceaccounts/{name}.yaml";
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
         self.validate()
-    }
-
-    fn repo_path(&self, meta: &ObjectMeta) -> String {
-        let ns = meta.namespace.as_deref().unwrap_or_default();
-        format!("projects/{ns}/access/serviceaccounts/{}.yaml", meta.name)
     }
 }
 

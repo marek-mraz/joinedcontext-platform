@@ -1,0 +1,878 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AppClass": {
+      "description": "Execution class of an application (AP-01, AP-25).",
+      "oneOf": [
+        {
+          "description": "Static single-page application served by portal static host (AP-01, AP-14).",
+          "enum": [
+            "static"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Containerized backend service running as a deployment (AP-01, AP-15).",
+          "enum": [
+            "service"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Single container containing Axum backend and embedded React frontend (AP-01, AP-25).",
+          "enum": [
+            "fullstack"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AppLifecycle": {
+      "description": "Lifecycle state of an application (AP-18).",
+      "oneOf": [
+        {
+          "description": "Initial authoring and iterative draft state (AP-18).",
+          "enum": [
+            "draft"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Ephemeral preview running against a sandbox space (AP-18, AP-19).",
+          "enum": [
+            "preview"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Live production deployment bound to real spaces and routes (AP-18, AP-20).",
+          "enum": [
+            "published"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Decommissioned application with route and endpoint removed (AP-18, AP-21).",
+          "enum": [
+            "retired"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AppLimits": {
+      "additionalProperties": false,
+      "description": "Resource quotas and replica limits for an application (AP-01, AP-15).",
+      "properties": {
+        "cpu": {
+          "description": "CPU limit or request (e.g. `500m`, `1`) (AP-15).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory": {
+          "description": "Memory limit or request (e.g. `256Mi`, `1Gi`) (AP-15).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replicas": {
+          "description": "Number of pod replicas to deploy (must be >= 1 if present).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AppSource": {
+      "additionalProperties": false,
+      "description": "Source code location or container image for an application (AP-01, AP-02, AP-13).",
+      "properties": {
+        "image": {
+          "description": "Container image pinned by digest (`...@sha256:<64 hex>`) (AP-13).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Path relative to the repository root for app source files (AP-01, AP-02).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "description": "Git repository URL or identifier within the organization forge (AP-02).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AppSpec": {
+      "additionalProperties": false,
+      "description": "Desired specification of an [`App`][crate::kinds::App] resource (AP-01..AP-33).",
+      "properties": {
+        "dataNeeds": {
+          "description": "Data needs and permissions requested by the application (AP-01, AP-05).",
+          "items": {
+            "$ref": "#/definitions/DataNeed"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppClass"
+            }
+          ],
+          "description": "Operational execution class (`static`, `service`, `fullstack`) (AP-01, AP-25)."
+        },
+        "lifecycle": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppLifecycle"
+            }
+          ],
+          "description": "Lifecycle state (`draft`, `preview`, `published`, `retired`) (AP-18)."
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional resource quotas and replica limits (AP-01, AP-15)."
+        },
+        "routes": {
+          "description": "Public URL path route prefixes (e.g. `/apps/air-quality/`) (AP-14, AP-26).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppSource"
+            }
+          ],
+          "description": "Source code location or container image (AP-01, AP-02, AP-13)."
+        },
+        "visibility": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppVisibility"
+            }
+          ],
+          "description": "Target visibility and audience access scope (AP-01)."
+        }
+      },
+      "required": [
+        "kind",
+        "lifecycle",
+        "source",
+        "visibility"
+      ],
+      "type": "object"
+    },
+    "AppVisibility": {
+      "description": "Target visibility and audience access scope for an application (AP-01).",
+      "oneOf": [
+        {
+          "description": "Restricted to the application author.",
+          "enum": [
+            "private"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Accessible to members of the owning project.",
+          "enum": [
+            "project"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Accessible to authenticated members of the organization.",
+          "enum": [
+            "organization"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Accessible publicly without authentication under the synthetic public role grant (GW22).",
+          "enum": [
+            "public"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Condition": {
+      "additionalProperties": false,
+      "description": "Status condition entry.",
+      "properties": {
+        "lastTransitionTime": {
+          "description": "Last transition timestamp.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Machine-readable reason code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "Status value (\"True\", \"False\", \"Unknown\").",
+          "type": "string"
+        },
+        "type": {
+          "description": "Type of condition (e.g. Reconciled, Ready).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "type"
+      ],
+      "type": "object"
+    },
+    "DataNeed": {
+      "additionalProperties": false,
+      "description": "Least-privilege data access requirement declared by an application (AP-04, AP-05).",
+      "properties": {
+        "attributes": {
+          "description": "Whitelist of readable or writable attribute names (empty means all readable attributes) (AP-05).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "contextSpaceRef": {
+          "description": "Target Context Space name (DNS-1123 label) (AP-05).",
+          "type": "string"
+        },
+        "entityTypes": {
+          "description": "Entity types required by the application (AP-05).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "geoQ": {
+          "description": "Residual geographic query filter string (AP-05).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operations": {
+          "description": "CIM 009 clause 4.20 operations or operation groups requested (AP-05).",
+          "items": {
+            "$ref": "#/definitions/OperationRef"
+          },
+          "type": "array"
+        },
+        "q": {
+          "description": "Residual NGSI-LD query filter string (AP-05).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopeQ": {
+          "description": "Residual scope query filter string (AP-05).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "contextSpaceRef",
+        "entityTypes",
+        "operations"
+      ],
+      "type": "object"
+    },
+    "MultiLanguageMap": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Multi-language map keyed by ISO 639-1 two-letter lowercase language codes",
+      "propertyNames": {
+        "pattern": "^[a-z]{2}$",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "ObjectMeta": {
+      "additionalProperties": false,
+      "description": "Metadata envelope attached to every platform resource (MF-02).",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Key-value annotations for provenance and ownership (MF-08).",
+          "type": "object"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MultiLanguageMap"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Human-readable multilingual description (PF-24)."
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Key-value labels for filtering (MF-10).",
+          "type": "object"
+        },
+        "name": {
+          "description": "Resource name (DNS-1123 label).",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Resource namespace (\"org\" or project slug).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MultiLanguageMap"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Human-readable multilingual title (PF-24)."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Operation": {
+      "description": "Table 4.20-1: every named distributed API operation in ETSI GS CIM 009 (R8).\n\nClosed enum ensures no proprietary verbs (`upsertEntity`, `read`, `write`) are accepted, satisfying the strict R8 CIM 009 vocabulary guarantee.",
+      "oneOf": [
+        {
+          "description": "Create entity (`POST /entities`).",
+          "enum": [
+            "createEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Update entity (`PATCH /entities/{id}`).",
+          "enum": [
+            "updateEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Append entity attributes (`POST /entities/{id}/attrs`).",
+          "enum": [
+            "appendAttrs"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Update entity attributes (`PATCH /entities/{id}/attrs`).",
+          "enum": [
+            "updateAttrs"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete entity attributes (`DELETE /entities/{id}/attrs/{attr}`).",
+          "enum": [
+            "deleteAttrs"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete entity (`DELETE /entities/{id}`).",
+          "enum": [
+            "deleteEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Batch create entities (`POST /entityOperations/create`).",
+          "enum": [
+            "createBatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Batch upsert entities (`POST /entityOperations/upsert`).",
+          "enum": [
+            "upsertBatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Batch update entities (`POST /entityOperations/update`).",
+          "enum": [
+            "updateBatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Batch delete entities (`POST /entityOperations/delete`).",
+          "enum": [
+            "deleteBatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Upsert temporal entity attributes (`POST /temporal/entities/{id}/attrs`).",
+          "enum": [
+            "upsertTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Append temporal entity attributes (`POST /temporal/entities/{id}/attrs`).",
+          "enum": [
+            "appendAttrsTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete temporal entity attributes (`DELETE /temporal/entities/{id}/attrs/{attr}`).",
+          "enum": [
+            "deleteAttrsTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Update temporal attribute instance (`PATCH /temporal/entities/{id}/attrs/{attr}/{instance}`).",
+          "enum": [
+            "updateAttrInstanceTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete temporal attribute instance (`DELETE /temporal/entities/{id}/attrs/{attr}/{instance}`).",
+          "enum": [
+            "deleteAttrInstanceTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete temporal entity (`DELETE /temporal/entities/{id}`).",
+          "enum": [
+            "deleteTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Merge entity (`PATCH /entities/{id}`).",
+          "enum": [
+            "mergeEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Replace entity (`PUT /entities/{id}`).",
+          "enum": [
+            "replaceEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Replace entity attributes (`PATCH /entities/{id}/attrs`).",
+          "enum": [
+            "replaceAttrs"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Batch merge entities (`POST /entityOperations/merge`).",
+          "enum": [
+            "mergeBatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Purge entity permanently (`DELETE /entities/{id}?purge=true`).",
+          "enum": [
+            "purgeEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve single entity (`GET /entities/{id}`).",
+          "enum": [
+            "retrieveEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Query entities (`GET /entities` or `POST /entityOperations/query`).",
+          "enum": [
+            "queryEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Batch query entities (`POST /entityOperations/query`).",
+          "enum": [
+            "queryBatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve temporal entity (`GET /temporal/entities/{id}`).",
+          "enum": [
+            "retrieveTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Query temporal entities (`GET /temporal/entities`).",
+          "enum": [
+            "queryTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve entity types list (`GET /types`).",
+          "enum": [
+            "retrieveEntityTypes"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve entity type details (`GET /types/{type}`).",
+          "enum": [
+            "retrieveEntityTypeDetails"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve entity type info (`GET /types/{type}/info`).",
+          "enum": [
+            "retrieveEntityTypeInfo"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve attribute types list (`GET /attributes`).",
+          "enum": [
+            "retrieveAttrTypes"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve attribute type details (`GET /attributes/{attr}`).",
+          "enum": [
+            "retrieveAttrTypeDetails"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve attribute type info (`GET /attributes/{attr}/info`).",
+          "enum": [
+            "retrieveAttrTypeInfo"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Create context subscription (`POST /subscriptions`).",
+          "enum": [
+            "createSubscription"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Update context subscription (`PATCH /subscriptions/{id}`).",
+          "enum": [
+            "updateSubscription"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve context subscription (`GET /subscriptions/{id}`).",
+          "enum": [
+            "retrieveSubscription"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Query context subscriptions (`GET /subscriptions`).",
+          "enum": [
+            "querySubscription"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete context subscription (`DELETE /subscriptions/{id}`).",
+          "enum": [
+            "deleteSubscription"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve context entity map (`GET /entityMaps/{id}`).",
+          "enum": [
+            "retrieveEntityMap"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Update context entity map (`PATCH /entityMaps/{id}`).",
+          "enum": [
+            "updateEntityMap"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete context entity map (`DELETE /entityMaps/{id}`).",
+          "enum": [
+            "deleteEntityMap"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Create entity map query on entities.",
+          "enum": [
+            "createEntityMapQueryEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Create entity map query on temporal entities.",
+          "enum": [
+            "createEntityMapQueryTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve context source identity (`GET /csourceIdentity`).",
+          "enum": [
+            "retrieveContextSourceIdentity"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "OperationGroup": {
+      "description": "Table 4.20-2: the five distributed operation group names (R8).",
+      "oneOf": [
+        {
+          "description": "Consumption, subscription, and entity map operations.",
+          "enum": [
+            "federationOps"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Association operations without entity map support.",
+          "enum": [
+            "associationOps"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Entity and attribute update operations.",
+          "enum": [
+            "updateOps"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve and query entity operations.",
+          "enum": [
+            "retrieveOps"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Full redirection operations.",
+          "enum": [
+            "redirectionOps"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "OperationRef": {
+      "anyOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Operation"
+            }
+          ],
+          "description": "Individual named operation from CIM 009 Table 4.20-1."
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/OperationGroup"
+            }
+          ],
+          "description": "Operation group from CIM 009 Table 4.20-2."
+        }
+      ],
+      "description": "Reference to a CIM 009 operation or operation group (R8).\n\nClosed enum ensures no proprietary verbs (`read`, `write`, `upsertEntity`) are permitted, satisfying the strict R8 CIM 009 vocabulary guarantee."
+    },
+    "Phase": {
+      "description": "Lifecycle phase enumeration.",
+      "oneOf": [
+        {
+          "description": "Resource manifest is in draft state.",
+          "enum": [
+            "Draft"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource is pending review or approval.",
+          "enum": [
+            "Pending"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource deployment is in progress.",
+          "enum": [
+            "Deploying"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource is live and active in cluster.",
+          "enum": [
+            "Live"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reconciliation error.",
+          "enum": [
+            "Error"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Status": {
+      "additionalProperties": false,
+      "description": "Server-computed lifecycle and reconciliation status (MF-04). Never stored in Git.",
+      "properties": {
+        "conditions": {
+          "description": "Reconciler condition transitions.",
+          "items": {
+            "$ref": "#/definitions/Condition"
+          },
+          "type": "array"
+        },
+        "observedRevision": {
+          "description": "Git commit revision observed during reconciliation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Phase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Current lifecycle phase."
+        }
+      },
+      "type": "object"
+    }
+  },
+  "description": "Kubernetes-style resource envelope (MF-01..MF-04).",
+  "properties": {
+    "apiVersion": {
+      "description": "API version (must match [`API_VERSION`]).",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Resource kind name (must match [`Kind::KIND`]).",
+      "type": "string"
+    },
+    "metadata": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ObjectMeta"
+        }
+      ],
+      "description": "Metadata identifying and labeling the resource."
+    },
+    "spec": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AppSpec"
+        }
+      ],
+      "description": "Desired spec state."
+    },
+    "status": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Status"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Server-computed status. Stripped during export and serialization."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "ResourceEnvelope_for_AppSpec",
+  "type": "object"
+}

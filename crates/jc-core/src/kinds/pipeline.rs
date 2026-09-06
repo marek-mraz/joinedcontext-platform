@@ -234,15 +234,11 @@ impl Kind for PipelineSpec {
     const KIND: &'static str = "Pipeline";
     const PLURAL: &'static str = "pipelines";
     const SCOPE: Scope = Scope::Project;
+    const PATH_TEMPLATE: &'static str = "projects/{project}/pipelines/{name}/pipeline.yaml";
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
         self.validate()
-    }
-
-    fn repo_path(&self, meta: &ObjectMeta) -> String {
-        let ns = meta.namespace.as_deref().unwrap_or_default();
-        format!("projects/{ns}/pipelines/{}/pipeline.yaml", meta.name)
     }
 }
 

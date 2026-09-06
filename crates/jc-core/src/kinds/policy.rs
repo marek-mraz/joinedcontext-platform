@@ -490,16 +490,15 @@ impl Kind for PolicySpec {
     const KIND: &'static str = "Policy";
     const PLURAL: &'static str = "policies";
     const SCOPE: Scope = Scope::Project;
+    const PATH_TEMPLATE: &'static str = "projects/{project}/spaces/{space}/policies/{name}.yaml";
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
         self.validate()
     }
 
-    fn repo_path(&self, meta: &ObjectMeta) -> String {
-        let ns = meta.namespace.as_deref().unwrap_or_default();
-        let space = self.context_space_ref.name();
-        format!("projects/{ns}/spaces/{space}/policies/{}.yaml", meta.name)
+    fn context_space(&self) -> Option<&str> {
+        Some(self.context_space_ref.name())
     }
 }
 
@@ -672,18 +671,11 @@ impl Kind for ScopeDefinitionSpec {
     const KIND: &'static str = "ScopeDefinition";
     const PLURAL: &'static str = "policies";
     const SCOPE: Scope = Scope::Project;
+    const PATH_TEMPLATE: &'static str = "projects/{project}/policies/{name}.yaml";
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
         self.validate()
-    }
-
-    fn repo_path(&self, meta: &ObjectMeta) -> String {
-        // ponytail: ScopeDefinition lives at projects/{ns}/policies/{name}.yaml per Architecture/06.
-        // A space-scoped nesting (projects/{ns}/spaces/{space}/policies/{name}.yaml) will be
-        // introduced if jcctl reconciler requires space-isolated scope definition trees.
-        let ns = meta.namespace.as_deref().unwrap_or_default();
-        format!("projects/{ns}/policies/{}.yaml", meta.name)
     }
 }
 

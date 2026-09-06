@@ -13,6 +13,7 @@ pub mod error;
 pub mod i18n;
 pub mod kinds;
 pub mod names;
+pub mod registry;
 pub mod urn;
 
 pub use envelope::{
@@ -22,14 +23,18 @@ pub use envelope::{
 pub use error::{Error, ProblemDetails, Result, UrnError, PROBLEM_JSON, PROBLEM_TYPE_BASE};
 pub use i18n::MultiLanguageMap;
 pub use kinds::{
-    Audience, Caching, Compute, ComputeKind, Contact, ContactRole, ContextSpace, ContextSpaceSpec,
-    Credential, CredentialKind, Endpoint, EndpointSlug, EndpointSpec, EntitySelector,
-    KubernetesBinding, Operation, OperationGroup, OperationRef, Organization, OrganizationSpec,
-    Output, OutputMode, Owner, Pipeline, PipelineClass, PipelineQuotas, PipelineSource,
-    PipelineSpec, Policy, PolicySpec, Principal, PrincipalKind, Project, ProjectSpec, Quotas,
-    RateLimits, RegistrationInfo, Representation, RoleBinding, RoleScope, ScopeDefinition,
-    ScopeDefinitionSpec, ServiceAccount, ServiceAccountLimits, ServiceAccountSpec,
-    SharedSpaceReference, SharedSpaceReferenceSpec, SourceQuery, SubscriptionTrigger,
-    TemporalWindow, Trigger, Validity, Workload,
+    App, AppClass, AppLifecycle, AppLimits, AppSource, AppSpec, AppVisibility, Audience, Caching,
+    Compute, ComputeKind, Contact, ContactRole, ContextSpace, ContextSpaceSpec, Credential,
+    CredentialKind, DataModel, DataModelLifecycle, DataModelRef, DataModelSource, DataModelSpec,
+    DataNeed, Endpoint, EndpointSlug, EndpointSpec, EntitySelector, GeneratedArtifacts,
+    KubernetesBinding, Mapping, MappingSpec, MappingTest, NativeBlock, NativeLanguage, Operation,
+    OperationGroup, OperationRef, Organization, OrganizationSpec, Output, OutputMode, Owner,
+    Pipeline, PipelineClass, PipelineQuotas, PipelineSource, PipelineSpec, Policy, PolicySpec,
+    Principal, PrincipalKind, Project, ProjectSpec, Quotas, RateLimits, RegistrationInfo,
+    Representation, RoleBinding, RoleScope, ScopeDefinition, ScopeDefinitionSpec, SemVer,
+    ServiceAccount, ServiceAccountLimits, ServiceAccountSpec, SharedSpaceReference,
+    SharedSpaceReferenceSpec, SourceQuery, SubscriptionTrigger, TemporalWindow, Trigger, Validity,
+    Workload,
 };
+pub use registry::{by_kind, by_plural, KindInfo, KINDS};
 pub use urn::Urn;

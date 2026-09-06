@@ -269,16 +269,15 @@ impl Kind for EndpointSpec {
     const KIND: &'static str = "Endpoint";
     const PLURAL: &'static str = "endpoints";
     const SCOPE: Scope = Scope::Project;
+    const PATH_TEMPLATE: &'static str = "projects/{project}/spaces/{space}/endpoints/{name}.yaml";
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
         self.validate()
     }
 
-    fn repo_path(&self, meta: &ObjectMeta) -> String {
-        let ns = meta.namespace.as_deref().unwrap_or_default();
-        let space = self.context_space_ref.name();
-        format!("projects/{ns}/spaces/{space}/endpoints/{}.yaml", meta.name)
+    fn context_space(&self) -> Option<&str> {
+        Some(self.context_space_ref.name())
     }
 }
 
@@ -385,15 +384,11 @@ impl Kind for SharedSpaceReferenceSpec {
     const KIND: &'static str = "SharedSpaceReference";
     const PLURAL: &'static str = "shared";
     const SCOPE: Scope = Scope::Project;
+    const PATH_TEMPLATE: &'static str = "projects/{project}/shared/{name}.yaml";
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
         self.validate()
-    }
-
-    fn repo_path(&self, meta: &ObjectMeta) -> String {
-        let ns = meta.namespace.as_deref().unwrap_or_default();
-        format!("projects/{ns}/shared/{}.yaml", meta.name)
     }
 }
 

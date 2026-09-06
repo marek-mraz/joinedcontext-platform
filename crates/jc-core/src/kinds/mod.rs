@@ -1,16 +1,24 @@
 //! The manifest kinds of `apiVersion: joinedcontext.com/v1alpha1` (MF-01, Architecture/06).
 
+pub mod app;
+pub mod data_model;
 pub mod endpoint;
+pub mod mapping;
 pub mod organization;
 pub mod pipeline;
 pub mod policy;
 pub mod service_account;
 pub mod space;
 
+pub use app::{AppClass, AppLifecycle, AppLimits, AppSource, AppSpec, AppVisibility, DataNeed};
+pub use data_model::{
+    DataModelLifecycle, DataModelSource, DataModelSpec, GeneratedArtifacts, SemVer,
+};
 pub use endpoint::{
     Audience, Caching, EndpointSlug, EndpointSpec, RateLimits, Representation,
     SharedSpaceReferenceSpec,
 };
+pub use mapping::{DataModelRef, MappingSpec, MappingTest, NativeBlock, NativeLanguage};
 pub use organization::{Contact, ContactRole, OrganizationSpec};
 pub use pipeline::{
     Compute, ComputeKind, Output, OutputMode, PipelineClass, PipelineQuotas, PipelineSource,
@@ -44,3 +52,9 @@ pub type ScopeDefinition = crate::envelope::ResourceEnvelope<ScopeDefinitionSpec
 pub type ServiceAccount = crate::envelope::ResourceEnvelope<ServiceAccountSpec>;
 /// `kind: Pipeline` as a whole manifest.
 pub type Pipeline = crate::envelope::ResourceEnvelope<PipelineSpec>;
+/// `kind: DataModel` as a whole manifest.
+pub type DataModel = crate::envelope::ResourceEnvelope<DataModelSpec>;
+/// `kind: Mapping` as a whole manifest.
+pub type Mapping = crate::envelope::ResourceEnvelope<MappingSpec>;
+/// `kind: App` as a whole manifest.
+pub type App = crate::envelope::ResourceEnvelope<AppSpec>;

@@ -16,10 +16,15 @@ pub trait Kind:
 {
     /// Manifest kind name (e.g. "ContextSpace").
     const KIND: &'static str;
-    /// Plural resource name for URL routing (e.g. "contextspaces").
+    /// Plural resource name for URL routing (e.g. "spaces"), the `{plural}` of `/api/v1/projects/{project}/{plural}`.
     const PLURAL: &'static str;
     /// Target scope (Organization or Project).
     const SCOPE: Scope;
+    /// Repository path template of this kind (MF-06, Architecture/06 section 2).
+    ///
+    /// Placeholders are `{project}` (`metadata.namespace`), `{space}` (the owning
+    /// ContextSpace, see [`Kind::context_space`]) and `{name}` (`metadata.name`).
+    const PATH_TEMPLATE: &'static str;
 
     /// Kind-specific validation of the spec against its own metadata.
     ///
@@ -30,21 +35,23 @@ pub trait Kind:
         Ok(())
     }
 
-    /// Path of this resource inside the organization repository (MF-06, Architecture/06 section 1).
+    /// Name of the ContextSpace this resource lives in, for the `{space}` placeholder.
     ///
-    /// The default is `projects/{namespace}/{plural}/{name}.yaml` for project-scoped kinds
-    /// and `{plural}/{name}.yaml` for organization-scoped ones; kinds whose directory nests
-    /// deeper (ContextSpace, Endpoint, Policy) override it.
+    /// Only space-scoped kinds (Endpoint, Policy, DataModel, Mapping) override it.
+    fn context_space(&self) -> Option<&str> {
+        None
+    }
+
+    /// Path of this resource inside the organization repository (MF-06, Architecture/06 section 2).
+    ///
+    /// Renders [`Kind::PATH_TEMPLATE`], which stays the single source of truth so that
+    /// `jcctl`, the reconciler and the Portal (through [`crate::registry`]) all derive the
+    /// same path.
     fn repo_path(&self, meta: &ObjectMeta) -> String {
-        let name = &meta.name;
-        let plural = Self::PLURAL;
-        match Self::SCOPE {
-            Scope::Organization => format!("{plural}/{name}.yaml"),
-            Scope::Project => {
-                let ns = meta.namespace.as_deref().unwrap_or_default();
-                format!("projects/{ns}/{plural}/{name}.yaml")
-            }
-        }
+        Self::PATH_TEMPLATE
+            .replace("{project}", meta.namespace.as_deref().unwrap_or_default())
+            .replace("{space}", self.context_space().unwrap_or_default())
+            .replace("{name}", &meta.name)
     }
 }
 

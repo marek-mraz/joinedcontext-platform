@@ -21,13 +21,10 @@ impl Kind for ProjectSpec {
     const KIND: &'static str = "Project";
     const PLURAL: &'static str = "projects";
     const SCOPE: Scope = Scope::Organization;
+    const PATH_TEMPLATE: &'static str = "projects/{name}/project.yaml";
 
     fn validate_spec(&self, _meta: &ObjectMeta) -> Result<()> {
         self.validate()
-    }
-
-    fn repo_path(&self, meta: &ObjectMeta) -> String {
-        format!("projects/{}/project.yaml", meta.name)
     }
 }
 
@@ -134,16 +131,12 @@ pub struct ContextSpaceSpec {
 
 impl Kind for ContextSpaceSpec {
     const KIND: &'static str = "ContextSpace";
-    const PLURAL: &'static str = "contextspaces";
+    const PLURAL: &'static str = "spaces";
     const SCOPE: Scope = Scope::Project;
+    const PATH_TEMPLATE: &'static str = "projects/{project}/spaces/{name}/space.yaml";
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         self.validate_with_meta(meta)
-    }
-
-    fn repo_path(&self, meta: &ObjectMeta) -> String {
-        let ns = meta.namespace.as_deref().unwrap_or_default();
-        format!("projects/{ns}/spaces/{}/space.yaml", meta.name)
     }
 }
 

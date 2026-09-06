@@ -16,8 +16,9 @@ struct DemoSpec {
 
 impl Kind for DemoSpec {
     const KIND: &'static str = "ContextSpace";
-    const PLURAL: &'static str = "contextspaces";
+    const PLURAL: &'static str = "spaces";
     const SCOPE: Scope = Scope::Project;
+    const PATH_TEMPLATE: &'static str = "projects/{project}/spaces/{name}/space.yaml";
 }
 
 type Demo = ResourceEnvelope<DemoSpec>;
@@ -165,7 +166,7 @@ fn dns_1123_names_block_path_traversal_and_illegal_labels() {
 fn resource_path_is_derived_from_the_identity_tuple() {
     assert_eq!(
         golden().resource_path().expect("valid manifest"),
-        "projects/bb-doprava/contextspaces/ovzdusie.yaml"
+        "projects/bb-doprava/spaces/ovzdusie/space.yaml"
     );
 }
 

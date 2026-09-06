@@ -70,13 +70,10 @@ impl Kind for OrganizationSpec {
     const KIND: &'static str = "Organization";
     const PLURAL: &'static str = "organizations";
     const SCOPE: Scope = Scope::Organization;
+    const PATH_TEMPLATE: &'static str = "org.yaml";
 
     fn validate_spec(&self, _meta: &ObjectMeta) -> Result<()> {
         self.validate()
-    }
-
-    fn repo_path(&self, _meta: &ObjectMeta) -> String {
-        "org.yaml".to_string()
     }
 }
 
