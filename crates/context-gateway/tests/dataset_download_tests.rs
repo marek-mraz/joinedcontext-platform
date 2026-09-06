@@ -21,6 +21,7 @@ use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, Representation};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -42,6 +43,9 @@ fn unrestricted_endpoint() -> Endpoint {
         ],
         rate_limit: None,
         file_limits: None,
+        // Nothing narrows what the anonymous caller reads, which is the whole point of this
+        // fixture: the endpoint hides no attribute either (EP-61).
+        hidden_attributes: BTreeSet::new(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         policies: vec![serde_norway::from_str(
