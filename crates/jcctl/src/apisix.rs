@@ -1,0 +1,314 @@
+//! The declarative APISIX standalone configuration (T-0138, OPS-31,
+//! Deployment/10 section 3).
+//!
+//! APISIX runs in file mode with no etcd and no Admin API, so the whole routing table is
+//! one rendered file. The route set is static except for the applications: an `App` of
+//! class `service` or `fullstack` gets its own route and upstream, at a higher priority
+//! than the shared `/apps/*` surface, and its login is done by the oauth2-proxy sidecar
+//! rather than by APISIX (AP-26). Endpoints add no routes: `/api/endpoint/*` is one route
+//! and the gateway resolves the slug behind it.
+//!
+//! The file must end with the literal `#END`. Without it APISIX commits nothing and keeps
+//! serving the previous configuration without an error (stack verdict S7).
+
+use crate::loader::Repository;
+use serde_json::{json, Map, Value};
+
+/// The terminal line APISIX needs to commit a reload (Deployment/10 section 3).
+pub const END_MARKER: &str = "#END";
+
+/// What the routing table needs to know about the installation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    /// The primary domain, `city.example.com`. Keycloak lives on `idm.{host}`.
+    pub host: String,
+    /// The Kubernetes namespace the platform runs in, used for upstream service names.
+    pub namespace: String,
+    /// The Keycloak realm the gateway validates tokens against.
+    pub realm: String,
+}
+
+impl Settings {
+    /// Settings for one installation.
+    pub fn new(
+        host: impl Into<String>,
+        namespace: impl Into<String>,
+        realm: impl Into<String>,
+    ) -> Self {
+        Self {
+            host: host.into(),
+            namespace: namespace.into(),
+            realm: realm.into(),
+        }
+    }
+
+    fn discovery(&self) -> String {
+        format!(
+            "https://idm.{}/realms/{}/.well-known/openid-configuration",
+            self.host, self.realm
+        )
+    }
+
+    fn node(&self, service: &str, port: u16) -> String {
+        format!("{service}.{}.svc.cluster.local:{port}", self.namespace)
+    }
+
+    /// The CORS origin pattern: any subdomain of the installation's own host.
+    fn origin_regex(&self) -> String {
+        format!("^https://.+\\.{}$", self.host.replace('.', "\\."))
+    }
+}
+
+/// Renders the whole `apisix.yaml`, `#END` included (Deployment/10 section 3).
+///
+/// Deterministic: the same repository and settings render byte-identical output, so an
+/// unchanged configuration produces no ConfigMap churn.
+pub fn render(repo: &Repository, settings: &Settings) -> String {
+    let apps = routed_apps(repo);
+
+    let mut routes = vec![
+        route("portal-ui", "/*", 1, "upstream-portal", "pc-public-web"),
+        route(
+            "portal-api",
+            "/api/v1/*",
+            10,
+            "upstream-portal",
+            "pc-authenticated-api",
+        ),
+        route(
+            "gitea-forge",
+            "/git/*",
+            10,
+            "upstream-gitea",
+            "pc-public-web",
+        ),
+        route(
+            "well-known",
+            "/.well-known/*",
+            10,
+            "upstream-portal",
+            "pc-public-web",
+        ),
+        route(
+            "context-space",
+            "/cs/*",
+            15,
+            "upstream-context-gateway",
+            "pc-context-firewall",
+        ),
+        route(
+            "context-endpoint",
+            "/api/endpoint/*",
+            20,
+            "upstream-context-gateway",
+            "pc-endpoint-surface",
+        ),
+        route(
+            "apps-surface",
+            "/apps/*",
+            25,
+            "upstream-portal",
+            "pc-public-web",
+        ),
+    ];
+    let mut upstreams = vec![
+        upstream(
+            "upstream-portal",
+            &settings.node("portal", 8080),
+            30,
+            30,
+            None,
+        ),
+        upstream(
+            "upstream-gitea",
+            &settings.node("gitea-http", 3000),
+            60,
+            60,
+            None,
+        ),
+        upstream(
+            "upstream-context-gateway",
+            &settings.node("context-gateway", 8080),
+            60,
+            300,
+            Some(320),
+        ),
+    ];
+
+    for name in &apps {
+        routes.push(route(
+            &format!("app-{name}"),
+            &format!("/apps/{name}/*"),
+            30,
+            &format!("upstream-app-{name}"),
+            "pc-public-web",
+        ));
+        upstreams.push(upstream(
+            &format!("upstream-app-{name}"),
+            &settings.node(&format!("app-{name}"), 4180),
+            30,
+            30,
+            None,
+        ));
+    }
+
+    routes.sort_by_key(|r| r["id"].as_str().unwrap_or_default().to_owned());
+
+    let document = json!({
+        "routes": routes,
+        "upstreams": upstreams,
+        "plugin_configs": plugin_configs(settings),
+    });
+
+    let body = serde_norway::to_string(&document)
+        .expect("the rendered configuration is plain data and always serializes");
+    format!("# Generated by jcctl — DO NOT EDIT DIRECTLY\n{body}\n{END_MARKER}\n")
+}
+
+/// The applications that get their own route: `static` apps are served from the Portal's
+/// shared `/apps/*` surface and need none (AP-26).
+fn routed_apps(repo: &Repository) -> Vec<String> {
+    let mut names: Vec<String> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "App")
+        .filter(|(_, resource)| {
+            matches!(
+                resource.manifest.spec.get("kind").and_then(Value::as_str),
+                Some("service" | "fullstack")
+            )
+        })
+        .map(|(id, _)| id.name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn route(id: &str, uri: &str, priority: u32, upstream_id: &str, plugin_config_id: &str) -> Value {
+    json!({
+        "id": id,
+        "uri": uri,
+        "priority": priority,
+        "upstream_id": upstream_id,
+        "plugin_config_id": plugin_config_id,
+    })
+}
+
+fn upstream(id: &str, node: &str, send: u32, read: u32, keepalive: Option<u32>) -> Value {
+    let mut nodes = Map::new();
+    nodes.insert(node.to_owned(), json!(1));
+
+    let mut value = json!({
+        "id": id,
+        "type": "roundrobin",
+        "nodes": Value::Object(nodes),
+        "timeout": { "connect": 6, "send": send, "read": read },
+    });
+    if let Some(size) = keepalive {
+        value["keepalive_pool"] = json!({ "size": size, "idle_timeout": 60, "requests": 1000 });
+    }
+    value
+}
+
+/// The header the gateway must never receive from a client: any of these would let a
+/// caller forge its own tenant or authorization claims (Deployment/10 section 4).
+const FORGEABLE_HEADERS: &[&str] = &[
+    "NGSILD-Tenant",
+    "X-Userinfo",
+    "X-Access-Token",
+    "X-Allowed-Scope-Ids",
+    "X-Endpoint-Slug",
+    "X-Consumer-Identity",
+];
+
+fn strip_forgeable_headers() -> Value {
+    let clears: String = FORGEABLE_HEADERS
+        .iter()
+        .map(|header| format!("  ngx.req.clear_header(\"{header}\")\n"))
+        .collect();
+    json!({
+        "phase": "rewrite",
+        "functions": [format!("return function()\n{clears}end")],
+    })
+}
+
+fn security_headers(extra: &[(&str, &str)]) -> Value {
+    let mut set = Map::new();
+    set.insert(
+        "Strict-Transport-Security".to_owned(),
+        json!("max-age=31536000; includeSubDomains; preload"),
+    );
+    set.insert("X-Content-Type-Options".to_owned(), json!("nosniff"));
+    for (name, value) in extra {
+        set.insert((*name).to_owned(), json!(value));
+    }
+    json!({ "headers": { "set": Value::Object(set) } })
+}
+
+fn openid_connect(settings: &Settings, bearer_only: bool) -> Value {
+    let mut plugin = json!({
+        "client_id": "apisix-gateway",
+        "discovery": settings.discovery(),
+        "bearer_only": bearer_only,
+        "use_jwks": true,
+        "ssl_verify": true,
+    });
+    if !bearer_only {
+        // The public endpoint surface lets an anonymous request through to the gateway's
+        // own PEP, which decides what it may see.
+        plugin["unauth_action"] = json!("pass");
+    }
+    plugin
+}
+
+fn plugin_configs(settings: &Settings) -> Value {
+    json!([
+        {
+            "id": "pc-public-web",
+            "plugins": {
+                "request-id": { "include_in_response": true },
+                "response-rewrite": security_headers(&[
+                    ("X-Frame-Options", "SAMEORIGIN"),
+                    ("Referrer-Policy", "strict-origin-when-cross-origin"),
+                ]),
+            },
+        },
+        {
+            "id": "pc-authenticated-api",
+            "plugins": {
+                "request-id": { "include_in_response": true },
+                "openid-connect": openid_connect(settings, true),
+                "response-rewrite": security_headers(&[
+                    ("X-Frame-Options", "DENY"),
+                    ("Cache-Control", "no-store, no-cache, must-revalidate"),
+                ]),
+            },
+        },
+        {
+            "id": "pc-context-firewall",
+            "plugins": {
+                "request-id": { "include_in_response": true },
+                "serverless-pre-function": strip_forgeable_headers(),
+                "openid-connect": openid_connect(settings, true),
+                "response-rewrite": security_headers(&[
+                    ("Cache-Control", "no-store, no-cache, must-revalidate"),
+                ]),
+            },
+        },
+        {
+            "id": "pc-endpoint-surface",
+            "plugins": {
+                "request-id": { "include_in_response": true },
+                "serverless-pre-function": strip_forgeable_headers(),
+                "openid-connect": openid_connect(settings, false),
+                "cors": {
+                    "allow_origins_by_regex": [settings.origin_regex()],
+                    "allow_methods": "GET,HEAD,POST,OPTIONS",
+                    "allow_headers": "Authorization,Content-Type,Accept,Link",
+                    "allow_credential": true,
+                },
+                "response-rewrite": security_headers(&[]),
+            },
+        },
+    ])
+}

@@ -394,6 +394,13 @@
           ],
           "description": "Optional output entity type and write mode."
         },
+        "period": {
+          "description": "How often the pipeline polls its source, as a Bento duration (`15s`, `5m`).\n\nThe reconciler reads it to pick the class (PL-26) and copies it into the runner's `input.generate.interval` (PL-27). Absent means push-based: an MQTT or subscription input driven by its source rather than by a clock.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "quotas": {
           "anyOf": [
             {

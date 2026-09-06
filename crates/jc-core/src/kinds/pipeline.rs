@@ -7,6 +7,11 @@ use crate::urn::Urn;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::LazyLock;
+
+/// A Bento duration: a positive count and one of the units Bento accepts (PL-26, PL-27).
+static PERIOD_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^[1-9][0-9]*(ms|s|m|h)$").expect("valid regex"));
 
 /// Desired specification of a [`Pipeline`][crate::kinds::Pipeline] resource (PL-01..PL-28).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -17,6 +22,13 @@ pub struct PipelineSpec {
     /// Standard cron schedule expression for scheduled runs (PL-04, PL-26..PL-28).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
+    /// How often the pipeline polls its source, as a Bento duration (`15s`, `5m`).
+    ///
+    /// The reconciler reads it to pick the class (PL-26) and copies it into the runner's
+    /// `input.generate.interval` (PL-27). Absent means push-based: an MQTT or
+    /// subscription input driven by its source rather than by a clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<String>,
     /// Optional context source query or subscription trigger for derived pipelines (PL-31).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<PipelineSource>,
@@ -243,6 +255,25 @@ impl Kind for PipelineSpec {
 }
 
 impl PipelineSpec {
+    /// The polling period in whole seconds, `None` when the pipeline is push-based or the
+    /// period does not parse (PL-26).
+    ///
+    /// A sub-second period floors to zero, which is still shorter than thirty seconds and
+    /// therefore still resident.
+    pub fn period_seconds(&self) -> Option<u64> {
+        let period = self.period.as_deref()?;
+        let split = period.find(|c: char| !c.is_ascii_digit())?;
+        let (count, unit) = period.split_at(split);
+        let count: u64 = count.parse().ok()?;
+        match unit {
+            "ms" => Some(count / 1000),
+            "s" => Some(count),
+            "m" => Some(count * 60),
+            "h" => Some(count * 3600),
+            _ => None,
+        }
+    }
+
     /// Validates class scheduling, target endpoint, compute engine, and resource bounds.
     pub fn validate(&self) -> Result<()> {
         if self.target_endpoint.entity_type() != "Endpoint" {
@@ -272,6 +303,16 @@ impl PipelineSpec {
                 }
             }
             PipelineClass::Auto => {}
+        }
+
+        if let Some(ref period) = self.period {
+            if !PERIOD_RE.is_match(period) {
+                return Err(Error::Name {
+                    field: "spec.period",
+                    value: period.clone(),
+                    reason: "period must be a Bento duration such as `250ms`, `15s`, `5m` or `1h`",
+                });
+            }
         }
 
         if let Some(ref sched) = self.schedule {

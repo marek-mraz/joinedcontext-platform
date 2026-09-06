@@ -216,3 +216,35 @@ fn test_quotas_zero_bounds_fail() {
     p.spec.quotas.as_mut().unwrap().max_memory_mb = Some(0);
     assert!(p.validate().is_err(), "maxMemoryMb: 0 must fail");
 }
+
+/// PL-26 and PL-27 read `spec.period`; it is a Bento duration because the reconciler
+/// copies it into `input.generate.interval`.
+#[test]
+fn period_parses_every_bento_unit_and_refuses_anything_else() {
+    let mut spec = Pipeline::from_yaml(GOLDEN_MQTT)
+        .expect("the golden manifest parses")
+        .spec;
+
+    for (period, seconds) in [
+        ("250ms", 0u64),
+        ("1500ms", 1),
+        ("15s", 15),
+        ("45s", 45),
+        ("5m", 300),
+        ("1h", 3600),
+    ] {
+        spec.period = Some(period.to_owned());
+        spec.validate().unwrap_or_else(|e| panic!("{period}: {e}"));
+        assert_eq!(spec.period_seconds(), Some(seconds), "{period}");
+    }
+
+    for bad in ["", "0s", "15", "15 s", "15sec", "-15s", "s", "1d", "1.5s"] {
+        spec.period = Some(bad.to_owned());
+        assert!(spec.validate().is_err(), "`{bad}` must be refused");
+    }
+
+    spec.period = None;
+    assert_eq!(spec.period_seconds(), None, "no period means push-based");
+    spec.validate()
+        .expect("a push-based pipeline needs no period");
+}

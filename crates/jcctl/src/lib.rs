@@ -3,9 +3,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod apisix;
 pub mod commands;
 pub mod diff;
 pub mod loader;
+pub mod pipelines;
 pub mod platform;
 pub mod waves;
 
