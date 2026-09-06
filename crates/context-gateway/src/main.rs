@@ -1,6 +1,8 @@
 //! The Context Gateway binary: one listener, one broker, one endpoint table (T-0005).
 
 use context_gateway::app::{router, Gateway};
+use context_gateway::auth::jwks;
+use context_gateway::auth::token::Verifier;
 use context_gateway::config::Config;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -30,12 +32,20 @@ async fn main() -> ExitCode {
         Box::new(PolicyPdp),
         config.org_domain.clone(),
     );
-    let gateway = match &config.repo_dir {
-        None => gateway,
+    let (endpoints, accounts) = match &config.repo_dir {
+        None => (
+            Vec::new(),
+            context_gateway::auth::accounts::ServiceAccounts::new(),
+        ),
         Some(dir) => match store::load(dir) {
-            Ok(endpoints) => {
-                tracing::info!(count = endpoints.len(), dir = %dir.display(), "endpoints loaded");
-                gateway.serve(endpoints)
+            Ok(loaded) => {
+                tracing::info!(
+                    endpoints = loaded.0.len(),
+                    accounts = loaded.1.len(),
+                    dir = %dir.display(),
+                    "repository loaded"
+                );
+                loaded
             }
             Err(error) => {
                 // An unreadable repository is a deployment fault, not a request fault:
@@ -44,6 +54,26 @@ async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
+    };
+    let gateway = gateway.serve(endpoints);
+
+    // The realm's keys are refreshed in the background; a request never fetches (PF-46).
+    let gateway = match (&config.oidc_issuer, &config.oidc_jwks_url) {
+        (Some(issuer), Some(jwks_url)) => {
+            let verifier = Arc::new(Verifier::new(issuer.clone()));
+            if let Err(error) = jwks::refresh(&verifier, jwks_url).await {
+                tracing::error!(%error, "cannot load the realm signing keys");
+                return ExitCode::FAILURE;
+            }
+            tokio::spawn(jwks::keep_current(Arc::clone(&verifier), jwks_url.clone()));
+            gateway.authenticate(verifier, accounts, config.public_url.clone())
+        }
+        _ => {
+            tracing::warn!(
+                "no realm configured: only endpoints with audience `public` will answer"
+            );
+            gateway
+        }
     };
 
     let app = router(Arc::new(gateway)).layer(tower_http::trace::TraceLayer::new_for_http());

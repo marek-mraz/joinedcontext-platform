@@ -24,8 +24,12 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+jsonwebtoken = "9"
 
 [dev-dependencies]
+# a throwaway signing key per test run, so no private key is ever written into the repo
+base64 = "0.22"
+ring = "0.17"
 serde_norway = "0.9"
 # `oneshot`, so the tenancy middleware is tested through a real tower stack.
 tower = { version = "0.5", features = ["util"] }

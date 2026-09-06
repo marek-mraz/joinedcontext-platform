@@ -21,6 +21,14 @@ pub struct Config {
     /// The organization's verified domain, the middle segment of every entity URN
     /// (`JC_GATEWAY_ORG_DOMAIN`).
     pub org_domain: String,
+    /// The realm every token must be issued by (`JC_OIDC_ISSUER`); absent means the
+    /// gateway serves public endpoints only and refuses every presented token.
+    pub oidc_issuer: Option<String>,
+    /// The realm's JWKS, fetched in the background (`JC_OIDC_JWKS_URL`).
+    pub oidc_jwks_url: Option<String>,
+    /// The gateway's own public base URL (`JC_GATEWAY_PUBLIC_URL`), which makes the full
+    /// RFC 8707 resource URI an acceptable token audience alongside the endpoint slug.
+    pub public_url: Option<String>,
 }
 
 /// Why the environment does not describe a runnable gateway.
@@ -60,11 +68,25 @@ impl Config {
         let org_domain = std::env::var("JC_GATEWAY_ORG_DOMAIN")
             .map_err(|_| ConfigError::Missing("JC_GATEWAY_ORG_DOMAIN"))?;
 
+        let oidc_issuer = std::env::var("JC_OIDC_ISSUER").ok();
+        let oidc_jwks_url = std::env::var("JC_OIDC_JWKS_URL").ok();
+        if oidc_issuer.is_some() != oidc_jwks_url.is_some() {
+            return Err(ConfigError::Invalid {
+                name: "JC_OIDC_ISSUER",
+                reason: "an issuer without a JWKS URL verifies nothing, and a JWKS URL without an issuer accepts any realm; set both or neither".to_owned(),
+            });
+        }
+
         Ok(Self {
             bind,
             broker_url,
             repo_dir: std::env::var("JC_GATEWAY_REPO_DIR").ok().map(PathBuf::from),
             org_domain,
+            oidc_issuer,
+            oidc_jwks_url,
+            public_url: std::env::var("JC_GATEWAY_PUBLIC_URL")
+                .ok()
+                .map(|url| url.trim_end_matches('/').to_owned()),
         })
     }
 }

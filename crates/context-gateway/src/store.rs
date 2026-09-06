@@ -6,15 +6,18 @@
 //! rather than half-applied — an endpoint that is not in the table answers 404, which is
 //! the same thing an endpoint that does not exist answers (EP-03).
 
+use crate::auth::accounts::{accounts_of, ServiceAccounts};
 use crate::resolver::Endpoint;
 use jc_core::kinds::{EndpointSpec, PolicySpec};
 use jcctl::loader::{RawManifest, Repository};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Loads every endpoint the repository under `dir` declares (CC-08).
-pub fn load(dir: &Path) -> Result<Vec<Endpoint>, jcctl::LoadError> {
-    Ok(endpoints_of(&Repository::load(dir)?))
+/// Loads the endpoint table and the identity table from the repository under `dir`
+/// (CC-08, PF-46).
+pub fn load(dir: &Path) -> Result<(Vec<Endpoint>, ServiceAccounts), jcctl::LoadError> {
+    let repo = Repository::load(dir)?;
+    Ok((endpoints_of(&repo), accounts_of(&repo)))
 }
 
 /// The endpoint table a loaded repository describes.

@@ -11,6 +11,8 @@
 //! 5. check a write payload whole, and narrow a read's query to the grants (GW11, GW17),
 //! 6. forward with the tenant pinned, then project the answer back down (R9, R22).
 
+use crate::auth::accounts::ServiceAccounts;
+use crate::auth::token::{self, Claims, Verifier};
 use crate::pdp::evaluator::{Constraints, Subject, Verdict};
 use crate::pdp::write_guard;
 use crate::pdp::{projection, Pdp};
@@ -19,13 +21,15 @@ use crate::resolver::{Endpoint, SlugResolver};
 use crate::{middleware::tenancy, operations, query};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderValue, Response, StatusCode};
+use axum::http::header::AUTHORIZATION;
+use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{any, get};
 use axum::Router;
 use jc_core::kinds::{Operation, Representation};
 use jc_core::ProblemDetails;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// The largest request or response body the gateway will hold in memory.
@@ -49,6 +53,12 @@ pub struct Gateway {
     pub pdp: Box<dyn Pdp>,
     /// The organization's verified domain, the middle segment of every entity URN.
     pub org_domain: String,
+    /// The realm's token verifier; absent means no token is accepted at all (PF-46).
+    pub verifier: Option<Arc<Verifier>>,
+    /// The service accounts a token's `azp` can name.
+    pub accounts: ServiceAccounts,
+    /// The gateway's public base URL, when the deployment names one.
+    pub public_url: Option<String>,
 }
 
 impl Gateway {
@@ -59,7 +69,32 @@ impl Gateway {
             broker,
             pdp,
             org_domain: org_domain.into(),
+            verifier: None,
+            accounts: ServiceAccounts::new(),
+            public_url: None,
         }
+    }
+
+    /// Accepts tokens from one realm, and maps their `azp` to these accounts (PF-46).
+    pub fn authenticate(
+        mut self,
+        verifier: Arc<Verifier>,
+        accounts: ServiceAccounts,
+        public_url: Option<String>,
+    ) -> Self {
+        self.verifier = Some(verifier);
+        self.accounts = accounts;
+        self.public_url = public_url;
+        self
+    }
+
+    /// Every value that names this endpoint as an RFC 8707 resource.
+    fn audiences_for(&self, endpoint: &Endpoint) -> Vec<String> {
+        let mut audiences = vec![endpoint.slug.clone()];
+        if let Some(base) = &self.public_url {
+            audiences.push(format!("{base}/api/endpoint/{}", endpoint.slug));
+        }
+        audiences
     }
 
     /// Replaces the endpoint table (EP-19).
@@ -105,12 +140,10 @@ async fn ngsi_ld(
         return ProblemDetails::not_found().into_response();
     }
 
-    // T-0228 puts the verified token's principal here; until then every caller is the
-    // anonymous one, which is exactly the caller DEMO steps 4 and 5 use.
-    let subject = Subject::anonymous();
-    if !endpoint.admits(None) {
-        return ProblemDetails::unauthorized().into_response();
-    }
+    let subject = match authenticate(&gateway, &endpoint, request.headers()) {
+        Ok(subject) => subject,
+        Err(problem) => return problem.into_response(),
+    };
 
     let method = request.method().clone();
     let uri = request.uri().clone();
@@ -131,6 +164,16 @@ async fn ngsi_ld(
     let verdict = gateway
         .pdp
         .decide(&subject, operation, &query::requested(&params), &endpoint);
+    // The audit line names the principal the gateway established, never the one the
+    // request claimed (PF-46).
+    tracing::info!(
+        slug = %endpoint.slug,
+        space = %endpoint.space,
+        principal = %principal_of(&subject),
+        operation = %operation.as_str(),
+        allowed = !verdict.is_deny(),
+        "decision"
+    );
     let Verdict::Rewrite(constraints) = verdict else {
         return refused(operation, &path);
     };
@@ -286,5 +329,106 @@ async fn project_answer(
             tracing::error!(%error, "the projected answer does not serialize");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+/// Establishes who is calling, from the verified token or from nobody (PF-45, PF-46).
+///
+/// The three answers are: a verified principal, the anonymous `public` role on an endpoint
+/// that admits it, or 401. There is no fourth answer where a claim the client made is
+/// believed without a signature behind it.
+fn authenticate(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    headers: &HeaderMap,
+) -> Result<Subject, Box<ProblemDetails>> {
+    let presented = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+
+    let raw = match token::bearer(presented) {
+        Ok(raw) => raw,
+        // No token at all: the anonymous caller, which only a public endpoint admits
+        // (EP-16, GW22).
+        Err(token::Rejected::NoToken) if endpoint.admits(None) => return Ok(Subject::anonymous()),
+        Err(rejected) => return Err(Box::new(rejected.into())),
+    };
+
+    // A token was presented and the gateway has no realm to check it against. Believing
+    // it would be believing the client.
+    let Some(verifier) = &gateway.verifier else {
+        tracing::warn!("a token was presented but no realm is configured");
+        return Err(Box::new(ProblemDetails::unauthorized()));
+    };
+    let claims = verifier
+        .verify(raw, &gateway.audiences_for(endpoint))
+        .map_err(|rejected| Box::new(ProblemDetails::from(rejected)))?;
+
+    subject_of(&claims, endpoint, gateway)
+}
+
+/// Turns verified claims into the subject the PDP evaluates.
+fn subject_of(
+    claims: &Claims,
+    endpoint: &Endpoint,
+    gateway: &Gateway,
+) -> Result<Subject, Box<ProblemDetails>> {
+    let groups: BTreeSet<String> = claims
+        .groups
+        .iter()
+        .map(|group| group.trim_start_matches('/').to_owned())
+        .collect();
+
+    // A workload: `azp` has to name a ServiceAccount this repository declares, or the
+    // token is valid and the account is unknown, which is an account with no grants
+    // (PF-46).
+    if let Some(azp) = claims.azp.as_deref() {
+        if let Some(account) = gateway.accounts.resolve(azp) {
+            if !endpoint.admits(Some(&account.project)) {
+                return Err(Box::new(ProblemDetails::forbidden()));
+            }
+            return Ok(Subject {
+                user: None,
+                service_account: Some(account.name.clone()),
+                roles: account.roles_in(&account.project, &endpoint.space),
+                groups,
+                did: None,
+            });
+        }
+        if claims.preferred_username.is_none() {
+            tracing::warn!(azp, "token from a client no ServiceAccount manifest names");
+            return Err(Box::new(ProblemDetails::forbidden()));
+        }
+    }
+
+    // A human. The token says they are a member of the organization; a group names the
+    // project when the endpoint's audience is a list of them (EP-14, EP-15).
+    let Some(user) = claims.preferred_username.clone() else {
+        return Err(Box::new(ProblemDetails::unauthorized()));
+    };
+    let project = std::iter::once(&endpoint.project)
+        .chain(endpoint.allowed_projects.iter())
+        .find(|project| groups.contains(*project))
+        .cloned()
+        .unwrap_or_default();
+    if !endpoint.admits(Some(&project)) {
+        return Err(Box::new(ProblemDetails::forbidden()));
+    }
+
+    Ok(Subject {
+        user: Some(user),
+        service_account: None,
+        roles: claims.roles().iter().cloned().collect(),
+        groups,
+        did: None,
+    })
+}
+
+/// The principal, as one string for the audit log.
+fn principal_of(subject: &Subject) -> String {
+    match (&subject.user, &subject.service_account) {
+        (Some(user), _) => format!("user:{user}"),
+        (_, Some(account)) => format!("serviceAccount:{account}"),
+        _ => "anonymous".to_owned(),
     }
 }

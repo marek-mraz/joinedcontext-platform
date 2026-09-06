@@ -5,6 +5,8 @@
 //! — because the interesting failures are the ones at the seam: a header the broker does
 //! not get, a query parameter it does not understand, a status the gateway swallows.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use context_gateway::app::{router, Gateway};
@@ -21,6 +23,7 @@ const SPACE: &str = "ovzdusie";
 const ORG: &str = "banskabystrica.sk";
 const PUBLIC_SLUG: &str = "k4y7pq2mzt6vhx3nbwrs5cjd8f";
 const MEMBERS_SLUG: &str = "t9x2wqvn7mzc4hd6bkp3rjs5ga";
+const WRITER_SLUG: &str = "p3mq8vzt5xkc2nhw7brj4gd6sy";
 const STATION: &str =
     "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:station-integration-01";
 
@@ -351,4 +354,178 @@ fn get_raw(path: &str) -> Request<Body> {
         .uri(path)
         .body(Body::empty())
         .expect("a request")
+}
+
+/// PF-45, PF-46: a workload calls with an audience-bound `client_credentials` token, the
+/// gateway maps `azp` to the `ServiceAccount` the repository declares, and the grants of
+/// that account — not of the token — decide.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_service_account_writes_only_what_its_own_manifest_grants() {
+    let Some(antares) = Antares::start() else {
+        return;
+    };
+    let realm = common::Realm::new();
+    let accounts = service_accounts();
+
+    let writer = Endpoint {
+        slug: WRITER_SLUG.to_owned(),
+        space: SPACE.to_owned(),
+        project: SPACE.to_owned(),
+        audience: Audience::Organization,
+        allowed_projects: Vec::new(),
+        representations: vec![Representation::NgsiLd],
+        rate_limit: None,
+        policies: vec![serde_norway::from_str(
+            r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: serviceAccount, id: writer }
+operations: [createEntity, retrieveEntity, queryEntity, deleteEntity]
+information:
+  - entities:
+      - type: AirQualityObserved
+    propertyNames: [pm10, pm25, location]
+"#,
+        )
+        .expect("the grant parses")],
+    };
+    let gateway = Gateway::new(Broker::new(antares.url()), Box::new(PolicyPdp), ORG)
+        .serve([writer, endpoint(PUBLIC_SLUG, Audience::Public)])
+        .authenticate(
+            std::sync::Arc::new(realm.verifier()),
+            accounts,
+            Some("https://2.28.67.127.sslip.io".to_owned()),
+        );
+    let app = router(std::sync::Arc::new(gateway));
+
+    let granted = realm.workload_token("ovzdusie-writer", json!(WRITER_SLUG));
+    let (status, body) = call(
+        &app,
+        authorized(post(WRITER_SLUG, "/entities", &station(None)), &granted),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the granted account writes: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // The same token, the same endpoint, a different account: no policy names it, so it
+    // has no grants at all.
+    let outsider = realm.workload_token("ovzdusie-outsider", json!(WRITER_SLUG));
+    let (status, _) = call(
+        &app,
+        authorized(post(WRITER_SLUG, "/entities", &station(None)), &outsider),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an account with no grant writes nothing"
+    );
+
+    // A token from a Keycloak client no manifest names is valid and still worthless.
+    let stranger = realm.workload_token("ovzdusie-never-declared", json!(WRITER_SLUG));
+    let (status, _) = call(&app, authorized(get(WRITER_SLUG, "/entities"), &stranger)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The right realm, the right account, the wrong resource: 401, because the token was
+    // never issued for this endpoint (RFC 8707).
+    let elsewhere = realm.workload_token("ovzdusie-writer", json!(PUBLIC_SLUG));
+    let (status, body) = call(&app, authorized(get(WRITER_SLUG, "/entities"), &elsewhere)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let problem: Value = serde_json::from_slice(&body).expect("problem+json");
+    assert!(problem["type"]
+        .as_str()
+        .is_some_and(|t| t.ends_with("unauthorized")));
+
+    // The full RFC 8707 resource URI names the same endpoint and is accepted too.
+    let by_uri = realm.workload_token(
+        "ovzdusie-writer",
+        json!(format!(
+            "https://2.28.67.127.sslip.io/api/endpoint/{WRITER_SLUG}"
+        )),
+    );
+    let (status, _) = call(&app, authorized(get(WRITER_SLUG, "/entities"), &by_uri)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // No token at all on an endpoint that is not public.
+    let (status, _) = call(&app, get(WRITER_SLUG, "/entities")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // An expired token is refused before any of it is believed.
+    let stale = realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "service-account-writer",
+        "aud": WRITER_SLUG,
+        "azp": "ovzdusie-writer",
+        "exp": common::in_seconds(-3600),
+    }));
+    let (status, _) = call(&app, authorized(get(WRITER_SLUG, "/entities"), &stale)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Clean up, so a rerun starts from the same place.
+    let _ = call(
+        &app,
+        authorized(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/endpoint/{WRITER_SLUG}/ngsi-ld/v1/entities/{STATION}"
+                ))
+                .body(Body::empty())
+                .expect("a request"),
+            &granted,
+        ),
+    )
+    .await;
+}
+
+/// Two accounts in one project: the client id is `{project}-{name}`, derived from the
+/// manifests rather than written down twice (Architecture/12 section 3).
+fn service_accounts() -> context_gateway::auth::accounts::ServiceAccounts {
+    let dir = std::env::temp_dir().join("gateway-antares-accounts");
+    let _ = std::fs::remove_dir_all(&dir);
+    let accounts_dir = dir.join("projects/ovzdusie/access/serviceaccounts");
+    std::fs::create_dir_all(&accounts_dir).expect("a repository");
+    for name in ["writer", "outsider"] {
+        std::fs::write(
+            accounts_dir.join(format!("{name}.yaml")),
+            format!(
+                r#"apiVersion: joinedcontext.com/v1alpha1
+kind: ServiceAccount
+metadata:
+  name: {name}
+  namespace: ovzdusie
+spec:
+  owner:
+    user: demo.steward
+  purpose: "integration test account"
+  roles:
+    - role: space-writer
+      scope:
+        contextSpace: ovzdusie
+  credentials:
+    - kind: oauth-client
+      name: default
+"#
+            ),
+        )
+        .expect("the manifest is written");
+    }
+    let repo = jcctl::loader::Repository::load(&dir).expect("the repository loads");
+    let accounts = context_gateway::auth::accounts::accounts_of(&repo);
+    assert_eq!(accounts.len(), 2);
+    std::fs::remove_dir_all(&dir).expect("clean up");
+    accounts
+}
+
+/// The same request, carrying a bearer token.
+fn authorized(request: Request<Body>, token: &str) -> Request<Body> {
+    let (mut parts, body) = request.into_parts();
+    parts.headers.insert(
+        axum::http::header::AUTHORIZATION,
+        axum::http::HeaderValue::from_str(&format!("Bearer {token}")).expect("a header value"),
+    );
+    Request::from_parts(parts, body)
 }
