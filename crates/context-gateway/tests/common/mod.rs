@@ -109,3 +109,83 @@ pub fn in_seconds(offset: i64) -> i64 {
 pub fn b64(raw: &str) -> String {
     URL_SAFE_NO_PAD.encode(raw)
 }
+
+/// What the broker was asked for on one hop.
+#[derive(Debug, Clone, Default)]
+pub struct Hop {
+    /// The path, which must be the plain CIM 009 tree with no surface prefix left on it.
+    pub path: String,
+    /// The query string as the gateway rewrote it.
+    pub query: String,
+    /// The tenant the gateway pinned (GW25).
+    pub tenant: String,
+    /// Whether any value the client forged survived the hop.
+    pub forged: bool,
+}
+
+/// A broker on a real socket, because the gateway forwards over HTTP and what these tests
+/// assert is what comes out of the other end.
+///
+/// `pages` are answered in order and the last one repeats, so a test can hand back one
+/// full page followed by a short one and watch the gateway page through them (EP-44).
+pub struct BrokerStub {
+    /// The base URL to build a [`context_gateway::proxy::Broker`] from.
+    pub url: String,
+    /// Every hop the gateway made, in order.
+    pub hops: std::sync::Arc<std::sync::Mutex<Vec<Hop>>>,
+}
+
+impl BrokerStub {
+    /// Starts the stub and answers `pages` in order.
+    pub async fn start(pages: Vec<Value>) -> Self {
+        let hops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let served = std::sync::Arc::new(std::sync::Mutex::new(pages));
+        let recorder = std::sync::Arc::clone(&hops);
+
+        let app = axum::Router::new().fallback(axum::routing::any(
+            move |request: axum::extract::Request| {
+                let (recorder, served) = (
+                    std::sync::Arc::clone(&recorder),
+                    std::sync::Arc::clone(&served),
+                );
+                async move {
+                    let headers = request.headers().clone();
+                    let mut hops = recorder.lock().expect("no poisoned lock");
+                    hops.push(Hop {
+                        path: request.uri().path().to_owned(),
+                        query: request.uri().query().unwrap_or_default().to_owned(),
+                        tenant: headers
+                            .get("NGSILD-Tenant")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned(),
+                        forged: headers
+                            .get_all("NGSILD-Tenant")
+                            .iter()
+                            .any(|value| value.as_bytes() == b"somebody-elses-space"),
+                    });
+                    let pages = served.lock().expect("no poisoned lock");
+                    let index = (hops.len() - 1).min(pages.len().saturating_sub(1));
+                    axum::Json(pages.get(index).cloned().unwrap_or_else(|| json!([])))
+                }
+            },
+        ));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a free port");
+        let port = listener.local_addr().expect("an address").port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Self {
+            url: format!("http://127.0.0.1:{port}"),
+            hops,
+        }
+    }
+
+    /// The hops the gateway made, cloned out of the recorder.
+    pub fn hops(&self) -> Vec<Hop> {
+        self.hops.lock().expect("no poisoned lock").clone()
+    }
+}

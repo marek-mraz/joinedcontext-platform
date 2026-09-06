@@ -86,6 +86,8 @@ fn endpoint(models: Vec<Model>) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd],
         rate_limit: None,
+        file_limits: None,
+        base_path: format!("/api/endpoint/{SLUG}"),
         models,
         policies: vec![policy(
             r#"contextSpaceRef: ovzdusie

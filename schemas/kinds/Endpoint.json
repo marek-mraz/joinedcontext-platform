@@ -135,6 +135,17 @@
           },
           "type": "array"
         },
+        "fileLimits": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FileLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional ceiling on one `file.*` download (EP-44)."
+        },
         "policyRef": {
           "anyOf": [
             {
@@ -172,6 +183,31 @@
         "enabledRepresentations",
         "slug"
       ],
+      "type": "object"
+    },
+    "FileLimits": {
+      "additionalProperties": false,
+      "description": "How much of a `file.*` representation one download may return (EP-44).\n\nThe gateway pages through the broker and stops at the first row that would cross either bound, so a caller gets a refusal rather than a file that is silently short. An absent field leaves the gateway's own ceiling in charge.",
+      "properties": {
+        "maxFileBytes": {
+          "description": "Bytes a single download may return.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxFileRows": {
+          "description": "Rows a single download may return.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "MultiLanguageMap": {

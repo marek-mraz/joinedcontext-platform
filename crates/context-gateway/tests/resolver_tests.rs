@@ -14,6 +14,8 @@ fn endpoint(slug: &str, space: &str) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd, Representation::GeoJson],
         rate_limit: None,
+        file_limits: None,
+        base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         policies: Vec::new(),
     }

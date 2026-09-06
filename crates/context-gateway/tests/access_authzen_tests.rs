@@ -28,6 +28,8 @@ fn endpoint() -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd],
         rate_limit: None,
+        file_limits: None,
+        base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         policies: vec![
             policy(

@@ -11,8 +11,8 @@
 //! it guessed (EP-03, EP-23).
 
 use arc_swap::ArcSwap;
-use jc_core::kinds::{Audience, PolicySpec, RateLimits, Representation};
-use std::collections::HashMap;
+use jc_core::kinds::{Audience, FileLimits, PolicySpec, RateLimits, Representation};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// Everything the gateway needs about one endpoint, resolved in a single lookup.
@@ -32,6 +32,11 @@ pub struct Endpoint {
     pub representations: Vec<Representation>,
     /// The token-bucket configuration, absent when the endpoint sets no limit (EP-20).
     pub rate_limit: Option<RateLimits>,
+    /// The ceiling on one `file.*` download, absent when the endpoint sets none (EP-44).
+    pub file_limits: Option<FileLimits>,
+    /// The path this record answers under, which is also its RFC 8707 resource when the
+    /// deployment names a public URL: `/api/endpoint/{slug}` or `/cs/{space}` (SP-01).
+    pub base_path: String,
     /// The policies the PDP evaluates for callers of this endpoint (GW8).
     pub policies: Vec<PolicySpec>,
     /// The data models of the space, with whatever artifacts the repository carries
@@ -77,10 +82,44 @@ impl Endpoint {
     }
 }
 
-/// The slug table, swapped whole when the reconciler changes an endpoint (EP-17, EP-19).
+/// One context space as its own surface (SP-01, SP-10).
+///
+/// The enforcement record is an [`Endpoint`] like any other, so a request to
+/// `/cs/{space}/ngsi-ld/v1/` passes the same six steps through the same code as a request
+/// to an endpoint slug: the space surface cannot drift from the endpoint surface because
+/// there is only one of them. What a space carries beyond it is the description a DCAT-AP
+/// record needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Space {
+    /// The record the PDP decides on and the enforcement point pins the tenant from.
+    pub endpoint: Arc<Endpoint>,
+    /// The manifest's title per locale (PF-24).
+    pub title: BTreeMap<String, String>,
+    /// The manifest's description per locale (PF-24).
+    pub description: BTreeMap<String, String>,
+    /// Whether this space is an ephemeral sandbox (PF-19).
+    pub is_sandbox: bool,
+    /// The locale the space declares for its entities, when it declares one (PF-25).
+    pub default_locale: Option<String>,
+}
+
+impl Space {
+    /// The space's name, which is the `{space}` segment of every URL and every URN.
+    pub fn name(&self) -> &str {
+        &self.endpoint.space
+    }
+}
+
+/// The tables a request is resolved against, swapped whole when the reconciler changes a
+/// manifest (EP-17, EP-19).
+///
+/// Endpoints and spaces are two tables rather than one, because an opaque slug and a space
+/// name are two namespaces: a slug that happened to spell a space name must not resolve to
+/// it, and a space name must never be reachable by guessing a slug (EP-03).
 #[derive(Debug, Default)]
 pub struct SlugResolver {
     table: ArcSwap<HashMap<String, Arc<Endpoint>>>,
+    spaces: ArcSwap<HashMap<String, Arc<Space>>>,
 }
 
 impl SlugResolver {
@@ -114,6 +153,29 @@ impl SlugResolver {
             .map(|endpoint| (endpoint.slug.clone(), Arc::new(endpoint)))
             .collect();
         self.table.store(Arc::new(table));
+    }
+
+    /// The space behind a name, or nothing (SP-06).
+    pub fn resolve_space(&self, space: &str) -> Option<Arc<Space>> {
+        self.spaces.load().get(space).map(Arc::clone)
+    }
+
+    /// Every space the gateway serves, by name, for the catalog to narrow (SP-11).
+    ///
+    /// Sorted, so the catalog a caller reads twice reads the same way twice.
+    pub fn spaces(&self) -> Vec<Arc<Space>> {
+        let mut spaces: Vec<Arc<Space>> = self.spaces.load().values().map(Arc::clone).collect();
+        spaces.sort_by(|left, right| left.name().cmp(right.name()));
+        spaces
+    }
+
+    /// Replaces the whole space table in one atomic step (EP-19).
+    pub fn replace_spaces(&self, spaces: impl IntoIterator<Item = Space>) {
+        let table: HashMap<String, Arc<Space>> = spaces
+            .into_iter()
+            .map(|space| (space.endpoint.space.clone(), Arc::new(space)))
+            .collect();
+        self.spaces.store(Arc::new(table));
     }
 
     /// How many endpoints the table currently holds.

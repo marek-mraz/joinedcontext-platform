@@ -205,3 +205,33 @@ fn golden_shared_space_reference_parses_validates_and_paths() {
         "projects/bb-doprava/shared/external-air-quality.yaml"
     );
 }
+
+/// EP-44: a declared ceiling has to leave something to download, so a zero is refused
+/// where the manifest is written rather than at the request that returns nothing.
+#[test]
+fn a_zero_file_limit_is_refused() {
+    let with_limits = |body: &str| {
+        GOLDEN.replace(
+            "  caching:\n    maxAgeSeconds: 60\n",
+            &format!("  fileLimits:\n{body}  caching:\n    maxAgeSeconds: 60\n"),
+        )
+    };
+
+    let good = Endpoint::from_yaml(&with_limits("    maxFileRows: 50000\n")).expect("valid YAML");
+    good.validate().expect("a positive ceiling validates");
+    assert_eq!(
+        good.spec
+            .file_limits
+            .as_ref()
+            .and_then(|limits| limits.max_file_rows),
+        Some(50_000)
+    );
+
+    for body in ["    maxFileRows: 0\n", "    maxFileBytes: 0\n"] {
+        let endpoint = Endpoint::from_yaml(&with_limits(body)).expect("valid YAML");
+        assert!(
+            endpoint.validate().is_err(),
+            "a zero ceiling returns nothing at all: {body}"
+        );
+    }
+}

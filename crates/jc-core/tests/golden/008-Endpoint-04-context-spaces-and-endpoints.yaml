@@ -19,5 +19,8 @@ spec:
   rateLimits:
     requestsPerMinute: 600
     burst: 50
+  fileLimits:            # Ceiling of one file.* download (EP-44)
+    maxFileRows: 50000
+    maxFileBytes: 33554432
   caching:
     maxAgeSeconds: 60

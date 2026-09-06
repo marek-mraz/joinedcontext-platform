@@ -32,8 +32,9 @@ async fn main() -> ExitCode {
         Box::new(PolicyPdp),
         config.org_domain.clone(),
     );
-    let (endpoints, accounts) = match &config.repo_dir {
+    let (endpoints, spaces, accounts) = match &config.repo_dir {
         None => (
+            Vec::new(),
             Vec::new(),
             context_gateway::auth::accounts::ServiceAccounts::new(),
         ),
@@ -41,7 +42,8 @@ async fn main() -> ExitCode {
             Ok(loaded) => {
                 tracing::info!(
                     endpoints = loaded.0.len(),
-                    accounts = loaded.1.len(),
+                    spaces = loaded.1.len(),
+                    accounts = loaded.2.len(),
                     dir = %dir.display(),
                     "repository loaded"
                 );
@@ -55,7 +57,7 @@ async fn main() -> ExitCode {
             }
         },
     };
-    let gateway = gateway.serve(endpoints);
+    let gateway = gateway.serve(endpoints).serve_spaces(spaces);
 
     // The realm's keys are refreshed in the background; a request never fetches (PF-46).
     let gateway = match (&config.oidc_issuer, &config.oidc_jwks_url) {

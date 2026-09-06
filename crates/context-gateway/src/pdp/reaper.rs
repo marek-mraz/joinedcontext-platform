@@ -69,17 +69,22 @@ impl Reaper {
             return false;
         }
         match store::load(&self.dir) {
-            Ok((endpoints, accounts)) => {
-                let counts = (endpoints.len(), accounts.len());
+            Ok((endpoints, spaces, accounts)) => {
+                let counts = (endpoints.len(), spaces.len(), accounts.len());
                 // The endpoint table carries the policies, so replacing it purges every
-                // grant the PDP would have honoured; the accounts table is what a token's
-                // `azp` resolves through, so a withdrawn credential stops resolving here.
+                // grant the PDP would have honoured; the space table carries the same
+                // policies for the `/cs` surface and has to be swapped with it, or a
+                // withdrawn grant would still be honoured there; the accounts table is
+                // what a token's `azp` resolves through, so a withdrawn credential stops
+                // resolving here.
                 self.gateway.resolver.replace(endpoints);
+                self.gateway.resolver.replace_spaces(spaces);
                 self.gateway.replace_accounts(accounts);
                 self.seen = current;
                 tracing::info!(
                     endpoints = counts.0,
-                    accounts = counts.1,
+                    spaces = counts.1,
+                    accounts = counts.2,
                     dir = %self.dir.display(),
                     "repository reloaded, policy caches purged"
                 );

@@ -2,3 +2,4 @@
 
 pub mod access;
 pub mod schema;
+pub mod space_surface;

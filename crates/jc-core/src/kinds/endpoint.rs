@@ -260,6 +260,9 @@ pub struct EndpointSpec {
     /// Optional rate limiting configuration (EP-20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limits: Option<RateLimits>,
+    /// Optional ceiling on one `file.*` download (EP-44).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_limits: Option<FileLimits>,
     /// Optional response caching configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caching: Option<Caching>,
@@ -341,6 +344,10 @@ impl EndpointSpec {
             limits.validate()?;
         }
 
+        if let Some(ref limits) = self.file_limits {
+            limits.validate()?;
+        }
+
         if let Some(ref policy) = self.policy_ref {
             if policy.entity_type() != "Policy" {
                 return Err(Error::Kind {
@@ -361,6 +368,43 @@ impl EndpointSpec {
                 field: "slug",
                 value: self.slug.to_string(),
                 reason: "slug must not encode context space, project, or organization name (EP-03)",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// How much of a `file.*` representation one download may return (EP-44).
+///
+/// The gateway pages through the broker and stops at the first row that would cross
+/// either bound, so a caller gets a refusal rather than a file that is silently short.
+/// An absent field leaves the gateway's own ceiling in charge.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FileLimits {
+    /// Rows a single download may return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_file_rows: Option<u32>,
+    /// Bytes a single download may return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_file_bytes: Option<u64>,
+}
+
+impl FileLimits {
+    /// Validates that a declared bound is positive: a zero blocks the download entirely.
+    pub fn validate(&self) -> Result<()> {
+        if self.max_file_rows == Some(0) {
+            return Err(Error::Name {
+                field: "fileLimits.maxFileRows",
+                value: "0".to_string(),
+                reason: "a limit of zero returns no rows at all; omit the field instead",
+            });
+        }
+        if self.max_file_bytes == Some(0) {
+            return Err(Error::Name {
+                field: "fileLimits.maxFileBytes",
+                value: "0".to_string(),
+                reason: "a limit of zero returns no bytes at all; omit the field instead",
             });
         }
         Ok(())

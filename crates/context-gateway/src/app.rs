@@ -13,14 +13,14 @@
 
 use crate::auth::accounts::ServiceAccounts;
 use crate::auth::token::{self, Claims, Verifier};
-use crate::handlers::schema;
+use crate::handlers::{schema, space_surface};
 use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::evaluator::{Constraints, Subject, Verdict};
 use crate::pdp::write_guard;
 use crate::pdp::{geo, projection, temporal, Pdp};
 use crate::proxy::{self, Broker};
-use crate::resolver::{Endpoint, Model, SlugResolver};
-use crate::translators::geojson;
+use crate::resolver::{Endpoint, Model, SlugResolver, Space};
+use crate::translators::{geojson, tabular};
 use crate::{handlers, middleware::tenancy, operations, query};
 use arc_swap::ArcSwap;
 use axum::body::Body;
@@ -46,6 +46,12 @@ const MAX_BODY: usize = 8 * 1024 * 1024;
 
 /// The header that tells a caller their answer was narrowed by policy (R22).
 const RESULTS_RESTRICTED: &str = "ngsild-results-restricted";
+
+/// How many entities a file representation asks the broker for at a time (EP-44).
+///
+/// Large enough that a normal download is one or two round trips, small enough that one
+/// page fits comfortably inside `MAX_BODY` whatever the entities look like.
+const PAGE: usize = 1_000;
 
 /// Everything the surface needs, built once at start-up.
 pub struct Gateway {
@@ -100,7 +106,7 @@ impl Gateway {
     fn audiences_for(&self, endpoint: &Endpoint) -> Vec<String> {
         let mut audiences = vec![endpoint.slug.clone()];
         if let Some(base) = &self.public_url {
-            audiences.push(format!("{base}/api/endpoint/{}", endpoint.slug));
+            audiences.push(format!("{base}{}", endpoint.base_path));
         }
         audiences
     }
@@ -118,6 +124,17 @@ impl Gateway {
         self.resolver.replace(endpoints);
         self
     }
+
+    /// Replaces the space table, which is the `/cs/{space}` surface (SP-01, EP-19).
+    pub fn serve_spaces(self, spaces: impl IntoIterator<Item = Space>) -> Self {
+        self.resolver.replace_spaces(spaces);
+        self
+    }
+
+    /// The gateway's public base URL, or the empty string when none is configured.
+    fn base_url(&self) -> &str {
+        self.public_url.as_deref().unwrap_or_default()
+    }
 }
 
 /// The router: two probes and the endpoint surface.
@@ -127,6 +144,11 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/access", get(access))
         .route("/api/endpoint/{slug}/access/check", post(access_check))
         .route("/api/endpoint/{slug}/file.geojson", get(file_geojson))
+        .route("/api/endpoint/{slug}/file.csv", get(file_csv))
+        .route("/api/endpoint/{slug}/file.xlsx", get(file_xlsx))
+        .route("/cs", get(space_catalog))
+        .route("/cs/{space}", get(space_record))
+        .route("/cs/{space}/ngsi-ld/v1/{*rest}", any(space_ngsi_ld))
         .route("/api/endpoint/{slug}/schema/index.json", get(schema_index))
         .route(
             "/api/endpoint/{slug}/schema/{version}/{artifact}",
@@ -153,13 +175,45 @@ async fn missing() -> Response<Body> {
     ProblemDetails::not_found().into_response()
 }
 
-/// The ETSI resource tree, with every refusal rendered the way an NGSI-LD client reads it.
+/// The ETSI resource tree under an endpoint slug, with every refusal rendered the way an
+/// NGSI-LD client reads it.
 async fn ngsi_ld(
     State(gateway): State<Arc<Gateway>>,
-    Path((slug, rest)): Path<(String, String)>,
-    request: Request,
+    Path((slug, _rest)): Path<(String, String)>,
+    mut request: Request,
 ) -> Response<Body> {
-    as_ngsi_ld_error(ngsi_ld_inner(State(gateway), Path((slug, rest)), request).await).await
+    // Before routing, before authentication, before anything reads a header (EP-21).
+    tenancy::strip_client_headers(&mut request);
+    let admitted = admit(
+        &gateway,
+        &slug,
+        Some(Representation::NgsiLd),
+        request.headers(),
+    );
+    let prefix = format!("/api/endpoint/{slug}/ngsi-ld/v1");
+    as_ngsi_ld_error(serve_ngsi_ld(&gateway, admitted, &prefix, request).await).await
+}
+
+/// The same tree under a context space name (SP-03).
+///
+/// A stock NGSI-LD client pointed at `/cs/{space}` works unmodified, and it works through
+/// the same handler an endpoint slug goes through: the only difference between the two
+/// surfaces is the name in the path and the audience the token has to carry (SP-01, R15).
+async fn space_ngsi_ld(
+    State(gateway): State<Arc<Gateway>>,
+    Path((space, _rest)): Path<(String, String)>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let admitted = admit_space(
+        &gateway,
+        &space,
+        Some(Representation::NgsiLd),
+        request.headers(),
+    )
+    .map(|(space, subject)| (Arc::clone(&space.endpoint), subject));
+    let prefix = format!("/cs/{space}/ngsi-ld/v1");
+    as_ngsi_ld_error(serve_ngsi_ld(&gateway, admitted, &prefix, request).await).await
 }
 
 /// The error types of CIM 009 clause 5.5.2 the gateway's own refusals map to, by status.
@@ -225,20 +279,13 @@ async fn as_ngsi_ld_error(response: Response<Body>) -> Response<Body> {
     }
 }
 
-async fn ngsi_ld_inner(
-    State(gateway): State<Arc<Gateway>>,
-    Path((slug, _rest)): Path<(String, String)>,
+async fn serve_ngsi_ld(
+    gateway: &Gateway,
+    admitted: Result<(Arc<Endpoint>, Subject), Box<Response<Body>>>,
+    prefix: &str,
     mut request: Request,
 ) -> Response<Body> {
-    // Before routing, before authentication, before anything reads a header (EP-21).
-    tenancy::strip_client_headers(&mut request);
-
-    let (endpoint, subject) = match admit(
-        &gateway,
-        &slug,
-        Some(Representation::NgsiLd),
-        request.headers(),
-    ) {
+    let (endpoint, subject) = match admitted {
         Ok(admitted) => admitted,
         Err(problem) => return *problem,
     };
@@ -249,7 +296,7 @@ async fn ngsi_ld_inner(
     // path, and re-encoding it is not the gateway's business.
     let path = uri
         .path()
-        .strip_prefix(&format!("/api/endpoint/{slug}/ngsi-ld/v1"))
+        .strip_prefix(prefix)
         .unwrap_or_default()
         .to_owned();
     let params = query::parse(uri.query().unwrap_or_default());
@@ -935,6 +982,318 @@ async fn query_entities(
                 && areas.as_ref().is_none_or(|areas| areas.admits(entity))
         });
     }
+    projection::project(&mut entities, &constraints.attrs);
+    Ok((entities, constraints.restricted))
+}
+
+/// Resolving a space name and establishing the caller (SP-06, SP-11).
+///
+/// A space the caller may not reach and a space that does not exist answer the same 404,
+/// so a probe over the space namespace learns nothing either way (R20).
+fn admit_space(
+    gateway: &Gateway,
+    name: &str,
+    representation: Option<Representation>,
+    headers: &HeaderMap,
+) -> Result<(Arc<Space>, Subject), Box<Response<Body>>> {
+    let space = gateway
+        .resolver
+        .resolve_space(name)
+        .ok_or_else(|| Box::new(ProblemDetails::not_found().into_response()))?;
+    if representation.is_some_and(|wanted| !space.endpoint.serves(wanted)) {
+        return Err(Box::new(ProblemDetails::not_found().into_response()));
+    }
+    let subject = authenticate(gateway, &space.endpoint, headers)
+        .map_err(|problem| Box::new(problem.into_response()))?;
+    Ok((space, subject))
+}
+
+/// Whether this caller holds any grant that reaches this space (SP-11).
+///
+/// The same PDP that enforces a request decides who may see the space exists, so the
+/// catalog cannot list a space the data surface would refuse.
+fn discoverable(gateway: &Gateway, space: &Space, subject: &Subject) -> bool {
+    !gateway
+        .pdp
+        .decide(
+            subject,
+            Operation::QueryEntity,
+            &query::requested(&[]),
+            &space.endpoint,
+        )
+        .is_deny()
+}
+
+/// The catalog of spaces this caller may discover (SP-11).
+async fn space_catalog(State(gateway): State<Arc<Gateway>>, request: Request) -> Response<Body> {
+    let headers = request.headers();
+    // A token is minted for one resource, so a token that names space A does not verify
+    // against space B. That is not an error here, it is the narrowing: a space whose
+    // authentication the caller cannot satisfy is a space they cannot discover.
+    let visible: Vec<Arc<Space>> = gateway
+        .resolver
+        .spaces()
+        .into_iter()
+        .filter(|space| {
+            authenticate(&gateway, &space.endpoint, headers)
+                .is_ok_and(|subject| discoverable(&gateway, space, &subject))
+        })
+        .collect();
+
+    let catalog = space_surface::catalog(&visible, gateway.base_url());
+    let mut response = json_response(&catalog);
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static(space_surface::JSON_LD),
+    );
+    response
+}
+
+/// The DCAT-AP record of one space, in the representation the caller asked for (SP-10).
+async fn space_record(
+    State(gateway): State<Arc<Gateway>>,
+    Path(name): Path<String>,
+    request: Request,
+) -> Response<Body> {
+    let (space, subject) = match admit_space(&gateway, &name, None, request.headers()) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+    if !discoverable(&gateway, &space, &subject) {
+        return ProblemDetails::not_found().into_response();
+    }
+
+    let accept = request
+        .headers()
+        .get(axum::http::header::ACCEPT)
+        .and_then(|value| value.to_str().ok());
+    let base = gateway.base_url();
+    let format = space_surface::negotiate(accept);
+    let body = match format {
+        space_surface::Format::JsonLd => {
+            serde_json::to_string(&space_surface::dataset(&space, base)).unwrap_or_default()
+        }
+        space_surface::Format::Turtle => space_surface::dataset_turtle(&space, base),
+        space_surface::Format::Html => space_surface::dataset_html(&space, base),
+    };
+    match HeaderValue::from_str(format.media_type()) {
+        Ok(media) => ([(axum::http::header::CONTENT_TYPE, media)], body).into_response(),
+        Err(_) => ProblemDetails::internal().into_response(),
+    }
+}
+
+/// `file.csv`: the whole answer as one flat table (EP-08, EP-44, EP-45).
+async fn file_csv(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    request: Request,
+) -> Response<Body> {
+    tabular_download(gateway, slug, request, Representation::Csv).await
+}
+
+/// `file.xlsx`: the same rows as `file.csv`, in a workbook (EP-08, EP-44).
+async fn file_xlsx(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    request: Request,
+) -> Response<Body> {
+    tabular_download(gateway, slug, request, Representation::Xlsx).await
+}
+
+/// The two tabular representations, which differ only in how the same table is written.
+async fn tabular_download(
+    gateway: Arc<Gateway>,
+    slug: String,
+    mut request: Request,
+    representation: Representation,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, subject) = match admit(&gateway, &slug, Some(representation), request.headers())
+    {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+
+    let params = query::parse(request.uri().query().unwrap_or_default());
+    let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
+    let (entities, restricted) = match paged_entities(
+        &gateway,
+        &endpoint,
+        &subject,
+        &params,
+        &mut request,
+        &limits,
+    )
+    .await
+    {
+        Ok(answer) => answer,
+        Err(problem) => return *problem,
+    };
+
+    let mut table = match tabular::table(&entities, &limits) {
+        Ok(table) => table,
+        Err(_) => return too_large(),
+    };
+    if query::first(&params, "humanHeaders") == Some("true") {
+        tabular::humanize(&mut table);
+    }
+
+    let (body, media, extension) = match representation {
+        Representation::Xlsx => {
+            let metadata = workbook_metadata(&endpoint, &params, table.len());
+            match tabular::xlsx(&table, &metadata) {
+                Ok(bytes) => (Body::from(bytes), tabular::XLSX_MEDIA_TYPE, "xlsx"),
+                Err(error) => {
+                    tracing::error!(%error, "the workbook does not serialize");
+                    return ProblemDetails::internal().into_response();
+                }
+            }
+        }
+        _ => match tabular::csv(&table, &limits) {
+            Ok(text) => (Body::from(text), tabular::CSV_MEDIA_TYPE, "csv"),
+            Err(_) => return too_large(),
+        },
+    };
+
+    let mut response = Response::new(body);
+    let headers = response.headers_mut();
+    if let Ok(media) = HeaderValue::from_str(media) {
+        headers.insert(axum::http::header::CONTENT_TYPE, media);
+    }
+    // The slug is base32 and the extension is one of two literals, so the filename needs
+    // no quoting beyond the quotes themselves (EP-43).
+    if let Ok(disposition) = HeaderValue::from_str(&format!(
+        "attachment; filename=\"{}.{extension}\"",
+        endpoint.slug
+    )) {
+        headers.insert(axum::http::header::CONTENT_DISPOSITION, disposition);
+    }
+    if restricted {
+        headers.insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
+    }
+    response
+}
+
+/// What the `metadata` sheet of a workbook says about the download that produced it.
+fn workbook_metadata(
+    endpoint: &Endpoint,
+    params: &[(String, String)],
+    rows: usize,
+) -> Vec<(String, String)> {
+    vec![
+        ("space".to_owned(), endpoint.space.clone()),
+        ("endpoint".to_owned(), endpoint.slug.clone()),
+        ("exportedAt".to_owned(), crate::pdp::now().to_rfc3339()),
+        (
+            "query".to_owned(),
+            params
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join("&"),
+        ),
+        ("rows".to_owned(), rows.to_string()),
+    ]
+}
+
+/// The answer is bigger than this endpoint allows one download to be (EP-44).
+fn too_large() -> Response<Body> {
+    let mut response = ProblemDetails::new(413, "payload-too-large", "Payload Too Large")
+        .with_detail(tabular::TooLarge.to_string())
+        .into_response();
+    *response.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+    response
+}
+
+/// Every entity the query reaches, read from the broker one page at a time (EP-44).
+///
+/// A file representation answers with the whole result set rather than one broker page,
+/// so it pages until the broker runs out or the endpoint's row ceiling is reached. The
+/// ceiling is a refusal and not a truncation: a short CSV looks exactly like a complete
+/// one, and a caller who cannot tell will act on half the data.
+async fn paged_entities(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    params: &[(String, String)],
+    request: &mut Request,
+    limits: &tabular::Limits,
+) -> Result<(Value, bool), Box<Response<Body>>> {
+    let verdict = gateway.pdp.decide(
+        subject,
+        Operation::QueryEntity,
+        &query::requested(params),
+        endpoint,
+    );
+    let Verdict::Rewrite(constraints) = verdict else {
+        return Err(Box::new(ProblemDetails::forbidden().into_response()));
+    };
+    if constraints.empty {
+        return Ok((Value::Array(Vec::new()), true));
+    }
+    tenancy::pin_tenant(request, &endpoint.space)
+        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
+
+    // The caller's own window is a ceiling on the download, not the page size: paging is
+    // the gateway's business and the caller asked for a file, not for a page of one.
+    let wanted = query::first(params, "limit")
+        .and_then(|limit| limit.parse::<u64>().ok())
+        .unwrap_or(u64::from(limits.max_rows))
+        .min(u64::from(limits.max_rows));
+    let windowless: Vec<(String, String)> = params
+        .iter()
+        .filter(|(name, _)| name != "limit" && name != "offset")
+        .cloned()
+        .collect();
+    let narrowed = query::upstream(&windowless, &constraints);
+    let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
+
+    let mut collected: Vec<Value> = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let target = format!("/ngsi-ld/v1/entities?{narrowed}&limit={PAGE}&offset={offset}");
+        let answer = gateway
+            .broker
+            .send(
+                axum::http::Method::GET,
+                &target,
+                request.headers().clone(),
+                Body::empty(),
+            )
+            .await
+            .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
+
+        let (parts, body) = answer.into_parts();
+        if !parts.status.is_success() {
+            return Err(Box::new(Response::from_parts(parts, body)));
+        }
+        let bytes = axum::body::to_bytes(body, MAX_BODY)
+            .await
+            .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
+        let page: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
+        let page = match page {
+            Value::Array(entities) => entities,
+            entity if entity.is_object() => vec![entity],
+            _ => Vec::new(),
+        };
+
+        let fetched = page.len();
+        collected.extend(page.into_iter().filter(|entity| {
+            projection::permitted(entity, &constraints.id_patterns)
+                && areas.as_ref().is_none_or(|areas| areas.admits(entity))
+        }));
+        if collected.len() as u64 > wanted {
+            return Err(Box::new(too_large()));
+        }
+        // A short page is the last page; a full one may not be.
+        if fetched < PAGE {
+            break;
+        }
+        offset += PAGE;
+    }
+
+    let mut entities = Value::Array(collected);
     projection::project(&mut entities, &constraints.attrs);
     Ok((entities, constraints.restricted))
 }
