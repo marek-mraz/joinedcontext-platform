@@ -2,6 +2,100 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AgreementConstraints": {
+      "additionalProperties": false,
+      "description": "Lossless query filter constraints mapped from an ODRL agreement (DS-10).",
+      "properties": {
+        "geoQ": {
+          "description": "Residual geographic query filter string (DS-10).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "q": {
+          "description": "Residual NGSI-LD query filter string (DS-10).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopeQ": {
+          "description": "Residual scope query filter string (DS-10).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "temporalQ": {
+          "description": "Residual temporal query filter string (DS-10).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AgreementRole": {
+      "description": "Role of this organization within a data space agreement (DS-07, DS-15).",
+      "oneOf": [
+        {
+          "description": "Provider sharing data through an offered endpoint (DS-07).",
+          "enum": [
+            "provider"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Consumer accessing data from another participant (DS-15).",
+          "enum": [
+            "consumer"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AgreementState": {
+      "description": "Negotiation state of a Dataspace Protocol contract agreement (DS-09, DS-12).",
+      "oneOf": [
+        {
+          "description": "Initial contract negotiation request submitted (DS-09).",
+          "enum": [
+            "requested"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Counter-offer proposed by provider (DS-09).",
+          "enum": [
+            "offered"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Agreement terms accepted by both parties (DS-09).",
+          "enum": [
+            "accepted"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Agreement confirmed and active in gateway PDP (DS-09, DS-10).",
+          "enum": [
+            "finalized"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Agreement expired or explicitly terminated (DS-12).",
+          "enum": [
+            "terminated"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Condition": {
       "additionalProperties": false,
       "description": "Status condition entry.",
@@ -43,112 +137,91 @@
       ],
       "type": "object"
     },
-    "DataModelRef": {
+    "DataAgreementSpec": {
       "additionalProperties": false,
-      "description": "Reference to a DataModel with name and semantic version (DM-33).",
+      "description": "Desired specification of a [`DataAgreement`][crate::kinds::DataAgreement] resource (DS-09, DS-10, DS-15).",
       "properties": {
-        "kind": {
-          "description": "Optional resource kind (must be `DataModel` if present) (MF-07).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name": {
-          "description": "Referenced DataModel name (DNS-1123 label).",
+        "agreementId": {
+          "description": "Unique Dataspace Protocol agreement identifier (DS-09, DS-13).",
           "type": "string"
         },
-        "version": {
-          "description": "Served major version of the referenced model, `\"1\"`, `\"2\"` … (DM-22, DM-33).",
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "version"
-      ],
-      "type": "object"
-    },
-    "MappingSpec": {
-      "additionalProperties": false,
-      "description": "Desired specification of a [`Mapping`][crate::kinds::Mapping] resource (DM-33..DM-42).",
-      "properties": {
-        "contextSpaceRef": {
-          "description": "Context Space name to which this mapping belongs (PF-09, DM-33).",
-          "type": "string"
-        },
-        "native": {
-          "description": "Native Bloblang escape hatch blocks (DM-38).",
-          "items": {
-            "$ref": "#/definitions/NativeBlock"
-          },
-          "type": "array"
-        },
-        "source": {
+        "constraints": {
           "allOf": [
             {
-              "$ref": "#/definitions/DataModelRef"
+              "$ref": "#/definitions/AgreementConstraints"
             }
           ],
-          "description": "Source data model reference (DM-33)."
+          "default": {},
+          "description": "Lossless query constraints mapped from contract agreement (DS-10)."
         },
-        "target": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/DataModelRef"
-            }
-          ],
-          "description": "Target data model reference (DM-33)."
-        },
-        "tests": {
-          "description": "Golden test cases asserting input entity produces expected output entity (DM-39).",
-          "items": {
-            "$ref": "#/definitions/MappingTest"
-          },
-          "type": "array"
-        },
-        "transformation": {
-          "description": "Verbatim LinkML-Map TransformationSpecification payload (DM-33)."
-        },
-        "vocabularyAlignment": {
+        "offerRef": {
           "anyOf": [
             {
-              "$ref": "#/definitions/VocabularyAlignment"
+              "$ref": "#/definitions/Ref"
             },
             {
               "type": "null"
             }
           ],
-          "description": "Optional SSSOM alignment set used for editor pre-fill and documentation (DM-42)."
+          "description": "Reference to local DataOffer for provider role (DS-07)."
+        },
+        "remoteParticipant": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Did"
+            }
+          ],
+          "description": "Decentralized identifier of the remote participant (DS-04, DS-10)."
+        },
+        "role": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgreementRole"
+            }
+          ],
+          "description": "Operational role in this agreement (provider or consumer) (DS-07, DS-15)."
+        },
+        "state": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgreementState"
+            }
+          ],
+          "description": "Negotiation lifecycle state of this agreement (DS-09, DS-12)."
+        },
+        "tokenSecretRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SecretRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Reference to transfer token in secret store for consumer role (DS-15)."
+        },
+        "validity": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Validity"
+            }
+          ],
+          "description": "Temporal validity window for this agreement (DS-10)."
         }
       },
       "required": [
-        "contextSpaceRef",
-        "source",
-        "target",
-        "tests",
-        "transformation"
+        "agreementId",
+        "remoteParticipant",
+        "role",
+        "state",
+        "validity"
       ],
       "type": "object"
     },
-    "MappingTest": {
-      "additionalProperties": false,
-      "description": "Golden test case asserting input entity produces expected output entity (DM-39).",
-      "properties": {
-        "expect": {
-          "description": "Path of the expected output example, relative to the manifest (DM-39).",
-          "type": "string"
-        },
-        "input": {
-          "description": "Path of the input example, relative to the manifest (DM-39).",
-          "type": "string"
-        }
-      },
-      "required": [
-        "expect",
-        "input"
-      ],
-      "type": "object"
+    "Did": {
+      "description": "Decentralized Identifier in the did:web method bound to an organization domain (DS-04, PF-41)",
+      "pattern": "^did:web:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$",
+      "type": "string"
     },
     "MultiLanguageMap": {
       "additionalProperties": {
@@ -160,46 +233,6 @@
         "type": "string"
       },
       "type": "object"
-    },
-    "NativeBlock": {
-      "additionalProperties": false,
-      "description": "Native code escape hatch block for logic LinkML-Map cannot express (DM-38).",
-      "properties": {
-        "language": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/NativeLanguage"
-            }
-          ],
-          "description": "Native language of the code block (DM-37, DM-38)."
-        },
-        "source": {
-          "description": "Source code of the native processor (non-empty, DM-38).",
-          "type": "string"
-        },
-        "targetSlot": {
-          "description": "Target slot identifier to which this native block is attached (`^[A-Za-z_][A-Za-z0-9_]*$`, DM-38).",
-          "type": "string"
-        }
-      },
-      "required": [
-        "language",
-        "source",
-        "targetSlot"
-      ],
-      "type": "object"
-    },
-    "NativeLanguage": {
-      "description": "Supported native transformation language (DM-37, DM-38).",
-      "oneOf": [
-        {
-          "description": "Inline Bento Bloblang processor (DM-37, DM-38).",
-          "enum": [
-            "bloblang"
-          ],
-          "type": "string"
-        }
-      ]
     },
     "ObjectMeta": {
       "additionalProperties": false,
@@ -298,6 +331,51 @@
         }
       ]
     },
+    "Ref": {
+      "anyOf": [
+        {
+          "description": "Bare string resource name.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TypedRef"
+            }
+          ],
+          "description": "Typed reference with kind, name, and optional namespace."
+        }
+      ],
+      "description": "Reference to another resource, either bare name or typed reference (MF-07)."
+    },
+    "SecretRef": {
+      "additionalProperties": false,
+      "description": "Reference to a credential stored in SOPS or OpenBao (PF-36).\n\n`deny_unknown_fields` is a security control: it rejects inline `value:` or `password:` fields at parse time, enforcing that secrets never appear in Git or manifest files.",
+      "properties": {
+        "envVar": {
+          "description": "Optional environment variable name for injection into runners.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "Optional key within secret.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Secret name in secret store.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "Status": {
       "additionalProperties": false,
       "description": "Server-computed lifecycle and reconciliation status (MF-04). Never stored in Git.",
@@ -356,22 +434,27 @@
       ],
       "type": "object"
     },
-    "VocabularyAlignment": {
+    "Validity": {
       "additionalProperties": false,
-      "description": "Vocabulary alignment set backing the editor's mapping pre-fill (DM-42).",
+      "description": "Temporal validity window for a policy grant.",
       "properties": {
-        "sssomRef": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/TypedRef"
-            }
-          ],
-          "description": "SSSOM mapping set carrying the alignment; never executed as a transformation (DM-42)."
+        "from": {
+          "description": "Effective start timestamp (UTC).",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to": {
+          "description": "Effective expiration timestamp (UTC).",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": [
-        "sssomRef"
-      ],
       "type": "object"
     }
   },
@@ -396,7 +479,7 @@
     "spec": {
       "allOf": [
         {
-          "$ref": "#/definitions/MappingSpec"
+          "$ref": "#/definitions/DataAgreementSpec"
         }
       ],
       "description": "Desired spec state."
@@ -419,6 +502,6 @@
     "metadata",
     "spec"
   ],
-  "title": "ResourceEnvelope_for_MappingSpec",
+  "title": "ResourceEnvelope_for_DataAgreementSpec",
   "type": "object"
 }

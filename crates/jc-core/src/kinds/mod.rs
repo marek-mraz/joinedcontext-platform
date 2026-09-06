@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod data_model;
+pub mod dataspace;
 pub mod endpoint;
 pub mod mapping;
 pub mod organization;
@@ -9,16 +10,26 @@ pub mod pipeline;
 pub mod policy;
 pub mod service_account;
 pub mod space;
+pub mod sync;
 
-pub use app::{AppClass, AppLifecycle, AppLimits, AppSource, AppSpec, AppVisibility, DataNeed};
+pub use app::{
+    AppBuild, AppClass, AppLifecycle, AppLimits, AppSource, AppSpec, AppVisibility,
+    ContentSecurityPolicy, DataNeed, GeoConstraint, GeoWithin, GitSource, TemporalConstraint,
+};
 pub use data_model::{
-    DataModelLifecycle, DataModelSource, DataModelSpec, GeneratedArtifacts, SemVer,
+    DataModelLifecycle, DataModelSource, DataModelSpec, GeneratedArtifacts, RemoteSource, SemVer,
+};
+pub use dataspace::{
+    AgreementConstraints, AgreementRole, AgreementState, ConnectorEngine, DataAgreementSpec,
+    DataOfferSpec, DataSpaceParticipantSpec, Did,
 };
 pub use endpoint::{
     Audience, Caching, EndpointSlug, EndpointSpec, RateLimits, Representation,
     SharedSpaceReferenceSpec,
 };
-pub use mapping::{DataModelRef, MappingSpec, MappingTest, NativeBlock, NativeLanguage};
+pub use mapping::{
+    DataModelRef, MappingSpec, MappingTest, NativeBlock, NativeLanguage, VocabularyAlignment,
+};
 pub use organization::{Contact, ContactRole, OrganizationSpec};
 pub use pipeline::{
     Compute, ComputeKind, Output, OutputMode, PipelineClass, PipelineQuotas, PipelineSource,
@@ -33,6 +44,10 @@ pub use service_account::{
     ServiceAccountLimits, ServiceAccountSpec, Workload,
 };
 pub use space::{ContextSpaceSpec, ProjectSpec, Quotas};
+pub use sync::{
+    BundleItem, BundleOrigin, BundleSpec, ConflictPolicy, GitOrigin, PlatformApiOrigin, Schedule,
+    SyncMode, SyncOrigin, SyncSourceSpec,
+};
 
 /// `kind: Organization` as a whole manifest.
 pub type Organization = crate::envelope::ResourceEnvelope<OrganizationSpec>;
@@ -58,3 +73,13 @@ pub type DataModel = crate::envelope::ResourceEnvelope<DataModelSpec>;
 pub type Mapping = crate::envelope::ResourceEnvelope<MappingSpec>;
 /// `kind: App` as a whole manifest.
 pub type App = crate::envelope::ResourceEnvelope<AppSpec>;
+/// `kind: SyncSource` as a whole manifest.
+pub type SyncSource = crate::envelope::ResourceEnvelope<SyncSourceSpec>;
+/// `kind: Bundle` as a whole manifest.
+pub type Bundle = crate::envelope::ResourceEnvelope<BundleSpec>;
+/// `kind: DataSpaceParticipant` as a whole manifest.
+pub type DataSpaceParticipant = crate::envelope::ResourceEnvelope<DataSpaceParticipantSpec>;
+/// `kind: DataOffer` as a whole manifest.
+pub type DataOffer = crate::envelope::ResourceEnvelope<DataOfferSpec>;
+/// `kind: DataAgreement` as a whole manifest.
+pub type DataAgreement = crate::envelope::ResourceEnvelope<DataAgreementSpec>;

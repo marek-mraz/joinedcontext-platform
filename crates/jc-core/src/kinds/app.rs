@@ -1,96 +1,76 @@
-//! Manifest kinds for Apps on Demand (T-0119, AP-01..AP-33, Architecture/16).
+//! `kind: App`, an AI-generated application with a least-privilege endpoint (T-0119, AP-01..AP-20).
+//!
+//! **Security note**: the security property of this kind is that an App has nowhere to put a
+//! secret. `AppSpec` and every nested struct carry `deny_unknown_fields`, so `secretRef:`,
+//! `secret:`, `token:` and friends are rejected at parse time (AP-16). An app that needs
+//! external data declares a Pipeline instead.
 
-use crate::envelope::{Kind, ObjectMeta, Scope};
+use crate::envelope::{Kind, ObjectMeta, Ref, Scope};
 use crate::error::{Error, Result};
-use crate::kinds::policy::{OperationGroup, OperationRef};
+use crate::kinds::endpoint::Representation;
+use crate::kinds::policy::OperationRef;
 use crate::names;
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::LazyLock;
 
-static IMAGE_DIGEST_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^.+@sha256:[a-fA-F0-9]{64}$").expect("valid image digest regex"));
+static TOOLCHAIN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9-]*$").expect("valid regex"));
+static DURATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^P(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+S)?)?$")
+        .expect("valid regex")
+});
+static ATTR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z][A-Za-z0-9_]{0,63}$").expect("valid regex"));
 
-/// Execution class of an application (AP-01, AP-25).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+/// How an app is built and served (AP-01).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppClass {
-    /// Static single-page application served by portal static host (AP-01, AP-14).
+    /// A built front end served from the Portal static host, acting with the user's token (AP-07, AP-14).
     Static,
-    /// Containerized backend service running as a deployment (AP-01, AP-15).
+    /// A backend running in the instance namespace with its own service account (AP-08, AP-15).
     Service,
-    /// Single container containing Axum backend and embedded React frontend (AP-01, AP-25).
+    /// Backend and front end in one image.
     Fullstack,
 }
 
-impl AppClass {
-    /// Returns the kebab-case wire name for this app class.
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Static => "static",
-            Self::Service => "service",
-            Self::Fullstack => "fullstack",
-        }
-    }
-}
-
-impl fmt::Display for AppClass {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-/// Target visibility and audience access scope for an application (AP-01).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+/// Who may reach a published app (AP-18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppVisibility {
-    /// Restricted to the application author.
+    /// Only the author.
     Private,
-    /// Accessible to members of the owning project.
+    /// Members of the owning project.
     Project,
-    /// Accessible to authenticated members of the organization.
+    /// Anyone in the organization.
     Organization,
-    /// Accessible publicly without authentication under the synthetic public role grant (GW22).
+    /// Everyone, unauthenticated.
     Public,
 }
 
-impl AppVisibility {
-    /// Returns the kebab-case wire name for this visibility scope.
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Private => "private",
-            Self::Project => "project",
-            Self::Organization => "organization",
-            Self::Public => "public",
-        }
-    }
-}
-
-impl fmt::Display for AppVisibility {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-/// Lifecycle state of an application (AP-18).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+/// Lifecycle state of an app (AP-18, AP-19, AP-20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppLifecycle {
-    /// Initial authoring and iterative draft state (AP-18).
+    /// Being written; not deployed.
+    #[default]
     Draft,
-    /// Ephemeral preview running against a sandbox space (AP-18, AP-19).
+    /// Bound to a sandbox space, reachable by the author and reviewers only (AP-19).
     Preview,
-    /// Live production deployment bound to real spaces and routes (AP-18, AP-20).
+    /// Bound to the real space and reachable by its `visibility` audience (AP-18).
     Published,
-    /// Decommissioned application with route and endpoint removed (AP-18, AP-21).
+    /// Withdrawn; kept for the record.
     Retired,
 }
 
 impl AppLifecycle {
-    /// Returns the kebab-case wire name for this lifecycle state.
-    pub const fn as_str(&self) -> &'static str {
+    /// Wire name of this state.
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Draft => "draft",
             Self::Preview => "preview",
@@ -99,206 +79,225 @@ impl AppLifecycle {
         }
     }
 
-    /// Checks whether transitioning from `self` to `next` is permitted (AP-18).
+    /// Whether `draft → preview → published → retired` allows this step (AP-18).
     ///
-    /// Lifecycle follows the forward pipeline `draft -> preview -> published -> retired`.
-    /// Each state may transition to itself. `retired` is terminal.
-    pub fn allows_transition_to(&self, next: AppLifecycle) -> bool {
-        let rank = |l: AppLifecycle| match l {
-            AppLifecycle::Draft => 0,
-            AppLifecycle::Preview => 1,
-            AppLifecycle::Published => 2,
-            AppLifecycle::Retired => 3,
-        };
-        rank(next) >= rank(*self)
+    /// Every state may stay itself; nothing moves backwards; `retired` is terminal.
+    pub fn allows_transition_to(&self, next: Self) -> bool {
+        if *self == next {
+            return true;
+        }
+        matches!(
+            (self, next),
+            (Self::Draft, Self::Preview)
+                | (Self::Preview, Self::Published)
+                | (Self::Published, Self::Retired)
+                | (Self::Preview, Self::Retired)
+                | (Self::Draft, Self::Retired)
+        )
     }
 }
 
-impl fmt::Display for AppLifecycle {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-/// Source code location or container image for an application (AP-01, AP-02, AP-13).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Where the app's source lives; exactly one member is set (AP-02).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AppSource {
-    /// Git repository URL or identifier within the organization forge (AP-02).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository: Option<String>,
-    /// Path relative to the repository root for app source files (AP-01, AP-02).
+    /// Path beside the manifest in the org repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// Container image pinned by digest (`...@sha256:<64 hex>`) (AP-13).
+    /// A repository of the same forge (AP-02).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
+    pub git: Option<GitSource>,
+}
+
+/// A source repository on the organization's own forge (AP-02).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct GitSource {
+    /// Clone URL on the organization's forge; `https://` only.
+    pub url: String,
+    /// Branch, tag or commit.
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// Subdirectory holding the app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 impl AppSource {
-    /// Validates source fields and image digest pinning (AP-02, AP-13).
-    pub fn validate(&self) -> Result<()> {
-        if self.repository.is_none() && self.path.is_none() && self.image.is_none() {
-            return Err(Error::Name {
-                field: "spec.source",
+    fn validate(&self) -> Result<()> {
+        match (&self.path, &self.git) {
+            (Some(path), None) => validate_relative_path("source.path", path),
+            (None, Some(git)) => {
+                if !git.url.starts_with("https://") {
+                    return Err(Error::Name {
+                        field: "source.git.url",
+                        value: git.url.clone(),
+                        reason: "the forge URL must be https://",
+                    });
+                }
+                if git.git_ref.trim().is_empty() {
+                    return Err(Error::Name {
+                        field: "source.git.ref",
+                        value: git.git_ref.clone(),
+                        reason: "ref must not be empty",
+                    });
+                }
+                match &git.path {
+                    Some(p) => validate_relative_path("source.git.path", p),
+                    None => Ok(()),
+                }
+            }
+            _ => Err(Error::Name {
+                field: "source",
                 value: String::new(),
-                reason: "at least one of repository, path, or image must be specified in source",
+                reason: "exactly one of path or git must be set (AP-02)",
+            }),
+        }
+    }
+}
+
+/// Toolchain versions CI builds the app with, e.g. `{ rust: "1.90", node: "22" }` (AP-01, AP-11).
+///
+/// Kept as a map rather than a fixed set of fields: the build image, not this crate, decides
+/// which toolchains exist.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct AppBuild(pub BTreeMap<String, String>);
+
+impl AppBuild {
+    fn validate(&self) -> Result<()> {
+        if self.0.is_empty() {
+            return Err(Error::Name {
+                field: "build",
+                value: String::new(),
+                reason: "build must pin at least one toolchain version (AP-11)",
             });
         }
-
-        if let Some(ref r) = self.repository {
-            if r.trim().is_empty() {
+        for (toolchain, version) in &self.0 {
+            if !TOOLCHAIN_RE.is_match(toolchain) {
                 return Err(Error::Name {
-                    field: "spec.source.repository",
-                    value: r.clone(),
-                    reason: "repository must not be empty",
+                    field: "build",
+                    value: toolchain.clone(),
+                    reason: "toolchain name must be a lowercase identifier",
+                });
+            }
+            if version.trim().is_empty() {
+                return Err(Error::Name {
+                    field: "build",
+                    value: toolchain.clone(),
+                    reason: "toolchain version must be pinned, not empty (AP-11)",
                 });
             }
         }
-
-        if let Some(ref p) = self.path {
-            if p.trim().is_empty() {
-                return Err(Error::Name {
-                    field: "spec.source.path",
-                    value: p.clone(),
-                    reason: "path must not be empty",
-                });
-            }
-        }
-
-        if let Some(ref img) = self.image {
-            if !IMAGE_DIGEST_RE.is_match(img) {
-                return Err(Error::Name {
-                    field: "spec.source.image",
-                    value: img.clone(),
-                    reason: "image must be pinned by sha256 digest (`...@sha256:<64 hex>`) (AP-13)",
-                });
-            }
-        }
-
         Ok(())
     }
 }
 
-/// Resource quotas and replica limits for an application (AP-01, AP-15).
+/// Temporal narrowing of a data need, e.g. `{ window: P1D }` (AP-05).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct AppLimits {
-    /// CPU limit or request (e.g. `500m`, `1`) (AP-15).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu: Option<String>,
-    /// Memory limit or request (e.g. `256Mi`, `1Gi`) (AP-15).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory: Option<String>,
-    /// Number of pod replicas to deploy (must be >= 1 if present).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replicas: Option<u32>,
+pub struct TemporalConstraint {
+    /// ISO 8601 duration reaching back from now.
+    pub window: String,
 }
 
-impl AppLimits {
-    /// Validates CPU, memory, and replica limits.
-    pub fn validate(&self) -> Result<()> {
-        if let Some(ref cpu) = self.cpu {
-            if cpu.trim().is_empty() {
-                return Err(Error::Name {
-                    field: "spec.limits.cpu",
-                    value: cpu.clone(),
-                    reason: "cpu limit must not be empty",
-                });
-            }
-        }
-        if let Some(ref mem) = self.memory {
-            if mem.trim().is_empty() {
-                return Err(Error::Name {
-                    field: "spec.limits.memory",
-                    value: mem.clone(),
-                    reason: "memory limit must not be empty",
-                });
-            }
-        }
-        if let Some(replicas) = self.replicas {
-            if replicas == 0 {
-                return Err(Error::Name {
-                    field: "spec.limits.replicas",
-                    value: "0".to_string(),
-                    reason: "replicas must be >= 1",
-                });
-            }
-        }
-        Ok(())
-    }
+/// Geographic narrowing of a data need, e.g. `{ within: { scopeRef: /geo/SK/BB } }` (AP-05).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct GeoConstraint {
+    /// Scope tree the app may read inside.
+    pub within: GeoWithin,
 }
 
-/// Least-privilege data access requirement declared by an application (AP-04, AP-05).
+/// The scope a [`GeoConstraint`] confines the app to (ADR 005).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct GeoWithin {
+    /// Absolute scope string, e.g. `/geo/SK/BB`.
+    pub scope_ref: String,
+}
+
+/// One declared data need, the input the reconciler renders a Policy from (AP-04, AP-05).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DataNeed {
-    /// Target Context Space name (DNS-1123 label) (AP-05).
-    pub context_space_ref: String,
-    /// Entity types required by the application (AP-05).
-    pub entity_types: Vec<String>,
-    /// Whitelist of readable or writable attribute names (empty means all readable attributes) (AP-05).
+    /// The context space the app reads.
+    pub context_space_ref: Ref,
+    /// NGSI-LD entity types the app needs.
+    pub types: Vec<String>,
+    /// Attributes the app needs; empty means every readable attribute of those types.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attributes: Vec<String>,
-    /// CIM 009 clause 4.20 operations or operation groups requested (AP-05).
+    pub attrs: Vec<String>,
+    /// CIM 009 clause 4.20 operation names the app performs (R8).
     pub operations: Vec<OperationRef>,
-    /// Residual NGSI-LD query filter string (AP-05).
+    /// NGSI-LD query narrowing the readable set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
-    /// Residual scope query filter string (AP-05).
+    /// Scope query narrowing the readable set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_q: Option<String>,
-    /// Residual geographic query filter string (AP-05).
+    /// Geographic narrowing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub geo_q: Option<String>,
+    pub geo_q: Option<GeoConstraint>,
+    /// Temporal narrowing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal_q: Option<TemporalConstraint>,
+    /// Representations of the rendered endpoint this need contributes (AP-05, EP-08).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub representations: Vec<Representation>,
 }
 
 impl DataNeed {
-    /// Validates context space reference, entity types, attributes, and operations.
-    pub fn validate(&self) -> Result<()> {
-        names::validate_dns1123_label(&self.context_space_ref).map_err(|e| match e {
-            Error::Name { reason, .. } => Error::Name {
-                field: "dataNeeds.contextSpaceRef",
-                value: self.context_space_ref.clone(),
-                reason,
-            },
-            other => other,
-        })?;
+    /// Whether this need asks for an operation that changes context data (AP-09).
+    pub fn has_write(&self) -> bool {
+        self.operations.iter().any(OperationRef::is_write)
+    }
 
-        if self.entity_types.is_empty() {
+    fn validate(&self) -> Result<()> {
+        names::validate_space_name(self.context_space_ref.name())
+            .map_err(|e| rename(e, "dataNeeds.contextSpaceRef"))?;
+        if let Some(kind) = self.context_space_ref.kind() {
+            if kind != "ContextSpace" {
+                return Err(Error::Kind {
+                    expected: "ContextSpace",
+                    got: kind.to_string(),
+                });
+            }
+        }
+
+        if self.types.is_empty() {
             return Err(Error::Name {
-                field: "dataNeeds.entityTypes",
+                field: "dataNeeds.types",
                 value: String::new(),
-                reason: "entityTypes must not be empty",
+                reason: "a data need must name at least one entity type (AP-05)",
             });
         }
-
-        let mut seen_types = std::collections::BTreeSet::new();
-        for t in &self.entity_types {
-            names::validate_entity_type(t)?;
-            if !seen_types.insert(t.as_str()) {
+        let mut seen = BTreeSet::new();
+        for entity_type in &self.types {
+            names::validate_entity_type(entity_type).map_err(|e| rename(e, "dataNeeds.types"))?;
+            if !seen.insert(entity_type) {
                 return Err(Error::Name {
-                    field: "dataNeeds.entityTypes",
-                    value: t.clone(),
-                    reason: "duplicate entity type in entityTypes list",
+                    field: "dataNeeds.types",
+                    value: entity_type.clone(),
+                    reason: "duplicate entity type",
                 });
             }
         }
 
-        let mut seen_attrs = std::collections::BTreeSet::new();
-        for attr in &self.attributes {
-            if attr.trim().is_empty() {
+        let mut seen_attrs = BTreeSet::new();
+        for attr in &self.attrs {
+            if !ATTR_RE.is_match(attr) {
                 return Err(Error::Name {
-                    field: "dataNeeds.attributes",
+                    field: "dataNeeds.attrs",
                     value: attr.clone(),
-                    reason: "attribute name must not be empty",
+                    reason: "attribute name must be an NGSI-LD term",
                 });
             }
-            if !seen_attrs.insert(attr.as_str()) {
+            if !seen_attrs.insert(attr) {
                 return Err(Error::Name {
-                    field: "dataNeeds.attributes",
+                    field: "dataNeeds.attrs",
                     value: attr.clone(),
-                    reason: "duplicate attribute name in attributes list",
+                    reason: "duplicate attribute",
                 });
             }
         }
@@ -307,58 +306,137 @@ impl DataNeed {
             return Err(Error::Name {
                 field: "dataNeeds.operations",
                 value: String::new(),
-                reason: "operations must not be empty",
+                reason: "a data need must name at least one operation (AP-05, R8)",
             });
         }
 
-        let mut seen_ops = std::collections::BTreeSet::new();
-        for op in &self.operations {
-            let wire = op.as_str();
-            if !seen_ops.insert(wire) {
+        let mut seen_reps = BTreeSet::new();
+        for representation in &self.representations {
+            if !seen_reps.insert(*representation) {
                 return Err(Error::Name {
-                    field: "dataNeeds.operations",
-                    value: wire.to_string(),
-                    reason: "duplicate operation in operations list",
+                    field: "dataNeeds.representations",
+                    value: representation.as_str().to_string(),
+                    reason: "duplicate representation",
+                });
+            }
+        }
+
+        if let Some(temporal) = &self.temporal_q {
+            if !DURATION_RE.is_match(&temporal.window) || temporal.window == "P" {
+                return Err(Error::Name {
+                    field: "dataNeeds.temporalQ.window",
+                    value: temporal.window.clone(),
+                    reason: "window must be an ISO 8601 duration such as P1D",
+                });
+            }
+        }
+
+        if let Some(geo) = &self.geo_q {
+            if !geo.within.scope_ref.starts_with('/') || geo.within.scope_ref.contains("//") {
+                return Err(Error::Name {
+                    field: "dataNeeds.geoQ.within.scopeRef",
+                    value: geo.within.scope_ref.clone(),
+                    reason: "scopeRef must be an absolute scope string such as /geo/SK/BB",
                 });
             }
         }
 
         Ok(())
     }
+}
 
-    /// Returns `true` if any requested operation or group modifies context state (AP-09).
-    pub fn has_write(&self) -> bool {
-        self.operations.iter().any(|op| match op {
-            OperationRef::Single(s) => s.is_write(),
-            OperationRef::Group(g) => {
-                matches!(g, OperationGroup::UpdateOps | OperationGroup::FederationOps)
+/// Per-app runtime limits enforced on its own endpoint (AP-17).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AppLimits {
+    /// Requests per minute allowed on the app endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests_per_minute: Option<u32>,
+    /// Rows a single file representation download may return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_file_rows: Option<u32>,
+}
+
+impl AppLimits {
+    fn validate(&self) -> Result<()> {
+        for (field, value) in [
+            ("limits.requestsPerMinute", self.requests_per_minute),
+            ("limits.maxFileRows", self.max_file_rows),
+        ] {
+            if value == Some(0) {
+                return Err(Error::Name {
+                    field,
+                    value: "0".to_string(),
+                    reason: "a limit of zero blocks the app; omit the field instead",
+                });
             }
-        })
+        }
+        Ok(())
     }
 }
 
-/// Desired specification of an [`App`][crate::kinds::App] resource (AP-01..AP-33).
+/// Content Security Policy of a served app (AP-12).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ContentSecurityPolicy {
+    /// `connect-src`; only `self` and https origins, never `*` (AP-12).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect_src: Vec<String>,
+    /// `frame-ancestors`; defaults to `none` (AP-12).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frame_ancestors: Vec<String>,
+}
+
+impl ContentSecurityPolicy {
+    fn validate(&self) -> Result<()> {
+        for (field, sources) in [
+            ("csp.connectSrc", &self.connect_src),
+            ("csp.frameAncestors", &self.frame_ancestors),
+        ] {
+            for source in sources {
+                let ok = source == "self"
+                    || source == "none"
+                    || source.starts_with("https://") && !source.contains('*');
+                if !ok {
+                    return Err(Error::Name {
+                        field,
+                        value: source.clone(),
+                        reason: "a CSP source must be `self`, `none` or an https origin without a wildcard (AP-12)",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Desired specification of an [`App`][crate::kinds::App] resource (AP-01..AP-20).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AppSpec {
-    /// Operational execution class (`static`, `service`, `fullstack`) (AP-01, AP-25).
+    /// How the app is built and served; `spec.kind` in the manifest (AP-01).
     #[serde(rename = "kind")]
     pub class: AppClass,
-    /// Target visibility and audience access scope (AP-01).
-    pub visibility: AppVisibility,
-    /// Lifecycle state (`draft`, `preview`, `published`, `retired`) (AP-18).
-    pub lifecycle: AppLifecycle,
-    /// Source code location or container image (AP-01, AP-02, AP-13).
+    /// Where the source lives (AP-02).
     pub source: AppSource,
-    /// Data needs and permissions requested by the application (AP-01, AP-05).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Toolchain versions CI builds with (AP-11).
+    pub build: AppBuild,
+    /// Who may reach the published app (AP-18).
+    pub visibility: AppVisibility,
+    /// Lifecycle state; a manifest without one is a draft (AP-18).
+    #[serde(default)]
+    pub lifecycle: AppLifecycle,
+    /// What the app needs to read or write; the reconciler renders its Endpoint and Policies from this (AP-04, AP-05).
     pub data_needs: Vec<DataNeed>,
-    /// Optional resource quotas and replica limits (AP-01, AP-15).
+    /// Per-app rate limits (AP-17).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<AppLimits>,
-    /// Public URL path route prefixes (e.g. `/apps/air-quality/`) (AP-14, AP-26).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub routes: Vec<String>,
+    /// Content Security Policy of the served app (AP-12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csp: Option<ContentSecurityPolicy>,
+    /// Whether the Portal may embed the app in a frame (AP-12).
+    #[serde(default)]
+    pub embeddable: bool,
 }
 
 impl Kind for AppSpec {
@@ -374,66 +452,96 @@ impl Kind for AppSpec {
 }
 
 impl AppSpec {
-    /// Validates application class, data needs, source, limits, routes, and lifecycle constraints.
+    /// Validates source, build, data needs, limits and CSP.
     pub fn validate(&self) -> Result<()> {
         self.source.validate()?;
+        self.build.validate()?;
 
-        if let Some(ref limits) = self.limits {
-            limits.validate()?;
-        }
-
-        for route in &self.routes {
-            if !route.starts_with('/') {
-                return Err(Error::Name {
-                    field: "spec.routes",
-                    value: route.clone(),
-                    reason: "route must start with `/`",
-                });
-            }
-        }
-
-        if self.class != AppClass::Static && self.data_needs.is_empty() {
+        if self.data_needs.is_empty() {
             return Err(Error::Name {
-                field: "spec.dataNeeds",
+                field: "dataNeeds",
                 value: String::new(),
-                reason: "dataNeeds must not be empty for service and fullstack apps (AP-05)",
+                reason:
+                    "an app declares what it needs; the endpoint is rendered from it (AP-01, AP-04)",
             });
         }
-
         for need in &self.data_needs {
             need.validate()?;
         }
 
-        if self.lifecycle == AppLifecycle::Published {
-            if self.visibility == AppVisibility::Private {
-                return Err(Error::Name {
-                    field: "spec.visibility",
-                    value: self.visibility.as_str().to_string(),
-                    reason: "published app cannot have private visibility (AP-18)",
-                });
-            }
-            if matches!(self.class, AppClass::Static | AppClass::Fullstack)
-                && self.routes.is_empty()
-            {
-                return Err(Error::Name {
-                    field: "spec.routes",
-                    value: String::new(),
-                    reason:
-                        "published static or fullstack app must declare at least one route (AP-14)",
-                });
-            }
+        if let Some(limits) = &self.limits {
+            limits.validate()?;
+        }
+        if let Some(csp) = &self.csp {
+            csp.validate()?;
+        }
+
+        if self.lifecycle == AppLifecycle::Published && self.visibility == AppVisibility::Private {
+            return Err(Error::Name {
+                field: "visibility",
+                value: "private".to_string(),
+                reason: "a published app is reachable by its audience; private has none (AP-18)",
+            });
         }
 
         Ok(())
     }
 
-    /// Returns `true` if any declared data need includes a write operation (AP-09).
+    /// Whether any data need asks for a write operation, which makes the change red lane (AP-09).
     pub fn write_operations(&self) -> bool {
-        self.data_needs.iter().any(|need| need.has_write())
+        self.data_needs.iter().any(DataNeed::has_write)
     }
 
-    /// Checks whether transitioning to `next` lifecycle state is permitted from current state (AP-18).
-    pub fn allows_transition_to(&self, next: AppLifecycle) -> bool {
-        self.lifecycle.allows_transition_to(next)
+    /// Whether a change to this app must be reviewed in the red lane (AP-09, AP-10).
+    pub fn requires_red_lane(&self) -> bool {
+        self.write_operations() || self.visibility == AppVisibility::Public
     }
+
+    /// Union of the representations the data needs ask for, the rendered endpoint's set (AP-05).
+    pub fn representations(&self) -> BTreeSet<Representation> {
+        self.data_needs
+            .iter()
+            .flat_map(|n| n.representations.iter().copied())
+            .collect()
+    }
+}
+
+impl fmt::Display for AppClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Static => "static",
+            Self::Service => "service",
+            Self::Fullstack => "fullstack",
+        })
+    }
+}
+
+impl fmt::Display for AppLifecycle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Rewrites the `field` of an [`Error::Name`] so the caller sees the manifest path.
+fn rename(err: Error, field: &'static str) -> Error {
+    match err {
+        Error::Name { reason, value, .. } => Error::Name {
+            field,
+            value,
+            reason,
+        },
+        other => other,
+    }
+}
+
+fn validate_relative_path(field: &'static str, path: &str) -> Result<()> {
+    let trimmed = path.strip_prefix("./").unwrap_or(path);
+    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.split('/').any(|seg| seg == "..") {
+        return Err(Error::Name {
+            field,
+            value: path.to_string(),
+            reason: "path must be relative and must not contain a `..` segment",
+        });
+    }
+    Ok(())
 }

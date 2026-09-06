@@ -90,6 +90,12 @@ pub enum Error {
     /// The designated fallback locale has no translation in the map.
     #[error("no value for the fallback locale `{0}`")]
     MissingFallbackLocale(String),
+    /// A manifest could not be parsed at all (malformed YAML/JSON, unknown field, wrong type).
+    ///
+    /// Carries the serde message; untyped consumers (`jcctl validate`, the Portal import
+    /// wizard) report it verbatim.
+    #[error("manifest does not parse: {0}")]
+    Parse(String),
 }
 
 /// Result type alias for operations in `jc-core`.
@@ -222,9 +228,8 @@ impl From<Error> for ProblemDetails {
             | Error::ApiVersion(..)
             | Error::Kind { .. }
             | Error::Locale(..)
-            | Error::MissingFallbackLocale(..) => {
-                ProblemDetails::bad_request().with_detail(err.to_string())
-            }
+            | Error::MissingFallbackLocale(..)
+            | Error::Parse(..) => ProblemDetails::bad_request().with_detail(err.to_string()),
         }
     }
 }

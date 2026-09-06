@@ -1,8 +1,7 @@
 //! Manifest kinds for LinkML-Map model-to-model transformations (T-0118, DM-33..DM-42).
 
-use crate::envelope::{Kind, ObjectMeta, Scope};
+use crate::envelope::{Kind, ObjectMeta, Scope, TypedRef};
 use crate::error::{Error, Result};
-use crate::kinds::data_model::SemVer;
 use crate::names;
 use regex::Regex;
 use schemars::JsonSchema;
@@ -12,6 +11,8 @@ use std::sync::LazyLock;
 
 static TARGET_SLOT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").expect("valid regex"));
+static MAJOR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(0|[1-9][0-9]*)$").expect("valid regex"));
 
 /// Reference to a DataModel with name and semantic version (DM-33).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -22,17 +23,17 @@ pub struct DataModelRef {
     pub kind: Option<String>,
     /// Referenced DataModel name (DNS-1123 label).
     pub name: String,
-    /// Referenced DataModel semantic version (DM-22, DM-33).
-    pub version: SemVer,
+    /// Served major version of the referenced model, `"1"`, `"2"` … (DM-22, DM-33).
+    pub version: String,
 }
 
 impl DataModelRef {
-    /// Creates a new data model reference with name and semantic version.
-    pub fn new(name: impl Into<String>, version: SemVer) -> Self {
+    /// Creates a new data model reference from a name and a served major version.
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
         Self {
             kind: Some("DataModel".to_string()),
             name: name.into(),
-            version,
+            version: version.into(),
         }
     }
 
@@ -53,7 +54,15 @@ impl DataModelRef {
                 reason,
             },
             other => other,
-        })
+        })?;
+        if !MAJOR_RE.is_match(&self.version) {
+            return Err(Error::Name {
+                field: field_prefix,
+                value: self.version.clone(),
+                reason: "version must be the served major version, e.g. `1` (DM-22)",
+            });
+        }
+        Ok(())
     }
 }
 
@@ -130,57 +139,33 @@ impl fmt::Display for NativeLanguage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct MappingTest {
-    /// Test case identifier (DNS-1123 label, DM-39).
-    pub name: String,
-    /// Sample input entity payload (JSON object, DM-39).
-    pub input: serde_json::Value,
-    /// Expected output entity payload (JSON object, DM-39).
-    pub expected: serde_json::Value,
+    /// Path of the input example, relative to the manifest (DM-39).
+    pub input: String,
+    /// Path of the expected output example, relative to the manifest (DM-39).
+    pub expect: String,
 }
 
 impl MappingTest {
-    /// Creates a new golden test case with name, input, and expected output.
-    pub fn new(
-        name: impl Into<String>,
-        input: serde_json::Value,
-        expected: serde_json::Value,
-    ) -> Self {
+    /// A golden test from an input example to the expected output example.
+    pub fn new(input: impl Into<String>, expect: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
-            input,
-            expected,
+            input: input.into(),
+            expect: expect.into(),
         }
     }
 
-    /// Validates test name and input/expected payloads (DM-39).
-    pub fn validate(&self) -> Result<()> {
-        names::validate_dns1123_label(&self.name).map_err(|e| match e {
-            Error::Name { reason, .. } => Error::Name {
-                field: "spec.tests.name",
-                value: self.name.clone(),
-                reason,
-            },
-            other => other,
-        })?;
-
-        if !self.input.is_object() {
-            return Err(Error::Name {
-                field: "spec.tests.input",
-                value: self.input.to_string(),
-                reason: "test input must be a JSON object (DM-39)",
-            });
-        }
-
-        if !self.expected.is_object() {
-            return Err(Error::Name {
-                field: "spec.tests.expected",
-                value: self.expected.to_string(),
-                reason: "test expected must be a JSON object (DM-39)",
-            });
-        }
-
-        Ok(())
+    fn validate(&self) -> Result<()> {
+        validate_relative_path("spec.tests.input", &self.input)?;
+        validate_relative_path("spec.tests.expect", &self.expect)
     }
+}
+
+/// Vocabulary alignment set backing the editor's mapping pre-fill (DM-42).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct VocabularyAlignment {
+    /// SSSOM mapping set carrying the alignment; never executed as a transformation (DM-42).
+    pub sssom_ref: TypedRef,
 }
 
 /// Desired specification of a [`Mapping`][crate::kinds::Mapping] resource (DM-33..DM-42).
@@ -198,9 +183,9 @@ pub struct MappingSpec {
     /// Native Bloblang escape hatch blocks (DM-38).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native: Vec<NativeBlock>,
-    /// Optional vocabulary alignment reference (DM-42).
+    /// Optional SSSOM alignment set used for editor pre-fill and documentation (DM-42).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vocabulary_alignment: Option<serde_json::Value>,
+    pub vocabulary_alignment: Option<VocabularyAlignment>,
     /// Golden test cases asserting input entity produces expected output entity (DM-39).
     pub tests: Vec<MappingTest>,
 }
@@ -319,16 +304,27 @@ impl MappingSpec {
             });
         }
 
-        let mut seen_test_names = std::collections::BTreeSet::new();
+        let mut seen_tests = std::collections::BTreeSet::new();
         for test in &self.tests {
             test.validate()?;
-            if !seen_test_names.insert(&test.name) {
+            if !seen_tests.insert((&test.input, &test.expect)) {
                 return Err(Error::Name {
-                    field: "spec.tests.name",
-                    value: test.name.clone(),
-                    reason: "duplicate test name in tests list (DM-39)",
+                    field: "spec.tests",
+                    value: test.input.clone(),
+                    reason: "duplicate golden test in tests list (DM-39)",
                 });
             }
+        }
+
+        if let Some(alignment) = &self.vocabulary_alignment {
+            if alignment.sssom_ref.kind != "Mapping" {
+                return Err(Error::Name {
+                    field: "spec.vocabularyAlignment.sssomRef.kind",
+                    value: alignment.sssom_ref.kind.clone(),
+                    reason: "an SSSOM alignment set is referenced as a Mapping (DM-42)",
+                });
+            }
+            names::validate_dns1123_label(&alignment.sssom_ref.name)?;
         }
 
         Ok(())
@@ -343,4 +339,17 @@ impl MappingSpec {
     pub fn compiled_bloblang_path(&self, name: &str) -> String {
         format!("generated/{name}.blobl")
     }
+}
+
+/// Rejects absolute paths and `..` traversal; a mapping's examples stay inside its directory.
+fn validate_relative_path(field: &'static str, path: &str) -> Result<()> {
+    let trimmed = path.strip_prefix("./").unwrap_or(path);
+    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.split('/').any(|seg| seg == "..") {
+        return Err(Error::Name {
+            field,
+            value: path.to_string(),
+            reason: "path must be relative and must not contain a `..` segment",
+        });
+    }
+    Ok(())
 }

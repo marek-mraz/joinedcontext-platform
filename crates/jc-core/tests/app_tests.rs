@@ -1,489 +1,395 @@
+//! T-0119: `kind: App` (AP-01, AP-02, AP-04, AP-05, AP-09, AP-11, AP-12, AP-16, AP-17, AP-18).
+
+use jc_core::envelope::Ref;
 use jc_core::error::Error;
-use jc_core::kinds::app::{AppClass, AppLifecycle, AppLimits, AppVisibility};
-use jc_core::kinds::policy::{Operation, OperationRef};
+use jc_core::kinds::app::{
+    AppClass, AppLifecycle, AppLimits, AppVisibility, ContentSecurityPolicy, GeoConstraint,
+    GeoWithin, TemporalConstraint,
+};
+use jc_core::kinds::endpoint::Representation;
+use jc_core::kinds::policy::{Operation, OperationGroup, OperationRef};
 use jc_core::kinds::App;
 
+/// Verbatim from docs/Architecture/16-apps-on-demand.md section 2.
 const GOLDEN: &str = r#"apiVersion: joinedcontext.com/v1alpha1
 kind: App
 metadata:
   name: air-quality-today
   namespace: bb-ovzdusie
-  title:
-    sk: "Kvalita ovzdušia dnes"
-    en: "Air quality today"
+  title: { sk: "Kvalita ovzdušia dnes", en: "Air quality today" }
   annotations:
     joinedcontext.com/generated-by: "agent:app-builder@bb"
-    joinedcontext.com/prompt-digest: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    joinedcontext.com/prompt-digest: "sha256:…"
 spec:
   kind: fullstack
+  source: { path: ./src }
+  build: { rust: "1.90", node: "22" }
   visibility: public
-  lifecycle: published
-  source:
-    path: ./src
-    image: ghcr.io/banskabystrica/air-quality-today@sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
   dataNeeds:
-    - contextSpaceRef: ovzdusie
-      entityTypes:
-        - AirQualityObserved
-        - District
-      attributes:
-        - pm10
-        - pm25
-        - airQualityIndex
-        - location
-        - name
-        - refDistrict
-      operations:
-        - queryEntity
-        - retrieveEntity
-        - queryTemporal
-      q: "pm10>=0"
-      scopeQ: "/geo/SK/BB"
-      geoQ: "georel=within;geometry=Polygon;coordinates=[[[19.10,48.70],[19.20,48.70],[19.20,48.76],[19.10,48.76],[19.10,48.70]]]"
-  limits:
-    cpu: "500m"
-    memory: "256Mi"
-    replicas: 2
-  routes:
-    - /apps/air-quality-today
+    - contextSpaceRef: { kind: ContextSpace, name: ovzdusie }
+      types: [AirQualityObserved, District]
+      attrs: [pm10, pm25, airQualityIndex, location, name, refDistrict]
+      operations: [queryEntity, retrieveEntity, queryTemporal]
+      temporalQ: { window: P1D }
+      geoQ: { within: { scopeRef: /geo/SK/BB } }
+      representations: [ngsi-ld, geojson]
+  limits: { requestsPerMinute: 600, maxFileRows: 20000 }
+  csp: { connectSrc: [self], frameAncestors: [none] }
 "#;
 
 #[test]
-fn golden_app_manifest_parses_validates_and_roundtrips() {
+fn golden_app_parses_validates_and_roundtrips() {
     let app = App::from_yaml(GOLDEN).expect("valid golden YAML");
-    app.validate().expect("golden app validates");
-
-    assert_eq!(app.api_version, "joinedcontext.com/v1alpha1");
-    assert_eq!(app.kind, "App");
-    assert_eq!(app.metadata.name, "air-quality-today");
-    assert_eq!(app.metadata.namespace.as_deref(), Some("bb-ovzdusie"));
-
-    let title = app.metadata.title.as_ref().expect("title exists");
-    assert_eq!(title.get("sk"), Some("Kvalita ovzdušia dnes"));
-    assert_eq!(title.get("en"), Some("Air quality today"));
-
-    assert_eq!(app.spec.class, AppClass::Fullstack);
-    assert_eq!(app.spec.visibility, AppVisibility::Public);
-    assert_eq!(app.spec.lifecycle, AppLifecycle::Published);
-
-    let src = &app.spec.source;
-    assert_eq!(src.path.as_deref(), Some("./src"));
-    assert_eq!(
-        src.image.as_deref(),
-        Some("ghcr.io/banskabystrica/air-quality-today@sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
-    );
-
-    assert_eq!(app.spec.data_needs.len(), 1);
-    let need = &app.spec.data_needs[0];
-    assert_eq!(need.context_space_ref, "ovzdusie");
-    assert_eq!(need.entity_types, vec!["AirQualityObserved", "District"]);
-    assert_eq!(
-        need.attributes,
-        vec![
-            "pm10",
-            "pm25",
-            "airQualityIndex",
-            "location",
-            "name",
-            "refDistrict"
-        ]
-    );
-    assert_eq!(need.operations.len(), 3);
-    assert_eq!(need.q.as_deref(), Some("pm10>=0"));
-    assert_eq!(need.scope_q.as_deref(), Some("/geo/SK/BB"));
-
-    let limits = app.spec.limits.as_ref().expect("limits exist");
-    assert_eq!(limits.cpu.as_deref(), Some("500m"));
-    assert_eq!(limits.memory.as_deref(), Some("256Mi"));
-    assert_eq!(limits.replicas, Some(2));
-
-    assert_eq!(app.spec.routes, vec!["/apps/air-quality-today"]);
-    assert!(!app.spec.write_operations());
+    app.validate().expect("golden App validates");
 
     assert_eq!(
         app.resource_path().expect("resource path"),
         "projects/bb-ovzdusie/apps/air-quality-today/app.yaml"
     );
+    assert_eq!(app.spec.class, AppClass::Fullstack);
+    assert_eq!(app.spec.visibility, AppVisibility::Public);
+    assert_eq!(
+        app.spec.lifecycle,
+        AppLifecycle::Draft,
+        "a manifest without one is a draft"
+    );
+    assert_eq!(app.spec.build.0["rust"], "1.90");
+    assert_eq!(
+        app.spec.representations(),
+        [Representation::NgsiLd, Representation::GeoJson]
+            .into_iter()
+            .collect()
+    );
 
-    let serialized = app.to_yaml().expect("serialize to yaml");
-    let reimported = App::from_yaml(&serialized).expect("re-import yaml");
-    assert_eq!(app, reimported);
+    let serialized = app.to_yaml().expect("serialize");
+    assert_eq!(app, App::from_yaml(&serialized).expect("re-import"));
 }
 
 #[test]
-fn secret_ref_rejected_at_parse_time_under_spec_and_source_ap16() {
-    let with_spec_secret = format!("{GOLDEN}  secretRef:\n    name: database-credentials\n");
-    let err_spec = App::from_yaml(&with_spec_secret);
+fn secret_ref_is_rejected_at_parse_time_ap16() {
+    let under_spec = format!("{GOLDEN}  secretRef:\n    name: database-credentials\n");
     assert!(
-        err_spec.is_err(),
-        "deny_unknown_fields must reject secretRef under spec"
+        App::from_yaml(&under_spec).is_err(),
+        "deny_unknown_fields must reject secretRef under spec (AP-16)"
     );
 
-    let with_source_secret = GOLDEN.replace(
-        "    path: ./src\n",
-        "    path: ./src\n    secretRef:\n      name: git-credentials\n",
+    let under_source = GOLDEN.replace(
+        "  source: { path: ./src }",
+        "  source: { path: ./src, secretRef: { name: git-credentials } }",
     );
-    let err_source = App::from_yaml(&with_source_secret);
     assert!(
-        err_source.is_err(),
-        "deny_unknown_fields must reject secretRef under spec.source"
+        App::from_yaml(&under_source).is_err(),
+        "deny_unknown_fields must reject secretRef under spec.source (AP-16)"
     );
+
+    let under_need = GOLDEN.replace(
+        "      representations: [ngsi-ld, geojson]",
+        "      representations: [ngsi-ld, geojson]\n      apiKey: \"inline\"",
+    );
+    assert!(App::from_yaml(&under_need).is_err());
 }
 
 #[test]
-fn service_and_fullstack_apps_require_data_needs_ap05() {
+fn source_is_a_path_or_a_forge_repository_ap02() {
+    let both = GOLDEN.replace(
+        "  source: { path: ./src }",
+        "  source: { path: ./src, git: { url: https://forge.banskabystrica.sk/mesto/app.git, ref: main } }",
+    );
+    let app = App::from_yaml(&both).expect("parses");
+    assert!(matches!(
+        app.validate().expect_err("path and git together"),
+        Error::Name {
+            field: "source",
+            ..
+        }
+    ));
+
+    let neither = GOLDEN.replace("  source: { path: ./src }", "  source: {}");
+    let app = App::from_yaml(&neither).expect("parses");
+    assert!(app.validate().is_err(), "an app needs a source");
+
+    let git = GOLDEN.replace(
+        "  source: { path: ./src }",
+        "  source: { git: { url: https://forge.banskabystrica.sk/mesto/app.git, ref: main, path: apps/air } }",
+    );
+    App::from_yaml(&git)
+        .expect("parses")
+        .validate()
+        .expect("git source validates");
+
+    let plaintext = GOLDEN.replace(
+        "  source: { path: ./src }",
+        "  source: { git: { url: http://forge.banskabystrica.sk/mesto/app.git, ref: main } }",
+    );
+    let app = App::from_yaml(&plaintext).expect("parses");
+    assert!(matches!(
+        app.validate().expect_err("plaintext http forge"),
+        Error::Name {
+            field: "source.git.url",
+            ..
+        }
+    ));
+
+    let escaping = GOLDEN.replace("  source: { path: ./src }", "  source: { path: ../../etc }");
+    let app = App::from_yaml(&escaping).expect("parses");
+    assert!(app.validate().is_err());
+}
+
+#[test]
+fn build_must_pin_toolchain_versions_ap11() {
+    let empty = GOLDEN.replace(r#"  build: { rust: "1.90", node: "22" }"#, "  build: {}");
+    let app = App::from_yaml(&empty).expect("parses");
+    assert!(matches!(
+        app.validate().expect_err("no toolchain pinned"),
+        Error::Name { field: "build", .. }
+    ));
+
+    let unpinned = GOLDEN.replace(
+        r#"  build: { rust: "1.90", node: "22" }"#,
+        r#"  build: { rust: "" }"#,
+    );
+    let app = App::from_yaml(&unpinned).expect("parses");
+    assert!(app.validate().is_err(), "an empty version is not a pin");
+}
+
+#[test]
+fn data_needs_are_required_and_validated_ap04_ap05() {
+    let none = GOLDEN.replace("  dataNeeds:", "  dataNeeds: []\n  unusedDataNeeds:");
+    // the replacement above would introduce an unknown field, so build the empty case directly
+    let _ = none;
     let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
-
-    app.spec.class = AppClass::Service;
     app.spec.data_needs.clear();
-    let err_svc = app
-        .validate()
-        .expect_err("service without dataNeeds must fail");
     assert!(matches!(
-        err_svc,
+        app.validate().expect_err("an app with no declared needs"),
         Error::Name {
-            field: "spec.dataNeeds",
+            field: "dataNeeds",
             ..
         }
     ));
 
-    app.spec.class = AppClass::Fullstack;
-    app.spec.data_needs.clear();
-    let err_full = app
-        .validate()
-        .expect_err("fullstack without dataNeeds must fail");
+    let mut no_types = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    no_types.spec.data_needs[0].types.clear();
     assert!(matches!(
-        err_full,
+        no_types.validate().expect_err("no types"),
         Error::Name {
-            field: "spec.dataNeeds",
+            field: "dataNeeds.types",
             ..
         }
     ));
 
-    app.spec.class = AppClass::Static;
-    app.spec.data_needs.clear();
-    app.validate().expect("static app may have empty dataNeeds");
-}
-
-#[test]
-fn cim009_operation_validation_accepts_valid_and_rejects_unknown() {
-    let bad_op_yaml = GOLDEN.replace("- queryEntity\n", "- upsertEntity\n");
-    let err = App::from_yaml(&bad_op_yaml);
-    assert!(
-        err.is_err(),
-        "proprietary operation `upsertEntity` must be rejected at deserialization"
-    );
-
-    let read_op_yaml = GOLDEN.replace("- queryEntity\n", "- read\n");
-    let err_read = App::from_yaml(&read_op_yaml);
-    assert!(
-        err_read.is_err(),
-        "proprietary operation `read` must be rejected at deserialization"
-    );
-
-    let valid_ops = [
-        "queryEntity",
-        "createEntity",
-        "deleteBatch",
-        "federationOps",
+    let mut duplicate_type = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    duplicate_type.spec.data_needs[0].types = vec![
+        "AirQualityObserved".to_string(),
+        "AirQualityObserved".to_string(),
     ];
-    for op in valid_ops {
-        let json = format!("\"{op}\"");
-        let parsed: OperationRef = serde_json::from_str(&json).expect("valid operation");
-        assert_eq!(parsed.as_str(), op);
-    }
+    assert!(duplicate_type.validate().is_err());
+
+    let mut bad_type = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    bad_type.spec.data_needs[0].types = vec!["air quality".to_string()];
+    assert!(bad_type.validate().is_err());
+
+    let mut no_ops = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    no_ops.spec.data_needs[0].operations.clear();
+    assert!(matches!(
+        no_ops.validate().expect_err("no operations"),
+        Error::Name {
+            field: "dataNeeds.operations",
+            ..
+        }
+    ));
+
+    let mut wrong_ref_kind = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    wrong_ref_kind.spec.data_needs[0].context_space_ref = Ref::Typed(jc_core::envelope::TypedRef {
+        kind: "Endpoint".to_string(),
+        name: "ovzdusie".to_string(),
+        namespace: None,
+    });
+    assert!(matches!(
+        wrong_ref_kind
+            .validate()
+            .expect_err("an app reads a space, not an endpoint"),
+        Error::Kind {
+            expected: "ContextSpace",
+            ..
+        }
+    ));
 }
 
 #[test]
-fn write_operations_classification_ap09() {
-    let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
-    assert!(!app.spec.write_operations());
+fn unknown_cim009_operation_names_are_rejected_r8() {
+    let bad = GOLDEN.replace(
+        "      operations: [queryEntity, retrieveEntity, queryTemporal]",
+        "      operations: [queryEntity, readEverything]",
+    );
+    assert!(
+        App::from_yaml(&bad).is_err(),
+        "an operation outside CIM 009 clause 4.20 must not deserialize"
+    );
 
-    app.spec.data_needs[0]
+    let group = GOLDEN.replace(
+        "      operations: [queryEntity, retrieveEntity, queryTemporal]",
+        "      operations: [retrieveOps]",
+    );
+    App::from_yaml(&group)
+        .expect("groups are legal")
+        .validate()
+        .expect("a group validates");
+}
+
+#[test]
+fn write_operations_raise_the_lane_ap09() {
+    let app = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    assert!(!app.spec.write_operations(), "the golden app only reads");
+    assert!(
+        app.spec.requires_red_lane(),
+        "but it is public, which is red (AP-10)"
+    );
+
+    let mut writer = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    writer.spec.visibility = AppVisibility::Project;
+    assert!(!writer.spec.requires_red_lane());
+    writer.spec.data_needs[0]
         .operations
         .push(OperationRef::Single(Operation::CreateEntity));
-    assert!(app.spec.write_operations());
+    assert!(writer.spec.write_operations());
+    assert!(writer.spec.requires_red_lane());
 
-    app.spec.data_needs[0].operations = vec![OperationRef::Single(Operation::DeleteAttrs)];
-    assert!(app.spec.write_operations());
+    // A group that stands for updates counts as a write; a read-only group does not.
+    let mut group_writer = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    group_writer.spec.visibility = AppVisibility::Project;
+    group_writer.spec.data_needs[0].operations =
+        vec![OperationRef::Group(OperationGroup::UpdateOps)];
+    assert!(group_writer.spec.write_operations());
 
-    app.spec.data_needs[0].operations = vec![
-        OperationRef::Single(Operation::QueryEntity),
-        OperationRef::Single(Operation::RetrieveTemporal),
-    ];
-    assert!(!app.spec.write_operations());
+    let mut group_reader = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    group_reader.spec.data_needs[0].operations =
+        vec![OperationRef::Group(OperationGroup::RetrieveOps)];
+    assert!(!group_reader.spec.write_operations());
 }
 
 #[test]
-fn app_lifecycle_transitions_forward_only_ap18() {
-    let states = [
-        AppLifecycle::Draft,
-        AppLifecycle::Preview,
-        AppLifecycle::Published,
-        AppLifecycle::Retired,
-    ];
+fn constraints_are_validated_ap05() {
+    let mut bad_window = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    for window in ["1D", "P", "", "P1X", "yesterday"] {
+        bad_window.spec.data_needs[0].temporal_q = Some(TemporalConstraint {
+            window: window.to_string(),
+        });
+        assert!(
+            bad_window.validate().is_err(),
+            "window `{window}` must be refused"
+        );
+    }
+    bad_window.spec.data_needs[0].temporal_q = Some(TemporalConstraint {
+        window: "PT12H".to_string(),
+    });
+    assert!(bad_window.validate().is_ok());
 
-    for (from_idx, from) in states.iter().enumerate() {
-        for (to_idx, to) in states.iter().enumerate() {
-            let allowed = from.allows_transition_to(*to);
-            if to_idx >= from_idx {
-                assert!(
-                    allowed,
-                    "transition from {:?} to {:?} must be allowed",
-                    from, to
-                );
-            } else {
-                assert!(
-                    !allowed,
-                    "transition from {:?} to {:?} must be forbidden",
-                    from, to
-                );
-            }
+    let mut bad_scope = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    for scope in ["geo/SK/BB", "//geo/SK", ""] {
+        bad_scope.spec.data_needs[0].geo_q = Some(GeoConstraint {
+            within: GeoWithin {
+                scope_ref: scope.to_string(),
+            },
+        });
+        assert!(
+            bad_scope.validate().is_err(),
+            "scopeRef `{scope}` must be refused"
+        );
+    }
+}
+
+#[test]
+fn limits_and_csp_ap12_ap17() {
+    let mut zero = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    zero.spec.limits = Some(AppLimits {
+        requests_per_minute: Some(0),
+        max_file_rows: None,
+    });
+    assert!(matches!(
+        zero.validate()
+            .expect_err("a zero rate limit blocks the app"),
+        Error::Name {
+            field: "limits.requestsPerMinute",
+            ..
         }
+    ));
+
+    let mut wildcard = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    wildcard.spec.csp = Some(ContentSecurityPolicy {
+        connect_src: vec!["*".to_string()],
+        frame_ancestors: vec!["none".to_string()],
+    });
+    assert!(matches!(
+        wildcard.validate().expect_err("a wildcard connect-src"),
+        Error::Name {
+            field: "csp.connectSrc",
+            ..
+        }
+    ));
+
+    let mut plaintext = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    plaintext.spec.csp = Some(ContentSecurityPolicy {
+        connect_src: vec!["http://tracker.example.com".to_string()],
+        frame_ancestors: vec![],
+    });
+    assert!(plaintext.validate().is_err());
+
+    let mut issuer = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    issuer.spec.csp = Some(ContentSecurityPolicy {
+        connect_src: vec![
+            "self".to_string(),
+            "https://id.banskabystrica.sk".to_string(),
+        ],
+        frame_ancestors: vec!["none".to_string()],
+    });
+    assert!(
+        issuer.validate().is_ok(),
+        "the OIDC issuer is allowed (AP-11)"
+    );
+}
+
+#[test]
+fn lifecycle_transitions_ap18() {
+    use AppLifecycle::{Draft, Preview, Published, Retired};
+
+    for (from, to) in [
+        (Draft, Preview),
+        (Preview, Published),
+        (Published, Retired),
+        (Draft, Retired),
+        (Preview, Retired),
+        (Draft, Draft),
+        (Retired, Retired),
+    ] {
+        assert!(
+            from.allows_transition_to(to),
+            "{from} -> {to} must be allowed"
+        );
     }
 
-    assert!(AppLifecycle::Retired.allows_transition_to(AppLifecycle::Retired));
-    assert!(!AppLifecycle::Retired.allows_transition_to(AppLifecycle::Draft));
-    assert!(!AppLifecycle::Retired.allows_transition_to(AppLifecycle::Preview));
-    assert!(!AppLifecycle::Retired.allows_transition_to(AppLifecycle::Published));
-}
+    for (from, to) in [
+        (Published, Preview),
+        (Published, Draft),
+        (Preview, Draft),
+        (Retired, Published),
+        (Retired, Draft),
+        (Draft, Published),
+    ] {
+        assert!(
+            !from.allows_transition_to(to),
+            "{from} -> {to} must be refused"
+        );
+    }
 
-#[test]
-fn published_app_requires_non_private_visibility_and_routes_ap14_ap18() {
-    let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
-
-    app.spec.lifecycle = AppLifecycle::Published;
-    app.spec.visibility = AppVisibility::Private;
-    let err_vis = app.validate().expect_err("published private app must fail");
+    let mut private_published = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    private_published.spec.lifecycle = Published;
+    private_published.spec.visibility = AppVisibility::Private;
     assert!(matches!(
-        err_vis,
+        private_published
+            .validate()
+            .expect_err("published but unreachable"),
         Error::Name {
-            field: "spec.visibility",
-            ..
-        }
-    ));
-
-    app.spec.visibility = AppVisibility::Public;
-    app.spec.routes.clear();
-    let err_route = app
-        .validate()
-        .expect_err("published fullstack app with no routes must fail");
-    assert!(matches!(
-        err_route,
-        Error::Name {
-            field: "spec.routes",
-            ..
-        }
-    ));
-
-    app.spec.class = AppClass::Static;
-    app.spec.routes.clear();
-    let err_static_route = app
-        .validate()
-        .expect_err("published static app with no routes must fail");
-    assert!(matches!(
-        err_static_route,
-        Error::Name {
-            field: "spec.routes",
-            ..
-        }
-    ));
-
-    app.spec.lifecycle = AppLifecycle::Draft;
-    app.spec.visibility = AppVisibility::Private;
-    app.spec.routes.clear();
-    assert!(app.validate().is_ok());
-}
-
-#[test]
-fn source_image_digest_pinning_ap13() {
-    let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
-
-    app.spec.source.image = Some("ghcr.io/banskabystrica/air-quality-today:latest".to_string());
-    let err_latest = app.validate().expect_err("image with tag must fail AP-13");
-    assert!(matches!(
-        err_latest,
-        Error::Name {
-            field: "spec.source.image",
-            ..
-        }
-    ));
-
-    app.spec.source.image =
-        Some("ghcr.io/banskabystrica/air-quality-today@sha256:short".to_string());
-    let err_short = app
-        .validate()
-        .expect_err("image with malformed digest must fail");
-    assert!(matches!(
-        err_short,
-        Error::Name {
-            field: "spec.source.image",
-            ..
-        }
-    ));
-
-    app.spec.source.image = None;
-    app.spec.source.path = None;
-    app.spec.source.repository = None;
-    let err_empty_src = app
-        .validate()
-        .expect_err("source with all None fields must fail");
-    assert!(matches!(
-        err_empty_src,
-        Error::Name {
-            field: "spec.source",
-            ..
-        }
-    ));
-}
-
-#[test]
-fn limits_validation_bounds() {
-    let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
-
-    app.spec.limits = Some(AppLimits {
-        cpu: Some("".to_string()),
-        memory: Some("256Mi".to_string()),
-        replicas: Some(1),
-    });
-    let err_cpu = app.validate().expect_err("empty cpu limit must fail");
-    assert!(matches!(
-        err_cpu,
-        Error::Name {
-            field: "spec.limits.cpu",
-            ..
-        }
-    ));
-
-    app.spec.limits = Some(AppLimits {
-        cpu: Some("500m".to_string()),
-        memory: Some("".to_string()),
-        replicas: Some(1),
-    });
-    let err_mem = app.validate().expect_err("empty memory limit must fail");
-    assert!(matches!(
-        err_mem,
-        Error::Name {
-            field: "spec.limits.memory",
-            ..
-        }
-    ));
-
-    app.spec.limits = Some(AppLimits {
-        cpu: Some("500m".to_string()),
-        memory: Some("256Mi".to_string()),
-        replicas: Some(0),
-    });
-    let err_rep = app.validate().expect_err("replicas: 0 must fail");
-    assert!(matches!(
-        err_rep,
-        Error::Name {
-            field: "spec.limits.replicas",
-            ..
-        }
-    ));
-}
-
-#[test]
-fn routes_must_start_with_slash() {
-    let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
-    app.spec.routes = vec!["apps/air-quality-today".to_string()];
-    let err = app
-        .validate()
-        .expect_err("route without leading slash must fail");
-    assert!(matches!(
-        err,
-        Error::Name {
-            field: "spec.routes",
-            ..
-        }
-    ));
-}
-
-#[test]
-fn data_need_validation_invariants() {
-    let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
-
-    app.spec.data_needs[0].context_space_ref = "Ovzdusie_Invalid".to_string();
-    let err_space = app.validate().expect_err("non-DNS-1123 spaceRef must fail");
-    assert!(matches!(
-        err_space,
-        Error::Name {
-            field: "dataNeeds.contextSpaceRef",
-            ..
-        }
-    ));
-
-    let mut app2 = App::from_yaml(GOLDEN).expect("valid golden YAML");
-    app2.spec.data_needs[0].entity_types.clear();
-    let err_empty_types = app2.validate().expect_err("empty entityTypes must fail");
-    assert!(matches!(
-        err_empty_types,
-        Error::Name {
-            field: "dataNeeds.entityTypes",
-            ..
-        }
-    ));
-
-    let mut app3 = App::from_yaml(GOLDEN).expect("valid golden YAML");
-    app3.spec.data_needs[0].entity_types = vec!["airQualityObserved".to_string()];
-    let err_type = app3.validate().expect_err("non-PascalCase type must fail");
-    assert!(matches!(
-        err_type,
-        Error::Name {
-            field: "entityType",
-            ..
-        }
-    ));
-
-    let mut app4 = App::from_yaml(GOLDEN).expect("valid golden YAML");
-    app4.spec.data_needs[0].entity_types = vec![
-        "AirQualityObserved".to_string(),
-        "AirQualityObserved".to_string(),
-    ];
-    let err_dup_type = app4
-        .validate()
-        .expect_err("duplicate entityTypes must fail");
-    assert!(matches!(
-        err_dup_type,
-        Error::Name {
-            field: "dataNeeds.entityTypes",
-            ..
-        }
-    ));
-
-    let mut app5 = App::from_yaml(GOLDEN).expect("valid golden YAML");
-    app5.spec.data_needs[0].attributes = vec!["pm10".to_string(), "pm10".to_string()];
-    let err_dup_attr = app5.validate().expect_err("duplicate attributes must fail");
-    assert!(matches!(
-        err_dup_attr,
-        Error::Name {
-            field: "dataNeeds.attributes",
-            ..
-        }
-    ));
-
-    let mut app6 = App::from_yaml(GOLDEN).expect("valid golden YAML");
-    app6.spec.data_needs[0].operations.clear();
-    let err_empty_ops = app6.validate().expect_err("empty operations must fail");
-    assert!(matches!(
-        err_empty_ops,
-        Error::Name {
-            field: "dataNeeds.operations",
-            ..
-        }
-    ));
-
-    let mut app7 = App::from_yaml(GOLDEN).expect("valid golden YAML");
-    app7.spec.data_needs[0].operations = vec![
-        OperationRef::Single(Operation::QueryEntity),
-        OperationRef::Single(Operation::QueryEntity),
-    ];
-    let err_dup_ops = app7.validate().expect_err("duplicate operations must fail");
-    assert!(matches!(
-        err_dup_ops,
-        Error::Name {
-            field: "dataNeeds.operations",
+            field: "visibility",
             ..
         }
     ));

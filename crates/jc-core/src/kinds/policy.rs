@@ -302,6 +302,14 @@ pub enum OperationGroup {
 }
 
 impl OperationGroup {
+    /// Whether the group stands for at least one operation that changes context data (R8).
+    ///
+    /// `updateOps` is the update family; `redirectionOps` forwards every operation, writes
+    /// included. The consumption groups do not write.
+    pub const fn includes_write(&self) -> bool {
+        matches!(self, Self::UpdateOps | Self::RedirectionOps)
+    }
+
     /// Returns the exact CIM 009 Table 4.20-2 wire name.
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -348,6 +356,17 @@ impl OperationRef {
         match self {
             Self::Single(op) => op.as_str(),
             Self::Group(grp) => grp.as_str(),
+        }
+    }
+
+    /// Whether granting this reference lets the holder change context data (R8, AP-09).
+    ///
+    /// A group counts as a write when any operation it stands for writes; erring towards
+    /// "write" only raises the review lane, never lowers it.
+    pub fn is_write(&self) -> bool {
+        match self {
+            Self::Single(op) => op.is_write(),
+            Self::Group(grp) => grp.includes_write(),
         }
     }
 }

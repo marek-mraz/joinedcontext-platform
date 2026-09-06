@@ -23,17 +23,22 @@ pub use envelope::{
 pub use error::{Error, ProblemDetails, Result, UrnError, PROBLEM_JSON, PROBLEM_TYPE_BASE};
 pub use i18n::MultiLanguageMap;
 pub use kinds::{
-    App, AppClass, AppLifecycle, AppLimits, AppSource, AppSpec, AppVisibility, Audience, Caching,
-    Compute, ComputeKind, Contact, ContactRole, ContextSpace, ContextSpaceSpec, Credential,
-    CredentialKind, DataModel, DataModelLifecycle, DataModelRef, DataModelSource, DataModelSpec,
-    DataNeed, Endpoint, EndpointSlug, EndpointSpec, EntitySelector, GeneratedArtifacts,
-    KubernetesBinding, Mapping, MappingSpec, MappingTest, NativeBlock, NativeLanguage, Operation,
-    OperationGroup, OperationRef, Organization, OrganizationSpec, Output, OutputMode, Owner,
-    Pipeline, PipelineClass, PipelineQuotas, PipelineSource, PipelineSpec, Policy, PolicySpec,
-    Principal, PrincipalKind, Project, ProjectSpec, Quotas, RateLimits, RegistrationInfo,
-    Representation, RoleBinding, RoleScope, ScopeDefinition, ScopeDefinitionSpec, SemVer,
+    AgreementConstraints, AgreementRole, AgreementState, App, AppBuild, AppClass, AppLifecycle,
+    AppLimits, AppSource, AppSpec, AppVisibility, Audience, Bundle, BundleItem, BundleOrigin,
+    BundleSpec, Caching, Compute, ComputeKind, ConflictPolicy, ConnectorEngine, Contact,
+    ContactRole, ContentSecurityPolicy, ContextSpace, ContextSpaceSpec, Credential, CredentialKind,
+    DataAgreement, DataAgreementSpec, DataModel, DataModelLifecycle, DataModelRef, DataModelSource,
+    DataModelSpec, DataNeed, DataOffer, DataOfferSpec, DataSpaceParticipant,
+    DataSpaceParticipantSpec, Did, Endpoint, EndpointSlug, EndpointSpec, EntitySelector,
+    GeneratedArtifacts, GeoConstraint, GeoWithin, GitOrigin, GitSource, KubernetesBinding, Mapping,
+    MappingSpec, MappingTest, NativeBlock, NativeLanguage, Operation, OperationGroup, OperationRef,
+    Organization, OrganizationSpec, Output, OutputMode, Owner, Pipeline, PipelineClass,
+    PipelineQuotas, PipelineSource, PipelineSpec, PlatformApiOrigin, Policy, PolicySpec, Principal,
+    PrincipalKind, Project, ProjectSpec, Quotas, RateLimits, RegistrationInfo, RemoteSource,
+    Representation, RoleBinding, RoleScope, Schedule, ScopeDefinition, ScopeDefinitionSpec, SemVer,
     ServiceAccount, ServiceAccountLimits, ServiceAccountSpec, SharedSpaceReference,
-    SharedSpaceReferenceSpec, SourceQuery, SubscriptionTrigger, TemporalWindow, Trigger, Validity,
+    SharedSpaceReferenceSpec, SourceQuery, SubscriptionTrigger, SyncMode, SyncOrigin, SyncSource,
+    SyncSourceSpec, TemporalConstraint, TemporalWindow, Trigger, Validity, VocabularyAlignment,
     Workload,
 };
 pub use registry::{by_kind, by_plural, KindInfo, KINDS};

@@ -43,112 +43,73 @@
       ],
       "type": "object"
     },
-    "DataModelRef": {
+    "ConnectorEngine": {
+      "description": "Supported data space connector runtime engine (DS-06).",
+      "oneOf": [
+        {
+          "description": "FIWARE Data Space Connector Rainbow engine implemented in Rust (DS-06).",
+          "enum": [
+            "rainbow"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Eclipse Dataspace Components (EDC) engine implemented in Java (DS-06).",
+          "enum": [
+            "edc"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "DataSpaceParticipantSpec": {
       "additionalProperties": false,
-      "description": "Reference to a DataModel with name and semantic version (DM-33).",
+      "description": "Desired specification of a [`DataSpaceParticipant`][crate::kinds::DataSpaceParticipant] resource (DS-04, DS-06, DS-07).",
       "properties": {
-        "kind": {
-          "description": "Optional resource kind (must be `DataModel` if present) (MF-07).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name": {
-          "description": "Referenced DataModel name (DNS-1123 label).",
+        "connectorUrl": {
+          "description": "HTTPS base URL of the local connector protocol endpoint (DS-07).",
           "type": "string"
         },
-        "version": {
-          "description": "Served major version of the referenced model, `\"1\"`, `\"2\"` … (DM-22, DM-33).",
+        "credentialIssuer": {
+          "description": "HTTPS base URL of the Verifiable Credential issuer (DS-04, DS-07).",
           "type": "string"
+        },
+        "did": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Did"
+            }
+          ],
+          "description": "Participant decentralized identifier `did:web:{orgDomain}` (DS-04, DS-07)."
+        },
+        "engine": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ConnectorEngine"
+            }
+          ],
+          "default": "rainbow",
+          "description": "Connector protocol engine implementation (DS-06, DS-07)."
+        },
+        "trustAnchors": {
+          "description": "Trusted credential issuer and authority DIDs (DS-07).",
+          "items": {
+            "$ref": "#/definitions/Did"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "name",
-        "version"
+        "connectorUrl",
+        "credentialIssuer",
+        "did"
       ],
       "type": "object"
     },
-    "MappingSpec": {
-      "additionalProperties": false,
-      "description": "Desired specification of a [`Mapping`][crate::kinds::Mapping] resource (DM-33..DM-42).",
-      "properties": {
-        "contextSpaceRef": {
-          "description": "Context Space name to which this mapping belongs (PF-09, DM-33).",
-          "type": "string"
-        },
-        "native": {
-          "description": "Native Bloblang escape hatch blocks (DM-38).",
-          "items": {
-            "$ref": "#/definitions/NativeBlock"
-          },
-          "type": "array"
-        },
-        "source": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/DataModelRef"
-            }
-          ],
-          "description": "Source data model reference (DM-33)."
-        },
-        "target": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/DataModelRef"
-            }
-          ],
-          "description": "Target data model reference (DM-33)."
-        },
-        "tests": {
-          "description": "Golden test cases asserting input entity produces expected output entity (DM-39).",
-          "items": {
-            "$ref": "#/definitions/MappingTest"
-          },
-          "type": "array"
-        },
-        "transformation": {
-          "description": "Verbatim LinkML-Map TransformationSpecification payload (DM-33)."
-        },
-        "vocabularyAlignment": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/VocabularyAlignment"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Optional SSSOM alignment set used for editor pre-fill and documentation (DM-42)."
-        }
-      },
-      "required": [
-        "contextSpaceRef",
-        "source",
-        "target",
-        "tests",
-        "transformation"
-      ],
-      "type": "object"
-    },
-    "MappingTest": {
-      "additionalProperties": false,
-      "description": "Golden test case asserting input entity produces expected output entity (DM-39).",
-      "properties": {
-        "expect": {
-          "description": "Path of the expected output example, relative to the manifest (DM-39).",
-          "type": "string"
-        },
-        "input": {
-          "description": "Path of the input example, relative to the manifest (DM-39).",
-          "type": "string"
-        }
-      },
-      "required": [
-        "expect",
-        "input"
-      ],
-      "type": "object"
+    "Did": {
+      "description": "Decentralized Identifier in the did:web method bound to an organization domain (DS-04, PF-41)",
+      "pattern": "^did:web:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$",
+      "type": "string"
     },
     "MultiLanguageMap": {
       "additionalProperties": {
@@ -160,46 +121,6 @@
         "type": "string"
       },
       "type": "object"
-    },
-    "NativeBlock": {
-      "additionalProperties": false,
-      "description": "Native code escape hatch block for logic LinkML-Map cannot express (DM-38).",
-      "properties": {
-        "language": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/NativeLanguage"
-            }
-          ],
-          "description": "Native language of the code block (DM-37, DM-38)."
-        },
-        "source": {
-          "description": "Source code of the native processor (non-empty, DM-38).",
-          "type": "string"
-        },
-        "targetSlot": {
-          "description": "Target slot identifier to which this native block is attached (`^[A-Za-z_][A-Za-z0-9_]*$`, DM-38).",
-          "type": "string"
-        }
-      },
-      "required": [
-        "language",
-        "source",
-        "targetSlot"
-      ],
-      "type": "object"
-    },
-    "NativeLanguage": {
-      "description": "Supported native transformation language (DM-37, DM-38).",
-      "oneOf": [
-        {
-          "description": "Inline Bento Bloblang processor (DM-37, DM-38).",
-          "enum": [
-            "bloblang"
-          ],
-          "type": "string"
-        }
-      ]
     },
     "ObjectMeta": {
       "additionalProperties": false,
@@ -329,50 +250,6 @@
         }
       },
       "type": "object"
-    },
-    "TypedRef": {
-      "additionalProperties": false,
-      "description": "Structured typed resource reference (MF-07).",
-      "properties": {
-        "kind": {
-          "description": "Target resource kind.",
-          "type": "string"
-        },
-        "name": {
-          "description": "Target resource name.",
-          "type": "string"
-        },
-        "namespace": {
-          "description": "Target resource namespace (defaults to caller namespace if omitted).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "kind",
-        "name"
-      ],
-      "type": "object"
-    },
-    "VocabularyAlignment": {
-      "additionalProperties": false,
-      "description": "Vocabulary alignment set backing the editor's mapping pre-fill (DM-42).",
-      "properties": {
-        "sssomRef": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/TypedRef"
-            }
-          ],
-          "description": "SSSOM mapping set carrying the alignment; never executed as a transformation (DM-42)."
-        }
-      },
-      "required": [
-        "sssomRef"
-      ],
-      "type": "object"
     }
   },
   "description": "Kubernetes-style resource envelope (MF-01..MF-04).",
@@ -396,7 +273,7 @@
     "spec": {
       "allOf": [
         {
-          "$ref": "#/definitions/MappingSpec"
+          "$ref": "#/definitions/DataSpaceParticipantSpec"
         }
       ],
       "description": "Desired spec state."
@@ -419,6 +296,6 @@
     "metadata",
     "spec"
   ],
-  "title": "ResourceEnvelope_for_MappingSpec",
+  "title": "ResourceEnvelope_for_DataSpaceParticipantSpec",
   "type": "object"
 }

@@ -15,6 +15,35 @@ static SEMVER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
         .expect("valid regex for SemVer")
 });
+static COMMIT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[0-9a-f]{7,40}$").expect("valid regex"));
+static SHA256_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[0-9a-f]{64}$").expect("valid regex"));
+
+/// Rewrites the `field` of an [`Error::Name`] so the caller sees the manifest path.
+fn rename(err: Error, field: &'static str) -> Error {
+    match err {
+        Error::Name { reason, value, .. } => Error::Name {
+            field,
+            value,
+            reason,
+        },
+        other => other,
+    }
+}
+
+/// Rejects absolute paths and `..` traversal; every path in a manifest stays inside its directory.
+fn validate_relative_path(path: &str, field: &'static str) -> Result<()> {
+    let trimmed = path.strip_prefix("./").unwrap_or(path);
+    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.split('/').any(|seg| seg == "..") {
+        return Err(Error::Name {
+            field,
+            value: path.to_string(),
+            reason: "path must be relative and must not contain a `..` segment",
+        });
+    }
+    Ok(())
+}
 
 /// Semantic version string conforming to `major.minor.patch` (DM-22).
 ///
@@ -189,174 +218,166 @@ impl fmt::Display for DataModelLifecycle {
     }
 }
 
-/// Source provenance and authoring origin of a LinkML data model (DM-01, DM-08, DM-48).
+/// Provenance of a data model, absent for a hand-authored one (DM-08, DM-48).
+///
+/// Either the upstream `repository`/`path`/`commit` triple of an imported model or the
+/// `remote` block of a mirrored foreign model — never both.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DataModelSource {
+    /// Upstream repository the model was imported from (DM-08).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// Path inside the upstream repository (DM-08).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Pinned upstream commit, 7 to 40 lowercase hexadecimal characters (DM-08).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Remote endpoint a foreign model was mirrored from (DM-48).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteSource>,
+}
+
+/// Where a mirrored foreign data model came from (DM-48, DM-49).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-pub enum DataModelSource {
-    /// Locally authored LinkML data model (DM-01).
-    Authored {},
-    /// Imported data model from upstream repository (DM-08).
-    Imported {
-        /// Git repository URL of upstream data model.
-        repository: String,
-        /// Relative path inside the upstream repository.
-        path: String,
-        /// Pinned Git commit SHA (7 to 40 lowercase hexadecimal characters).
-        commit: String,
-    },
-    /// Mirrored foreign data model from remote endpoint (DM-48).
-    Remote {
-        /// Remote endpoint URL from which the model was fetched.
-        url: String,
-        /// Semantic version of the remote model.
-        version: SemVer,
-        /// SHA-256 digest of the fetched schema (64 lowercase hexadecimal characters).
-        sha256: String,
-        /// UTC timestamp when the remote model was fetched.
-        fetched_at: DateTime<Utc>,
-    },
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RemoteSource {
+    /// Schema surface the model was fetched from; `https://` only.
+    pub url: String,
+    /// Version the peer published.
+    pub version: SemVer,
+    /// SHA-256 of the fetched source, 64 lowercase hexadecimal characters; a change opens a merge request.
+    pub sha256: String,
+    /// When the fetch happened.
+    pub fetched_at: DateTime<Utc>,
 }
 
 impl DataModelSource {
-    /// Validates source repository, commit hash, URL, or digest according to provenance rules (DM-08, DM-48).
-    pub fn validate(&self) -> Result<()> {
-        match self {
-            Self::Authored {} => Ok(()),
-            Self::Imported {
-                repository,
-                path,
-                commit,
-            } => {
-                if repository.trim().is_empty() {
-                    return Err(Error::Name {
-                        field: "source.repository",
-                        value: repository.clone(),
-                        reason: "repository must not be empty",
-                    });
-                }
-                if path.trim().is_empty() {
-                    return Err(Error::Name {
-                        field: "source.path",
-                        value: path.clone(),
-                        reason: "path must not be empty",
-                    });
-                }
-                let commit_len = commit.len();
-                if !(7..=40).contains(&commit_len)
-                    || !commit.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
-                {
-                    return Err(Error::Name {
-                        field: "source.commit",
-                        value: commit.clone(),
-                        reason: "commit must be a 7 to 40 character lowercase hexadecimal Git commit hash",
-                    });
-                }
-                Ok(())
+    /// Whether this model is a mirrored foreign one (DM-48).
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
+    }
+
+    fn validate(&self) -> Result<()> {
+        let imported = self.repository.is_some() || self.path.is_some() || self.commit.is_some();
+        if imported && self.remote.is_some() {
+            return Err(Error::Name {
+                field: "source",
+                value: String::new(),
+                reason: "a model is either imported or mirrored, never both (DM-08, DM-48)",
+            });
+        }
+        if !imported && self.remote.is_none() {
+            return Err(Error::Name {
+                field: "source",
+                value: String::new(),
+                reason: "source must carry either repository/path/commit or remote; omit it for a hand-authored model",
+            });
+        }
+
+        if imported {
+            let (Some(repository), Some(path), Some(commit)) =
+                (&self.repository, &self.path, &self.commit)
+            else {
+                return Err(Error::Name {
+                    field: "source",
+                    value: String::new(),
+                    reason: "an imported model needs repository, path and commit together (DM-08)",
+                });
+            };
+            if !repository.starts_with("https://") {
+                return Err(Error::Name {
+                    field: "source.repository",
+                    value: repository.clone(),
+                    reason: "repository must be an https:// URL",
+                });
             }
-            Self::Remote { url, sha256, .. } => {
-                if url.trim().is_empty() {
-                    return Err(Error::Name {
-                        field: "source.url",
-                        value: url.clone(),
-                        reason: "url must not be empty",
-                    });
-                }
-                if sha256.len() != 64 || !sha256.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
-                {
-                    return Err(Error::Name {
-                        field: "source.sha256",
-                        value: sha256.clone(),
-                        reason: "sha256 must be exactly 64 lowercase hexadecimal characters",
-                    });
-                }
-                Ok(())
+            validate_relative_path(path, "source.path")?;
+            if !COMMIT_RE.is_match(commit) {
+                return Err(Error::Name {
+                    field: "source.commit",
+                    value: commit.clone(),
+                    reason: "commit must be 7 to 40 lowercase hexadecimal characters",
+                });
             }
         }
+
+        if let Some(remote) = &self.remote {
+            if !remote.url.starts_with("https://") {
+                return Err(Error::Name {
+                    field: "source.remote.url",
+                    value: remote.url.clone(),
+                    reason: "remote url must be an https:// URL",
+                });
+            }
+            if !SHA256_RE.is_match(&remote.sha256) {
+                return Err(Error::Name {
+                    field: "source.remote.sha256",
+                    value: remote.sha256.clone(),
+                    reason: "sha256 must be 64 lowercase hexadecimal characters",
+                });
+            }
+        }
+        Ok(())
     }
 }
 
-/// Committed generated artifacts accompanying the LinkML source (DM-02).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Artifacts generated beside the LinkML source and committed in the same change (DM-02).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct GeneratedArtifacts {
-    /// Relative path to compiled JSON Schema draft-07 (DM-02, DM-03).
+    /// Generated JSON Schema draft-07 (DM-02, DM-03).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub json_schema: Option<String>,
-    /// Relative path to compiled JSON-LD @context (DM-02).
+    /// Generated JSON-LD `@context` (DM-02, DM-05).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
-    /// Relative path to generated model documentation (DM-02).
+    /// Generated Markdown documentation (DM-02).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docs: Option<String>,
-    /// Relative path to validated example entity (DM-02, DM-21).
+    /// Generated and validated example entity (DM-02, DM-21).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub example: Option<String>,
 }
 
 impl GeneratedArtifacts {
-    /// Returns `true` if all four standard generated artifacts are present (DM-02).
-    pub fn is_complete(&self) -> bool {
-        self.json_schema.is_some()
-            && self.context.is_some()
-            && self.docs.is_some()
-            && self.example.is_some()
+    /// The four artifact paths, in DM-02 order, with the field name each belongs to.
+    fn entries(&self) -> [(&'static str, Option<&String>); 4] {
+        [
+            ("artifacts.jsonSchema", self.json_schema.as_ref()),
+            ("artifacts.context", self.context.as_ref()),
+            ("artifacts.docs", self.docs.as_ref()),
+            ("artifacts.example", self.example.as_ref()),
+        ]
     }
-}
-
-/// Validates that a path is relative, non-empty, and free of `..` segments.
-fn validate_relative_path(path: &str, field_name: &'static str) -> Result<()> {
-    if path.trim().is_empty() {
-        return Err(Error::Name {
-            field: field_name,
-            value: path.to_string(),
-            reason: "path must not be empty",
-        });
-    }
-    if path.starts_with('/') || path.starts_with('\\') {
-        return Err(Error::Name {
-            field: field_name,
-            value: path.to_string(),
-            reason: "path must be relative (must not start with `/`)",
-        });
-    }
-    for segment in path.split(['/', '\\']) {
-        if segment == ".." {
-            return Err(Error::Name {
-                field: field_name,
-                value: path.to_string(),
-                reason: "path must not contain `..` path traversal segments",
-            });
-        }
-    }
-    Ok(())
 }
 
 /// Desired specification of a [`DataModel`][crate::kinds::DataModel] resource (DM-01..DM-53).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DataModelSpec {
-    /// DNS-1123 label of the owning ContextSpace.
+    /// DNS-1123 label of the owning ContextSpace; with `metadata.namespace` it derives the path (MF-06).
     pub context_space_ref: String,
-    /// Semantic version of the data model (DM-22).
+    /// Path of the authoring LinkML source, relative to this manifest and ending `.linkml.yaml` (DM-01).
+    pub linkml: String,
+    /// Semantic version; the major is the served `schema/v{major}` (DM-22).
     pub version: SemVer,
-    /// Lifecycle state of this data model version (DM-26).
+    /// Lifecycle state of this version (DM-26, DM-48).
     pub lifecycle: DataModelLifecycle,
-    /// Source provenance and authoring origin of the model (DM-01, DM-08, DM-48).
-    pub source: DataModelSource,
-    /// Repository-relative path to the authoritative LinkML source file (DM-01).
-    pub linkml_path: String,
-    /// Generated and committed schema artifacts (DM-02).
+    /// NGSI-LD entity types this model defines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub classes: Vec<String>,
+    /// Provenance; absent for a hand-authored model (DM-08, DM-48).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<DataModelSource>,
+    /// Artifacts generated beside the source in the same commit (DM-02).
     #[serde(default)]
-    pub generated: GeneratedArtifacts,
-    /// Whether entities of this model may contain undeclared attributes (DM-28).
+    pub artifacts: GeneratedArtifacts,
+    /// Whether entities of this model may carry undeclared attributes (DM-28).
     #[serde(default)]
     pub open_world: bool,
-    /// Informational list of platform resources consuming this model version (DM-25).
+    /// Informational list of resources consuming this version (DM-25).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consumers: Vec<TypedRef>,
 }
@@ -378,91 +399,51 @@ impl Kind for DataModelSpec {
 }
 
 impl DataModelSpec {
-    /// Validates context space reference, LinkML path, artifacts, lifecycle invariants, and source provenance.
+    /// Validates the space reference, paths, lifecycle invariants and provenance.
     pub fn validate(&self) -> Result<()> {
-        names::validate_dns1123_label(&self.context_space_ref).map_err(|e| match e {
-            Error::Name { reason, .. } => Error::Name {
-                field: "contextSpaceRef",
-                value: self.context_space_ref.clone(),
-                reason,
-            },
-            other => other,
-        })?;
+        names::validate_dns1123_label(&self.context_space_ref)
+            .map_err(|e| rename(e, "contextSpaceRef"))?;
 
-        validate_relative_path(&self.linkml_path, "linkmlPath")?;
-        if !self.linkml_path.ends_with(".linkml.yaml") {
+        validate_relative_path(&self.linkml, "linkml")?;
+        if !self.linkml.ends_with(".linkml.yaml") {
             return Err(Error::Name {
-                field: "linkmlPath",
-                value: self.linkml_path.clone(),
-                reason: "linkmlPath must end with `.linkml.yaml` (DM-01)",
+                field: "linkml",
+                value: self.linkml.clone(),
+                reason: "the authoring source must be a `.linkml.yaml` file (DM-01)",
             });
         }
 
-        if let Some(ref p) = self.generated.json_schema {
-            validate_relative_path(p, "generated.jsonSchema")?;
-        }
-        if let Some(ref p) = self.generated.context {
-            validate_relative_path(p, "generated.context")?;
-        }
-        if let Some(ref p) = self.generated.docs {
-            validate_relative_path(p, "generated.docs")?;
-        }
-        if let Some(ref p) = self.generated.example {
-            validate_relative_path(p, "generated.example")?;
+        for class in &self.classes {
+            names::validate_entity_type(class).map_err(|e| rename(e, "classes"))?;
         }
 
-        if self.lifecycle == DataModelLifecycle::Published {
-            if self.generated.json_schema.is_none() {
-                return Err(Error::Name {
-                    field: "generated.jsonSchema",
-                    value: String::new(),
-                    reason: "jsonSchema artifact is required when lifecycle is `published` (DM-02)",
-                });
-            }
-            if self.generated.context.is_none() {
-                return Err(Error::Name {
-                    field: "generated.context",
-                    value: String::new(),
-                    reason: "context artifact is required when lifecycle is `published` (DM-02)",
-                });
-            }
-            if self.generated.docs.is_none() {
-                return Err(Error::Name {
-                    field: "generated.docs",
-                    value: String::new(),
-                    reason: "docs artifact is required when lifecycle is `published` (DM-02)",
-                });
-            }
-            if self.generated.example.is_none() {
-                return Err(Error::Name {
-                    field: "generated.example",
-                    value: String::new(),
-                    reason: "example artifact is required when lifecycle is `published` (DM-02)",
-                });
+        for (field, path) in self.artifacts.entries() {
+            match path {
+                Some(p) => validate_relative_path(p, field)?,
+                None if self.lifecycle == DataModelLifecycle::Published => {
+                    return Err(Error::Name {
+                        field,
+                        value: String::new(),
+                        reason: "a published model commits all four generated artifacts (DM-02)",
+                    })
+                }
+                None => {}
             }
         }
 
-        match (&self.lifecycle, &self.source) {
-            (DataModelLifecycle::Mirrored, DataModelSource::Remote { .. }) => {}
-            (DataModelLifecycle::Mirrored, _) => {
-                return Err(Error::Name {
-                    field: "source",
-                    value: self.lifecycle.as_str().to_string(),
-                    reason: "source must be `remote` when lifecycle is `mirrored` (DM-48)",
-                });
-            }
-            (_, DataModelSource::Remote { .. }) => {
-                return Err(Error::Name {
-                    field: "source",
-                    value: "remote".to_string(),
-                    reason:
-                        "source `remote` is only permitted when lifecycle is `mirrored` (DM-48)",
-                });
-            }
-            _ => {}
+        let mirrored = self.lifecycle == DataModelLifecycle::Mirrored;
+        let remote = self.source.as_ref().is_some_and(DataModelSource::is_remote);
+        if mirrored != remote {
+            return Err(Error::Name {
+                field: "source.remote",
+                value: self.lifecycle.as_str().to_string(),
+                reason: "lifecycle `mirrored` and `source.remote` imply each other (DM-48)",
+            });
         }
 
-        self.source.validate()?;
+        if let Some(source) = &self.source {
+            source.validate()?;
+        }
 
         for consumer in &self.consumers {
             names::validate_dns1123_label(&consumer.name)?;

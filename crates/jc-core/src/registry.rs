@@ -32,6 +32,22 @@ macro_rules! catalogue {
             path_template: <$spec as Kind>::PATH_TEMPLATE,
         }),+];
 
+        /// Parses and validates a manifest of `kind` from YAML without knowing its Rust type.
+        ///
+        /// Returns `None` for an unknown kind, otherwise the parse-and-validate result.
+        /// This is what `jcctl validate` and the Portal import wizard call: they hold a
+        /// `kind` string from the file, not a type.
+        pub fn validate_yaml(kind: &str, yaml: &str) -> Option<crate::Result<()>> {
+            $(if kind == <$spec as Kind>::KIND {
+                return Some(
+                    ResourceEnvelope::<$spec>::from_yaml(yaml)
+                        .map_err(|e| crate::Error::Parse(e.to_string()))
+                        .and_then(|m| m.validate()),
+                );
+            })+
+            None
+        }
+
         /// JSON Schema (draft-07, MF-09/DM-03) of the whole manifest of `kind`.
         ///
         /// Returns `None` for an unknown kind. The Portal serves these to
@@ -59,6 +75,11 @@ catalogue!(
     crate::kinds::ServiceAccountSpec,
     crate::kinds::PipelineSpec,
     crate::kinds::AppSpec,
+    crate::kinds::DataSpaceParticipantSpec,
+    crate::kinds::DataOfferSpec,
+    crate::kinds::DataAgreementSpec,
+    crate::kinds::SyncSourceSpec,
+    crate::kinds::BundleSpec,
 );
 
 /// Looks a kind up by its manifest `kind` name (case-sensitive, as written in the file).
