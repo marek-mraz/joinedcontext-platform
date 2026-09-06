@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod blueprint;
+pub mod ckan;
 pub mod data_model;
 pub mod data_source;
 pub mod dataspace;
@@ -19,6 +20,7 @@ pub use app::{
     ContentSecurityPolicy, DataNeed, GeoConstraint, GeoWithin, GitSource, TemporalConstraint,
 };
 pub use blueprint::{BlueprintSpec, BlueprintTemplate, RiskClass};
+pub use ckan::{CkanInstanceSpec, CkanPublication, DataStore, DataStoreRefresh, Publication};
 pub use data_model::{
     DataModelLifecycle, DataModelSource, DataModelSpec, GeneratedArtifacts, RemoteSource, SemVer,
 };
@@ -80,6 +82,9 @@ pub type DataModel = crate::envelope::ResourceEnvelope<DataModelSpec>;
 pub type Mapping = crate::envelope::ResourceEnvelope<MappingSpec>;
 /// `kind: App` as a whole manifest.
 pub type App = crate::envelope::ResourceEnvelope<AppSpec>;
+
+/// `kind: CkanInstance` as a whole manifest.
+pub type CkanInstance = crate::envelope::ResourceEnvelope<CkanInstanceSpec>;
 /// `kind: Blueprint` as a whole manifest.
 pub type Blueprint = crate::envelope::ResourceEnvelope<BlueprintSpec>;
 /// `kind: SyncSource` as a whole manifest.

@@ -44,6 +44,49 @@
       ],
       "type": "object"
     },
+    "CkanPublication": {
+      "additionalProperties": false,
+      "description": "Publication of one Endpoint as one CKAN dataset (EP-62…EP-65).",
+      "properties": {
+        "datastore": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DataStore"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The optional row mirror (EP-65)."
+        },
+        "instanceRef": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Ref"
+            }
+          ],
+          "description": "The `CkanInstance` this Endpoint publishes to."
+        },
+        "name": {
+          "description": "The CKAN dataset name; the Endpoint's own name when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "organization": {
+          "description": "The CKAN organization slug; the instance's default when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "instanceRef"
+      ],
+      "type": "object"
+    },
     "Condition": {
       "additionalProperties": false,
       "description": "Status condition entry.",
@@ -84,6 +127,52 @@
         "type"
       ],
       "type": "object"
+    },
+    "DataStore": {
+      "additionalProperties": false,
+      "description": "The optional row mirror in the CKAN DataStore (EP-65).",
+      "properties": {
+        "refresh": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/DataStoreRefresh"
+            }
+          ],
+          "default": "onChange",
+          "description": "How the mirror is kept current."
+        },
+        "representation": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Representation"
+            }
+          ],
+          "description": "The tabular representation the rows are read through; it must be enabled (EP-44)."
+        }
+      },
+      "required": [
+        "representation"
+      ],
+      "type": "object"
+    },
+    "DataStoreRefresh": {
+      "description": "How often the DataStore mirror is refreshed (EP-65).",
+      "oneOf": [
+        {
+          "description": "Driven by the Endpoint's own subscription: one upsert per changed entity (the default).",
+          "enum": [
+            "onChange"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reloaded whenever the Endpoint is reconciled, for a space without a subscription.",
+          "enum": [
+            "onReconcile"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "EndpointSlug": {
       "description": "Cryptographically random endpoint slug with at least 128 bits of entropy (lowercase RFC 4648 base32 without padding, >=26 chars, EP-02)",
@@ -167,6 +256,17 @@
             }
           ],
           "description": "Optional publication narrowing applied to every representation (EP-61)."
+        },
+        "publish": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Publication"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where this Endpoint is published beside its own surface: an open-data catalogue so far (EP-62)."
         },
         "rateLimits": {
           "anyOf": [
@@ -339,6 +439,24 @@
             "type": "string"
           },
           "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Publication": {
+      "additionalProperties": false,
+      "description": "Where an Endpoint is published beside its own surface (EP-62).",
+      "properties": {
+        "ckan": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CkanPublication"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Publication to an open-data catalogue."
         }
       },
       "type": "object"

@@ -269,6 +269,10 @@ pub struct EndpointSpec {
     /// Optional publication narrowing applied to every representation (EP-61).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection: Option<Projection>,
+    /// Where this Endpoint is published beside its own surface: an open-data catalogue so
+    /// far (EP-62).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish: Option<crate::kinds::ckan::Publication>,
 }
 
 impl Kind for EndpointSpec {
@@ -353,6 +357,10 @@ impl EndpointSpec {
 
         if let Some(ref projection) = self.projection {
             projection.validate()?;
+        }
+
+        if let Some(ref publish) = self.publish {
+            publish.validate(&self.enabled_representations)?;
         }
 
         if let Some(ref policy) = self.policy_ref {

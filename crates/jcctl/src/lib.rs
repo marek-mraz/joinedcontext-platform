@@ -12,6 +12,7 @@ pub mod lanes;
 pub mod loader;
 pub mod pipelines;
 pub mod platform;
+pub mod publish;
 pub mod secrets;
 pub mod service_accounts;
 pub mod waves;
