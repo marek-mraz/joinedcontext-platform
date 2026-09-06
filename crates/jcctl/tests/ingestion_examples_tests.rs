@@ -10,16 +10,29 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use jc_core::envelope::ResourceEnvelope;
-use jc_core::kinds::{DataSourceSpec, DataSourceType, Pipeline};
+use jc_core::kinds::{
+    Audience, CkanInstanceSpec, DataSourceSpec, DataSourceType, EndpointSpec, Pipeline,
+};
 use jcctl::bento::{render, InputContext, ORG_DOMAIN_VAR};
 use jcctl::pipelines::{runtime_of, Runtime};
 
 /// Every example folder, and the connection type it is there to demonstrate.
-const EXAMPLES: [(&str, DataSourceType); 4] = [
+const EXAMPLES: [(&str, DataSourceType); 7] = [
     ("hsl-hfp-mqtt", DataSourceType::Mqtt),
     ("http-json-poll", DataSourceType::Http),
     ("csv-fetch", DataSourceType::Http),
     ("gtfs-rt", DataSourceType::GtfsRt),
+    ("helsinki-city-bikes", DataSourceType::Http),
+    ("helsinki-hsy-air", DataSourceType::Http),
+    ("helsinki-digitraffic-tms", DataSourceType::Http),
+];
+
+/// The examples that also publish: the folder carries the Endpoint the pipeline writes into
+/// and the catalogue entry it becomes (T-0321…T-0323, EP-01, EP-62).
+const PUBLISHED: [&str; 3] = [
+    "helsinki-city-bikes",
+    "helsinki-hsy-air",
+    "helsinki-digitraffic-tms",
 ];
 
 fn examples_dir() -> PathBuf {
@@ -265,13 +278,83 @@ fn the_domain_of_a_minted_id_comes_from_the_environment_and_never_from_the_pipel
             golden.contains(&format!("{ORG_DOMAIN_VAR}: {DEMO_ORG_DOMAIN}")),
             "{example}/bento_bento_test.yaml expects ids it never supplies a domain for"
         );
+        let domain_segment = format!(":{DEMO_ORG_DOMAIN}:");
         assert!(
-            golden.contains(&format!("urn:ngsi-ld:Vehicle:{DEMO_ORG_DOMAIN}:"))
-                || golden.contains(&format!(
-                    "urn:ngsi-ld:AirQualityObserved:{DEMO_ORG_DOMAIN}:"
-                ))
-                || golden.contains(&format!("urn:ngsi-ld:OffStreetParking:{DEMO_ORG_DOMAIN}:")),
+            golden
+                .lines()
+                .any(|line| { line.contains("urn:ngsi-ld:") && line.contains(&domain_segment) }),
             "{example}/bento_bento_test.yaml asserts no minted id at all"
         );
     }
+}
+
+/// T-0321…T-0323, EP-01, EP-62: an example that publishes carries the Endpoint its pipeline
+/// writes into and the catalogue entry it becomes, so a reader sees the whole path from the
+/// feed to the open-data portal in one folder rather than three repositories.
+#[test]
+fn every_published_example_carries_the_endpoint_its_pipeline_writes_into() {
+    let path = examples_dir().join("ckan-instance.yaml");
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let catalogue = ResourceEnvelope::<CkanInstanceSpec>::from_yaml(&text).expect("a CkanInstance");
+    catalogue.validate().expect("the catalogue validates");
+
+    let mut slugs = Vec::new();
+    for example in PUBLISHED {
+        let endpoint = ResourceEnvelope::<EndpointSpec>::from_yaml(&read(example, "endpoint.yaml"))
+            .unwrap_or_else(|e| panic!("{example}/endpoint.yaml: {e}"));
+        endpoint
+            .validate()
+            .unwrap_or_else(|e| panic!("{example}/endpoint.yaml: {e}"));
+
+        let pipeline = pipeline(example);
+        let target = &pipeline.spec.target_endpoint;
+        assert_eq!(
+            target.local_id(),
+            endpoint.metadata.name,
+            "{example}: the pipeline writes into an Endpoint that is not in this folder"
+        );
+        assert_eq!(
+            target.space(),
+            endpoint.spec.context_space_ref.name(),
+            "{example}: the target URN and the Endpoint disagree about the space"
+        );
+        assert_eq!(
+            endpoint.metadata.namespace, pipeline.metadata.namespace,
+            "{example}: an Endpoint and its pipeline live in one project"
+        );
+
+        // An open dataset is the point of these three: a catalogue entry that resolves to a
+        // surface anyone may read (EP-14, EP-62).
+        assert_eq!(endpoint.spec.audience, Audience::Public, "{example}");
+        let ckan = endpoint
+            .spec
+            .publish
+            .as_ref()
+            .and_then(|publication| publication.ckan.as_ref())
+            .unwrap_or_else(|| panic!("{example}: the Endpoint publishes nowhere"));
+        assert_eq!(
+            ckan.instance_ref.name(),
+            catalogue.metadata.name,
+            "{example}: the publication names a catalogue that is not in this tree"
+        );
+        assert_eq!(ckan.instance_ref.kind(), Some("CkanInstance"), "{example}");
+
+        // EP-02: the slug is the address and carries no meaning, so it is neither the name nor
+        // shared with another endpoint.
+        let slug = endpoint.spec.slug.as_str().to_owned();
+        assert!(
+            !slug.contains(&endpoint.metadata.name),
+            "{example}: the slug spells out the endpoint it addresses"
+        );
+        slugs.push(slug);
+    }
+
+    slugs.sort();
+    let distinct = slugs.len();
+    slugs.dedup();
+    assert_eq!(
+        slugs.len(),
+        distinct,
+        "two endpoints share a slug, so one of them is reachable under the other's address"
+    );
 }

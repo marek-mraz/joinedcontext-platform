@@ -1,6 +1,6 @@
 # Ingestion examples
 
-Four pipelines that read the outside world and write NGSI-LD entities through an Endpoint. Each
+Seven pipelines that read the outside world and write NGSI-LD entities through an Endpoint. Each
 folder is what a `projects/{project}/pipelines/{name}/` folder looks like in an organization
 repository (PL-01), plus the `DataSource` the pipeline reads from (MF-35).
 
@@ -10,10 +10,20 @@ repository (PL-01), plus the `DataSource` the pipeline reads from (MF-35).
 | `http-json-poll/` | a JSON array over HTTPS, bearer token | 5 min, CronJob | `AirQualityObserved` |
 | `csv-fetch/` | a CSV export over HTTPS | 45 s, CronJob every minute | `OffStreetParking` |
 | `gtfs-rt/` | a GTFS-realtime protobuf feed | 15 s, resident | `Vehicle` and `Trip` |
+| `helsinki-city-bikes/` | the HSL city bike GBFS station status feed | 60 s, CronJob | `BikeHireDockingStation` |
+| `helsinki-hsy-air/` | HSY's open air quality WFS | 5 min, CronJob | `AirQualityObserved` |
+| `helsinki-digitraffic-tms/` | Fintraffic's TMS counters | 60 s, CronJob | `TrafficFlowObserved`, one per direction |
 
-All four write into the documented demonstration instance: organization `hel.fi`, project
-`helsinki`, spaces `air-quality` and `transport`. The MQTT and the GTFS-realtime recipe are two
-views of the same fleet and mint the same ids, so a deployment runs one of them, not both.
+All seven write into the documented demonstration instance: organization `hel.fi`, project
+`helsinki`, spaces `air-quality`, `transport`, `bikes` and `traffic`. The MQTT and the
+GTFS-realtime recipe are two views of the same fleet and mint the same ids, so a deployment runs
+one of them, not both.
+
+The last three are the Helsinki open-data set, and they carry two files the first four do not:
+`endpoint.yaml` is the Endpoint the pipeline writes into and the public reads from, and its
+`spec.publish.ckan` block is the dataset it becomes in the catalogue named once for the whole
+tree in `ckan-instance.yaml` (EP-01, EP-62). The catalogue's API token is a reference; the
+schema has no field a token could be written into (EP-67, CC-06).
 
 ## What is in a folder
 
