@@ -2,7 +2,9 @@
 
 pub mod endpoint;
 pub mod organization;
+pub mod pipeline;
 pub mod policy;
+pub mod service_account;
 pub mod space;
 
 pub use endpoint::{
@@ -10,9 +12,17 @@ pub use endpoint::{
     SharedSpaceReferenceSpec,
 };
 pub use organization::{Contact, ContactRole, OrganizationSpec};
+pub use pipeline::{
+    Compute, ComputeKind, Output, OutputMode, PipelineClass, PipelineQuotas, PipelineSource,
+    PipelineSpec, SourceQuery, SubscriptionTrigger, TemporalWindow, Trigger,
+};
 pub use policy::{
     EntitySelector, Operation, OperationGroup, OperationRef, PolicySpec, Principal, PrincipalKind,
     RegistrationInfo, ScopeDefinitionSpec, Validity,
+};
+pub use service_account::{
+    Credential, CredentialKind, KubernetesBinding, Owner, RoleBinding, RoleScope,
+    ServiceAccountLimits, ServiceAccountSpec, Workload,
 };
 pub use space::{ContextSpaceSpec, ProjectSpec, Quotas};
 
@@ -30,3 +40,7 @@ pub type SharedSpaceReference = crate::envelope::ResourceEnvelope<SharedSpaceRef
 pub type Policy = crate::envelope::ResourceEnvelope<PolicySpec>;
 /// `kind: ScopeDefinition` as a whole manifest.
 pub type ScopeDefinition = crate::envelope::ResourceEnvelope<ScopeDefinitionSpec>;
+/// `kind: ServiceAccount` as a whole manifest.
+pub type ServiceAccount = crate::envelope::ResourceEnvelope<ServiceAccountSpec>;
+/// `kind: Pipeline` as a whole manifest.
+pub type Pipeline = crate::envelope::ResourceEnvelope<PipelineSpec>;

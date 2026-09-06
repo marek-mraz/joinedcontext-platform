@@ -13,3 +13,8 @@ schemars = { version = "0.8", features = ["chrono"] }
 thiserror = "2"
 regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
+axum = { version = "0.8", optional = true, default-features = false, features = ["json"] }
+
+[features]
+default = []
+axum = ["dep:axum"]

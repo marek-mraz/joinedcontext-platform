@@ -19,13 +19,17 @@ pub use envelope::{
     annotations, de_api_version, de_kind, validate_locales, Condition, Kind, ObjectMeta, Phase,
     Ref, ResourceEnvelope, Scope, SecretRef, Status, TypedRef, API_VERSION,
 };
-pub use error::{Error, Result, UrnError};
+pub use error::{Error, ProblemDetails, Result, UrnError, PROBLEM_JSON, PROBLEM_TYPE_BASE};
 pub use i18n::MultiLanguageMap;
 pub use kinds::{
-    Audience, Caching, Contact, ContactRole, ContextSpace, ContextSpaceSpec, Endpoint,
-    EndpointSlug, EndpointSpec, EntitySelector, Operation, OperationGroup, OperationRef,
-    Organization, OrganizationSpec, Policy, PolicySpec, Principal, PrincipalKind, Project,
-    ProjectSpec, Quotas, RateLimits, RegistrationInfo, Representation, ScopeDefinition,
-    ScopeDefinitionSpec, SharedSpaceReference, SharedSpaceReferenceSpec, Validity,
+    Audience, Caching, Compute, ComputeKind, Contact, ContactRole, ContextSpace, ContextSpaceSpec,
+    Credential, CredentialKind, Endpoint, EndpointSlug, EndpointSpec, EntitySelector,
+    KubernetesBinding, Operation, OperationGroup, OperationRef, Organization, OrganizationSpec,
+    Output, OutputMode, Owner, Pipeline, PipelineClass, PipelineQuotas, PipelineSource,
+    PipelineSpec, Policy, PolicySpec, Principal, PrincipalKind, Project, ProjectSpec, Quotas,
+    RateLimits, RegistrationInfo, Representation, RoleBinding, RoleScope, ScopeDefinition,
+    ScopeDefinitionSpec, ServiceAccount, ServiceAccountLimits, ServiceAccountSpec,
+    SharedSpaceReference, SharedSpaceReferenceSpec, SourceQuery, SubscriptionTrigger,
+    TemporalWindow, Trigger, Validity, Workload,
 };
 pub use urn::Urn;
