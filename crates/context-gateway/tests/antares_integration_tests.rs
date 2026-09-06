@@ -141,6 +141,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd, Representation::GeoJson],
         rate_limit: None,
+        models: Vec::new(),
         policies: vec![public_grant()],
     }
 }
@@ -421,6 +422,7 @@ async fn a_service_account_writes_only_what_its_own_manifest_grants() {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd],
         rate_limit: None,
+        models: Vec::new(),
         policies: vec![serde_norway::from_str(
             r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk

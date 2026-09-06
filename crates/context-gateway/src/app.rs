@@ -13,11 +13,12 @@
 
 use crate::auth::accounts::ServiceAccounts;
 use crate::auth::token::{self, Claims, Verifier};
+use crate::handlers::schema;
 use crate::pdp::evaluator::{Constraints, Subject, Verdict};
 use crate::pdp::write_guard;
 use crate::pdp::{projection, Pdp};
 use crate::proxy::{self, Broker};
-use crate::resolver::{Endpoint, SlugResolver};
+use crate::resolver::{Endpoint, Model, SlugResolver};
 use crate::translators::geojson;
 use crate::{handlers, middleware::tenancy, operations, query};
 use axum::body::Body;
@@ -114,6 +115,11 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/access", get(access))
         .route("/api/endpoint/{slug}/access/check", post(access_check))
         .route("/api/endpoint/{slug}/file.geojson", get(file_geojson))
+        .route("/api/endpoint/{slug}/schema/index.json", get(schema_index))
+        .route(
+            "/api/endpoint/{slug}/schema/{version}/{artifact}",
+            get(schema_artifact),
+        )
         .with_state(gateway)
         .fallback(missing)
 }
@@ -535,6 +541,140 @@ async fn access_check(
             .and_then(Value::as_str),
         crate::pdp::now(),
     ))
+}
+
+/// The catalogue of what this endpoint publishes about its data (T-0162, EP-46).
+async fn schema_index(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, subject) = match admit(&gateway, &slug, None, request.headers()) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+
+    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
+    let document = schema::index(&endpoint, &visible, |body| {
+        serde_json::to_vec(body)
+            .map(|bytes| sha256_hex(&bytes))
+            .unwrap_or_default()
+    });
+    revalidated(&document, "application/json", request.headers())
+}
+
+/// One schema document of one major version, projected to the grant (T-0162, EP-47, EP-49).
+async fn schema_artifact(
+    State(gateway): State<Arc<Gateway>>,
+    Path((slug, version, artifact)): Path<(String, String, String)>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, subject) = match admit(&gateway, &slug, None, request.headers()) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+
+    // `schema/v2/...`: the major of the model, never its full version (DM-22).
+    let Some(major) = version
+        .strip_prefix('v')
+        .and_then(|n| n.parse::<u32>().ok())
+    else {
+        return ProblemDetails::not_found().into_response();
+    };
+    let accept = request
+        .headers()
+        .get(axum::http::header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("*/*");
+    let Some(wanted) = schema::artifact_of(&artifact, accept) else {
+        return ProblemDetails::not_found().into_response();
+    };
+
+    let models: Vec<&Model> = endpoint
+        .models
+        .iter()
+        .filter(|model| model.major == major)
+        .collect();
+    if models.is_empty() {
+        return ProblemDetails::not_found().into_response();
+    }
+    // SHACL, OWL, RDF, LinkML and Markdown are Model Tools output: the gateway cannot
+    // produce them, and says so rather than handing back a formalism nobody asked for.
+    if wanted == schema::Artifact::Uncompiled {
+        return (
+            StatusCode::NOT_ACCEPTABLE,
+            ProblemDetails::new(406, "not-acceptable", "Representation Not Served").with_detail(
+                "this formalism is served once Model Tools has committed it beside the model",
+            ),
+        )
+            .into_response();
+    }
+
+    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
+    let mut redacted = Vec::new();
+    let document = match wanted {
+        schema::Artifact::JsonSchema => schema::json_schema(&models, &visible, &mut redacted),
+        _ => schema::context(&models, &visible, &mut redacted),
+    };
+    revalidated(&document, wanted.media_type(), request.headers())
+}
+
+/// A schema document with the strong `ETag` a client revalidates against (EP-51).
+///
+/// The document is a projection of the policy set, so it is never immutable: a grant that
+/// changes changes the schema, and a client holding a stale copy has to find out. What it
+/// gets instead is a digest of exactly the bytes it holds, and a 304 whenever they still
+/// match.
+fn revalidated(document: &Value, media_type: &str, headers: &HeaderMap) -> Response<Body> {
+    let Ok(bytes) = serde_json::to_vec(document) else {
+        tracing::error!("a schema document does not serialize");
+        return ProblemDetails::internal().into_response();
+    };
+    let etag = format!("\"{}\"", sha256_hex(&bytes));
+
+    let mut response = if matches_etag(headers, &etag) {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        (
+            [(axum::http::header::CONTENT_TYPE, media_type)],
+            Body::from(bytes),
+        )
+            .into_response()
+    };
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(&etag) {
+        headers.insert(axum::http::header::ETAG, value);
+    }
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
+    response
+}
+
+/// Whether `If-None-Match` names the document the gateway just built (RFC 9110 13.1.2).
+fn matches_etag(headers: &HeaderMap, etag: &str) -> bool {
+    let Some(presented) = headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    presented
+        .split(',')
+        .map(str::trim)
+        .any(|candidate| candidate == "*" || candidate.trim_start_matches("W/") == etag)
+}
+
+/// The lowercase hex sha256 of a body, which is what every `ETag` here is.
+fn sha256_hex(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// The same data as a `FeatureCollection` (T-0158, EP-09, EP-10).

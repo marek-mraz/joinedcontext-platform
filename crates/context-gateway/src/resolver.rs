@@ -34,6 +34,26 @@ pub struct Endpoint {
     pub rate_limit: Option<RateLimits>,
     /// The policies the PDP evaluates for callers of this endpoint (GW8).
     pub policies: Vec<PolicySpec>,
+    /// The data models of the space, with whatever artifacts the repository carries
+    /// beside them (EP-46, DM-02).
+    pub models: Vec<Model>,
+}
+
+/// One version of one data model, as the schema surface publishes it (EP-46, DM-22).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Model {
+    /// The manifest name.
+    pub name: String,
+    /// The full semantic version, as written.
+    pub version: String,
+    /// The major, which is the `schema/v{major}` the endpoint serves (DM-22).
+    pub major: u32,
+    /// The NGSI-LD entity types the model defines.
+    pub classes: Vec<String>,
+    /// The generated JSON Schema, when the repository carries it (DM-02).
+    pub json_schema: Option<serde_json::Value>,
+    /// The generated JSON-LD `@context`, when the repository carries it (DM-02).
+    pub context: Option<serde_json::Value>,
 }
 
 impl Endpoint {
