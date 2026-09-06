@@ -18,13 +18,14 @@ use crate::pdp::write_guard;
 use crate::pdp::{projection, Pdp};
 use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, SlugResolver};
-use crate::{middleware::tenancy, operations, query};
+use crate::translators::geojson;
+use crate::{handlers, middleware::tenancy, operations, query};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use axum::Router;
 use jc_core::kinds::{Operation, Representation};
 use jc_core::ProblemDetails;
@@ -109,10 +110,11 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
     Router::new()
         .route("/healthz", get(ok))
         .route("/livez", get(ok))
-        .route(
-            "/api/endpoint/{slug}/ngsi-ld/v1/{*rest}",
-            any(ngsi_ld).with_state(gateway),
-        )
+        .route("/api/endpoint/{slug}/ngsi-ld/v1/{*rest}", any(ngsi_ld))
+        .route("/api/endpoint/{slug}/access", get(access))
+        .route("/api/endpoint/{slug}/access/check", post(access_check))
+        .route("/api/endpoint/{slug}/file.geojson", get(file_geojson))
+        .with_state(gateway)
         .fallback(missing)
 }
 
@@ -133,16 +135,14 @@ async fn ngsi_ld(
     // Before routing, before authentication, before anything reads a header (EP-21).
     tenancy::strip_client_headers(&mut request);
 
-    let Some(endpoint) = gateway.resolver.resolve(&slug) else {
-        return ProblemDetails::not_found().into_response();
-    };
-    if !endpoint.serves(Representation::NgsiLd) {
-        return ProblemDetails::not_found().into_response();
-    }
-
-    let subject = match authenticate(&gateway, &endpoint, request.headers()) {
-        Ok(subject) => subject,
-        Err(problem) => return problem.into_response(),
+    let (endpoint, subject) = match admit(
+        &gateway,
+        &slug,
+        Some(Representation::NgsiLd),
+        request.headers(),
+    ) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
     };
 
     let method = request.method().clone();
@@ -430,5 +430,226 @@ fn principal_of(subject: &Subject) -> String {
         (Some(user), _) => format!("user:{user}"),
         (_, Some(account)) => format!("serviceAccount:{account}"),
         _ => "anonymous".to_owned(),
+    }
+}
+
+/// Resolving the slug and establishing the caller: the two steps every surface starts
+/// with (EP-03, EP-14, GW20).
+///
+/// `representation` is the one the surface serves, and `None` for the surfaces that are
+/// not a representation of the data at all, like `access`.
+fn admit(
+    gateway: &Gateway,
+    slug: &str,
+    representation: Option<Representation>,
+    headers: &HeaderMap,
+) -> Result<(Arc<Endpoint>, Subject), Box<Response<Body>>> {
+    let endpoint = gateway
+        .resolver
+        .resolve(slug)
+        .ok_or_else(|| Box::new(ProblemDetails::not_found().into_response()))?;
+
+    // An endpoint that does not serve the representation is not an endpoint at this URL
+    // (EP-05).
+    if representation.is_some_and(|wanted| !endpoint.serves(wanted)) {
+        return Err(Box::new(ProblemDetails::not_found().into_response()));
+    }
+    let subject = authenticate(gateway, &endpoint, headers)
+        .map_err(|problem| Box::new(problem.into_response()))?;
+    Ok((endpoint, subject))
+}
+
+/// What the caller may do here, from the same PDP that enforces it (T-0163, EP-55).
+async fn access(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, subject) = match admit(&gateway, &slug, None, request.headers()) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+
+    // The ODRL and UCAST representations are T-0164 and T-0165; a caller that asks for one
+    // by name is told it is not served rather than handed something else (EP-58).
+    let accept = request
+        .headers()
+        .get(axum::http::header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("*/*");
+    if accept.contains("odrl") || accept.contains("grant-ast") {
+        return (
+            StatusCode::NOT_ACCEPTABLE,
+            ProblemDetails::new(406, "not-acceptable", "Representation Not Served")
+                .with_detail("this endpoint serves the access surface as application/json"),
+        )
+            .into_response();
+    }
+
+    json_response(&handlers::access::permissions(
+        &subject,
+        &endpoint,
+        crate::pdp::now(),
+    ))
+}
+
+/// One prospective request, answered yes or no (T-0163, R51).
+async fn access_check(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, subject) = match admit(&gateway, &slug, None, request.headers()) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+
+    let (_, body) = request.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024).await else {
+        return ProblemDetails::bad_request().into_response();
+    };
+    let Ok(query) = serde_json::from_slice::<Value>(&bytes) else {
+        return ProblemDetails::bad_request()
+            .with_detail("request body is not JSON")
+            .into_response();
+    };
+    let Some(action) = query
+        .get("action")
+        .and_then(|action| action.get("name"))
+        .and_then(Value::as_str)
+    else {
+        return ProblemDetails::bad_request()
+            .with_detail("action.name is required")
+            .into_response();
+    };
+
+    json_response(&handlers::access::check(
+        &subject,
+        &endpoint,
+        action,
+        query
+            .get("resource")
+            .and_then(|resource| resource.get("type"))
+            .and_then(Value::as_str),
+        crate::pdp::now(),
+    ))
+}
+
+/// The same data as a `FeatureCollection` (T-0158, EP-09, EP-10).
+async fn file_geojson(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, subject) = match admit(
+        &gateway,
+        &slug,
+        Some(Representation::GeoJson),
+        request.headers(),
+    ) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+
+    let params = query::parse(request.uri().query().unwrap_or_default());
+    let (entities, restricted) =
+        match query_entities(&gateway, &endpoint, &subject, &params, &mut request).await {
+            Ok(answer) => answer,
+            Err(problem) => return *problem,
+        };
+
+    match geojson::feature_collection(&entities) {
+        Ok(collection) => {
+            let mut response = json_response(&collection);
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static(geojson::MEDIA_TYPE),
+            );
+            if restricted {
+                response
+                    .headers_mut()
+                    .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
+            }
+            response
+        }
+        Err(untranslatable) => ProblemDetails::bad_request()
+            .with_detail(untranslatable.to_string())
+            .into_response(),
+    }
+}
+
+/// Queries the entities behind an endpoint through the PDP, projected (GW11, R9).
+///
+/// This is the read half of the NGSI-LD handler, reused by every representation that is a
+/// different rendering of the same query.
+async fn query_entities(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    params: &[(String, String)],
+    request: &mut Request,
+) -> Result<(Value, bool), Box<Response<Body>>> {
+    let verdict = gateway.pdp.decide(
+        subject,
+        Operation::QueryEntity,
+        &query::requested(params),
+        endpoint,
+    );
+    let Verdict::Rewrite(constraints) = verdict else {
+        return Err(Box::new(ProblemDetails::forbidden().into_response()));
+    };
+    tenancy::pin_tenant(request, &endpoint.space)
+        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
+
+    let target = format!(
+        "/ngsi-ld/v1/entities?{}",
+        query::upstream(params, &constraints)
+    );
+    let answer = gateway
+        .broker
+        .send(
+            axum::http::Method::GET,
+            &target,
+            request.headers().clone(),
+            Body::empty(),
+        )
+        .await
+        .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
+
+    let (parts, body) = answer.into_parts();
+    if !parts.status.is_success() {
+        return Err(Box::new(Response::from_parts(parts, body)));
+    }
+    let bytes = axum::body::to_bytes(body, MAX_BODY)
+        .await
+        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
+    let mut entities: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
+
+    if let Value::Array(list) = &mut entities {
+        list.retain(|entity| projection::permitted(entity, &constraints.id_patterns));
+    }
+    projection::project(&mut entities, &constraints.attrs);
+    Ok((entities, constraints.restricted))
+}
+
+/// A JSON body, serialized once.
+fn json_response(payload: &Value) -> Response<Body> {
+    match serde_json::to_vec(payload) {
+        Ok(bytes) => (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            bytes,
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!(%error, "the answer does not serialize");
+            ProblemDetails::internal().into_response()
+        }
     }
 }

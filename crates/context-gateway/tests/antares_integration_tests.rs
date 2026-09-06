@@ -139,7 +139,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         project: SPACE.to_owned(),
         audience,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd],
+        representations: vec![Representation::NgsiLd, Representation::GeoJson],
         rate_limit: None,
         policies: vec![public_grant()],
     }
@@ -255,6 +255,52 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     assert_eq!(status, StatusCode::OK);
     let entity: Value = serde_json::from_slice(&body).expect("an entity");
     assert!(entity.get("operatorPhone").is_none());
+
+    // DEMO step 4: the same data, several ways. The map reads the FeatureCollection and
+    // sees exactly the attributes the grant allows (EP-09, EP-07).
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri(format!("/api/endpoint/{PUBLIC_SLUG}/file.geojson"))
+            .body(Body::empty())
+            .expect("a request"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "geojson: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let collection: Value = serde_json::from_slice(&body).expect("a FeatureCollection");
+    assert_eq!(collection["type"], json!("FeatureCollection"));
+    let features = collection["features"].as_array().expect("features");
+    assert_eq!(features.len(), 1);
+    assert_eq!(features[0]["id"], json!(STATION));
+    assert_eq!(features[0]["geometry"]["type"], json!("Point"));
+    assert_eq!(features[0]["properties"]["pm10"], json!(34.2));
+    assert!(features[0]["properties"].get("operatorPhone").is_none());
+
+    // DEMO step 4: what the anonymous caller may do, from the same PDP (EP-55).
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri(format!("/api/endpoint/{PUBLIC_SLUG}/access"))
+            .body(Body::empty())
+            .expect("a request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let access: Value = serde_json::from_slice(&body).expect("an access document");
+    assert_eq!(access["subject"], json!({ "type": "role", "id": "public" }));
+    assert_eq!(
+        access["permissions"][0]["resource"]["type"],
+        json!("AirQualityObserved")
+    );
+    assert_eq!(
+        access["permissions"][0]["attributes"],
+        json!(["location", "pm10", "pm25"])
+    );
 
     // A write that touches an attribute outside the grant is refused whole (GW17).
     let refused = station(Some((

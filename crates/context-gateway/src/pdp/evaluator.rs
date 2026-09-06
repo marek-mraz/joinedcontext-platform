@@ -250,7 +250,38 @@ fn narrow(requested: &BTreeSet<String>, granted: &BTreeSet<String>) -> BTreeSet<
     requested.intersection(granted).cloned().collect()
 }
 
-fn granted_types(information: &[RegistrationInfo]) -> BTreeSet<String> {
+/// The policies that name this caller and are in force now, whatever they grant (EP-55).
+///
+/// The access surface reports what a caller may do, which is a question about the policy
+/// set rather than about one request, so it starts here rather than at [`evaluate`].
+pub fn effective<'a>(
+    subject: &Subject,
+    policies: &'a [PolicySpec],
+    now: DateTime<Utc>,
+) -> Vec<&'a PolicySpec> {
+    policies
+        .iter()
+        .filter(|policy| subject.is(&policy.assignee) && in_force(policy, now))
+        .collect()
+}
+
+/// Every operation a policy grants, by its CIM 009 name, with the Table 4.20-2 groups
+/// expanded (R8).
+pub fn granted_operations(policy: &PolicySpec) -> BTreeSet<&'static str> {
+    policy
+        .operations
+        .iter()
+        .flat_map(|granted| match granted {
+            OperationRef::Single(single) => vec![single.as_str()],
+            OperationRef::Group(group) => {
+                group.operations().iter().map(Operation::as_str).collect()
+            }
+        })
+        .collect()
+}
+
+/// The entity types a policy's registration information names.
+pub fn granted_types(information: &[RegistrationInfo]) -> BTreeSet<String> {
     information
         .iter()
         .flat_map(|info| info.entities.iter())
@@ -258,7 +289,8 @@ fn granted_types(information: &[RegistrationInfo]) -> BTreeSet<String> {
         .collect()
 }
 
-fn granted_attrs(information: &[RegistrationInfo]) -> BTreeSet<String> {
+/// The properties and relationships a policy's registration information names (R9).
+pub fn granted_attrs(information: &[RegistrationInfo]) -> BTreeSet<String> {
     information
         .iter()
         .flat_map(|info| {
