@@ -6,6 +6,7 @@
 pub mod commands;
 pub mod diff;
 pub mod loader;
+pub mod platform;
 pub mod waves;
 
 pub use diff::{diff, FieldDiff};
