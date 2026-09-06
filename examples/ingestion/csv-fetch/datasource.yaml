@@ -1,0 +1,18 @@
+# A public CSV export: no credential, so the source declares none. HTTPS all the same, because
+# an unencrypted fetch is a fetch anybody on the path can rewrite.
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: parkoviska-csv
+  namespace: bb-doprava
+  title:
+    sk: Obsadenosť parkovísk (CSV)
+    en: Car park occupancy (CSV)
+spec:
+  type: http
+  http:
+    url: https://opendata.banskabystrica.sk/parkoviska/obsadenost.csv
+    verb: GET
+    headers:
+      Accept: text/csv
+    timeout: 15s

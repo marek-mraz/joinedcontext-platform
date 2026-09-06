@@ -1,0 +1,62 @@
+# Golden transformation tests for the CSV pipeline (PL-22, T-0296).
+#
+#   bento test ./examples/ingestion/csv-fetch/...
+
+tests:
+  - name: one CSV file becomes one entity per row
+    target_processors: '/pipeline/processors'
+    input_batch:
+      - content: |
+          kod,nazov,lat,lon,kapacita,volne,cas
+          p-namestie,Námestie SNP,48.7359,19.1462,120,30,2026-09-06T21:00:00Z
+          p-europa,Europa SC,48.7275,19.1338,400,400,2026-09-06T21:00:00Z
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:OffStreetParking:banskabystrica.sk:doprava:p-namestie",
+              "type": "OffStreetParking",
+              "name": { "type": "Property", "value": "Námestie SNP" },
+              "location": {
+                "type": "GeoProperty",
+                "value": { "type": "Point", "coordinates": [19.1462, 48.7359] }
+              },
+              "totalSpotNumber": { "type": "Property", "value": 120 },
+              "availableSpotNumber": {
+                "type": "Property", "value": 30, "observedAt": "2026-09-06T21:00:00Z"
+              },
+              "occupancy": {
+                "type": "Property", "value": 0.75, "observedAt": "2026-09-06T21:00:00Z"
+              }
+            },
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:OffStreetParking:banskabystrica.sk:doprava:p-europa",
+              "type": "OffStreetParking",
+              "name": { "type": "Property", "value": "Europa SC" },
+              "location": {
+                "type": "GeoProperty",
+                "value": { "type": "Point", "coordinates": [19.1338, 48.7275] }
+              },
+              "totalSpotNumber": { "type": "Property", "value": 400 },
+              "availableSpotNumber": {
+                "type": "Property", "value": 400, "observedAt": "2026-09-06T21:00:00Z"
+              },
+              "occupancy": {
+                "type": "Property", "value": 0, "observedAt": "2026-09-06T21:00:00Z"
+              }
+            }
+          ]
+
+  - name: a header with no rows writes nothing
+    target_processors: '/pipeline/processors'
+    input_batch:
+      - content: |
+          kod,nazov,lat,lon,kapacita,volne,cas
+    output_batches: []

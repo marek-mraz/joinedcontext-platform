@@ -29,6 +29,29 @@ jobs:
         with: { python-version: "3.11", cache: "pip", cache-dependency-path: tools/model-tools/pyproject.toml }
       - run: pip install .[test]
       - run: pytest -q
+  pipelines:
+    # PL-22: the shipped ingestion examples are linted and run against their golden fixtures.
+    # Bento is pinned by version and verified by checksum, the way an image is pinned by digest.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BENTO_VERSION: "1.21.1"
+      BENTO_SHA256: "bde76909dfba1173a0338886f747b4a4647c316d9627c1c0472d8a1cc1eda453"
+      # `bento lint` refuses a config whose environment interpolations are unset; the runner
+      # gets the real token from its ServiceAccount, CI only needs the name to resolve.
+      SERVICE_ACCOUNT_TOKEN: "lint-placeholder"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bento
+        run: |
+          curl -sSLo bento.tar.gz "https://github.com/warpstreamlabs/bento/releases/download/v${BENTO_VERSION}/bento_${BENTO_VERSION}_linux_amd64.tar.gz"
+          echo "${BENTO_SHA256}  bento.tar.gz" | sha256sum --check --status
+          tar xzf bento.tar.gz bento
+          sudo install -m 0755 bento /usr/local/bin/bento
+      # Only the Bento configs: the folders also hold platform manifests, which are a
+      # different schema and are checked by `cargo test -p jcctl`.
+      - run: bento lint ./examples/ingestion/*/bento.yaml ./examples/ingestion/gtfs-rt/tests/decoder.yaml
+      - run: bento test ./examples/ingestion/...
   gitleaks:
     runs-on: ubuntu-latest
     timeout-minutes: 3

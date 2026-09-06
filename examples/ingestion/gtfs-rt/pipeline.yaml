@@ -1,0 +1,18 @@
+# Fifteen seconds is inside the thirty-second rule, so the poll stays in the project's resident
+# runner rather than starting a pod four times a minute (PL-26).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: mhd-gtfs-rt-ingest
+  namespace: bb-doprava
+  title:
+    en: Public transport vehicles and trips from GTFS-realtime
+spec:
+  class: auto
+  period: 15s
+  source:
+    dataSourceRef: { kind: DataSource, name: mhd-gtfs-rt }
+  targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:doprava:ep-mhd
+  quotas:
+    maxMemoryMb: 128
+    cpuMillicores: 200
