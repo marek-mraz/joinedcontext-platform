@@ -68,7 +68,10 @@ spec:
 /// placed there deliberately, or listed as an artifact the reconciler never converges.
 #[test]
 fn every_catalogued_kind_has_a_wave_or_is_a_known_artifact() {
-    let artifacts = ["Bundle"];
+    // Kinds the reconciler never converges: a Bundle exists only for a download, and a
+    // Blueprint is expanded at authoring time - what reaches the broker is the manifests
+    // it rendered, each of which has a wave of its own (CC-25).
+    let artifacts = ["Bundle", "Blueprint"];
 
     for info in jc_core::registry::KINDS {
         match wave_of(info.kind) {

@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 pub mod apisix;
+pub mod blueprints;
 pub mod commands;
 pub mod diff;
 pub mod lanes;
@@ -13,6 +14,7 @@ pub mod platform;
 pub mod service_accounts;
 pub mod waves;
 
+pub use blueprints::{expand, ExpandError, Expanded};
 pub use diff::{diff, FieldDiff};
 pub use lanes::{change_envelope, lane_of, lane_of_changeset, Lane, LaneVerdict};
 pub use loader::{LoadError, LoadedResource, RawManifest, RawMetadata, Repository, ResourceId};
