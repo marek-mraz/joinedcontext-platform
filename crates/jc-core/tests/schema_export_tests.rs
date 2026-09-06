@@ -69,7 +69,7 @@ fn committed_schemas_match_the_generator() {
         let path = root.join(format!("{}.json", info.kind));
         let committed = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             panic!(
-                "{}: {e} — run `cargo run -p jc-core --bin export_schemas`",
+                "{}: {e} — run `cargo run -p jcctl -- schema export`",
                 path.display()
             )
         });
@@ -80,7 +80,7 @@ fn committed_schemas_match_the_generator() {
         assert_eq!(
             committed,
             generated,
-            "{} is stale — run `cargo run -p jc-core --bin export_schemas`",
+            "{} is stale — run `cargo run -p jcctl -- schema export`",
             path.display()
         );
     }

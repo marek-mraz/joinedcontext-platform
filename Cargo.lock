@@ -190,6 +190,10 @@ dependencies = [
 [[package]]
 name = "jcctl"
 version = "0.1.0"
+dependencies = [
+ "jc-core",
+ "serde_json",
+]
 
 [[package]]
 name = "matchit"
