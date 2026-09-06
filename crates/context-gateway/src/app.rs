@@ -13,7 +13,7 @@
 
 use crate::auth::accounts::ServiceAccounts;
 use crate::auth::token::{self, Claims, Verifier};
-use crate::handlers::{schema, space_surface};
+use crate::handlers::{endpoint_surface, schema, space_surface};
 use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::evaluator::{Constraints, Subject, Verdict};
 use crate::pdp::write_guard;
@@ -140,6 +140,10 @@ impl Gateway {
 /// The router: two probes and the endpoint surface.
 pub fn router(gateway: Arc<Gateway>) -> Router {
     Router::new()
+        // Both spellings, because EP-01 writes the base URL with the trailing slash and
+        // every client that stores a base URL drops it.
+        .route("/api/endpoint/{slug}", get(endpoint_record))
+        .route("/api/endpoint/{slug}/", get(endpoint_record))
         .route("/api/endpoint/{slug}/ngsi-ld/v1/{*rest}", any(ngsi_ld))
         .route("/api/endpoint/{slug}/access", get(access))
         .route("/api/endpoint/{slug}/mcp", post(mcp_message))
@@ -930,6 +934,54 @@ async fn access_check(
             .and_then(Value::as_str),
         crate::pdp::now(),
     ))
+}
+
+/// The DCAT-AP record of one endpoint, in the representation the caller asked for
+/// (T-0337, T-0338, EP-27, EP-68, EP-69).
+///
+/// The record is built on the schema catalogue the endpoint already serves, so the digests
+/// it names are the ones `schema/index.json` names and the artifacts' own `ETag`s, computed
+/// once. Everything is the granted projection: `admit` has already refused a caller the
+/// endpoint does not serve, and `schema::visible` narrows the artifacts to what this one
+/// may read.
+async fn endpoint_record(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, subject) = match admit(&gateway, &slug, None, request.headers()) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+
+    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
+    let index = schema::index(&endpoint, &visible, sha256_hex);
+    let space = gateway.resolver.resolve_space(&endpoint.space);
+    let space = space.as_deref();
+
+    let accept = request
+        .headers()
+        .get(axum::http::header::ACCEPT)
+        .and_then(|value| value.to_str().ok());
+    let base = gateway.base_url();
+    let format = space_surface::negotiate(accept);
+    let body = match format {
+        space_surface::Format::JsonLd => {
+            serde_json::to_string(&endpoint_surface::dataset(&endpoint, space, &index, base))
+                .unwrap_or_default()
+        }
+        space_surface::Format::Turtle => {
+            endpoint_surface::dataset_turtle(&endpoint, space, &index, base)
+        }
+        space_surface::Format::Html => {
+            endpoint_surface::dataset_html(&endpoint, space, &index, base)
+        }
+    };
+    match HeaderValue::from_str(format.media_type()) {
+        Ok(media) => ([(axum::http::header::CONTENT_TYPE, media)], body).into_response(),
+        Err(_) => ProblemDetails::internal().into_response(),
+    }
 }
 
 /// The catalogue of what this endpoint publishes about its data (T-0162, EP-46).

@@ -199,7 +199,7 @@ pub fn dataset_html(space: &Space, base: &str) -> String {
 
 /// A language map as JSON-LD wants it: one `@value`/`@language` object per locale, or a
 /// plain string when the manifest named no locale at all.
-fn localized(map: &BTreeMap<String, String>, fallback: &str) -> Value {
+pub(crate) fn localized(map: &BTreeMap<String, String>, fallback: &str) -> Value {
     if map.is_empty() {
         return json!(fallback);
     }
@@ -211,7 +211,7 @@ fn localized(map: &BTreeMap<String, String>, fallback: &str) -> Value {
 }
 
 /// One string out of a language map, for the serializations that carry no language tag.
-fn plain(map: &BTreeMap<String, String>, fallback: &str) -> String {
+pub(crate) fn plain(map: &BTreeMap<String, String>, fallback: &str) -> String {
     map.get("en")
         .or_else(|| map.values().next())
         .cloned()
@@ -219,7 +219,7 @@ fn plain(map: &BTreeMap<String, String>, fallback: &str) -> String {
 }
 
 /// A Turtle string literal, with the four escapes the grammar requires.
-fn literal(text: &str) -> String {
+pub(crate) fn literal(text: &str) -> String {
     let escaped = text
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -229,7 +229,7 @@ fn literal(text: &str) -> String {
 }
 
 /// HTML text: the manifest wrote the title, so it is escaped before it is rendered.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
