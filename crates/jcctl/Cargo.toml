@@ -6,5 +6,5 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-jc-core = { path = "../jc-core" }
+jc-core = { path = "../jc-core", version = "0.1.0" }
 serde_json = "1"
