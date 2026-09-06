@@ -30,6 +30,128 @@ impl Polygon {
         }
         !self.holes.iter().any(|hole| ring_contains(hole, point))
     }
+
+    /// Whether this polygon lies entirely inside `other` (GW11, T-0149).
+    ///
+    /// Every vertex inside and no edge crossing an edge: for the simple polygons a policy
+    /// draws — a district, a cadastral area — that is containment exactly. A polygon that
+    /// only touches `other`'s boundary counts as contained, the same way a point on the
+    /// boundary counts as inside, so a grant drawn on the district border does not refuse
+    /// the district.
+    pub fn within(&self, other: &Polygon) -> bool {
+        if !self.outer.iter().all(|point| other.contains(*point)) {
+            return false;
+        }
+        let theirs = std::iter::once(&other.outer).chain(other.holes.iter());
+        !theirs.into_iter().any(|ring| crosses(&self.outer, ring))
+    }
+}
+
+/// Whether any edge of one ring properly crosses any edge of another.
+///
+/// Touching is not crossing: two rings that share a boundary point, or a vertex, do not
+/// cross, and a grant whose area is exactly the caller's must stay contained in it.
+fn crosses(one: &[(f64, f64)], other: &[(f64, f64)]) -> bool {
+    edges(one).any(|(a, b)| edges(other).any(|(c, d)| segments_cross(a, b, c, d)))
+}
+
+fn edges(ring: &[(f64, f64)]) -> impl Iterator<Item = ((f64, f64), (f64, f64))> + '_ {
+    (0..ring.len()).map(move |index| (ring[index], ring[(index + 1) % ring.len()]))
+}
+
+/// Proper segment intersection: the two segments cross at a point interior to both.
+fn segments_cross(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)) -> bool {
+    const EPSILON: f64 = 1e-12;
+    let side = |(x1, y1): (f64, f64), (x2, y2): (f64, f64), (x, y): (f64, f64)| {
+        let cross = (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1);
+        if cross > EPSILON {
+            1
+        } else if cross < -EPSILON {
+            -1
+        } else {
+            0
+        }
+    };
+    let (d1, d2, d3, d4) = (side(a, b, c), side(a, b, d), side(c, d, a), side(c, d, b));
+    // Collinear or touching endpoints are 0 on one side, which is not a proper crossing.
+    d1 * d2 < 0 && d3 * d4 < 0
+}
+
+/// What the gateway forwards for `geoQ`, and what it has to filter itself (GW11, R14).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Intersected {
+    /// The `geoQ` sent to the broker.
+    pub geo_q: Option<String>,
+    /// Grant geometries the answer is filtered against here, because the broker was given
+    /// something wider. An entity must lie inside at least one of them.
+    pub grants: Vec<String>,
+    /// The caller's own geometry, when the broker was given the grant's instead.
+    pub caller: Option<String>,
+    /// Whether the caller's own area was replaced by a smaller one (R22).
+    pub restricted: bool,
+}
+
+/// Intersects the caller's `geoQ` with the grants' (T-0149, GW11).
+///
+/// Never a clipped polygon: the smaller of the two is forwarded when one contains the
+/// other, and otherwise the grant is forwarded — so the broker can only ever return the
+/// granted area — and the caller's own area is applied here, on the way back. Clipping
+/// two polygons into a third would be a geometry the caller never asked for and the grant
+/// never drew.
+pub fn intersect(caller: Option<&str>, grants: &[&str]) -> Intersected {
+    let Some((first, rest)) = grants.split_first() else {
+        // Nothing granted narrows space, so the caller's own area stands.
+        return Intersected {
+            geo_q: caller.map(str::to_owned),
+            ..Intersected::default()
+        };
+    };
+
+    // Several grants are several areas and `geoQ` has no union: the broker gets the
+    // caller's area if it sent one, and every grant area is applied here.
+    if !rest.is_empty() {
+        return Intersected {
+            geo_q: caller.map(str::to_owned),
+            grants: grants.iter().map(|grant| (*grant).to_owned()).collect(),
+            caller: None,
+            restricted: true,
+        };
+    }
+
+    let granted = (*first).to_owned();
+    let Some(asked) = caller else {
+        return Intersected {
+            geo_q: Some(granted),
+            restricted: true,
+            ..Intersected::default()
+        };
+    };
+
+    match (granted_polygon(asked), granted_polygon(&granted)) {
+        // The caller asked for less than it was given: its own area is the narrower query.
+        (Some(inner), Some(outer)) if inner.within(&outer) => Intersected {
+            geo_q: Some(asked.to_owned()),
+            ..Intersected::default()
+        },
+        // They overlap, or the caller's is a shape this parser cannot read. Either way the
+        // broker gets the grant and the caller's area is applied here. The grant is
+        // applied here too: the broker is not what enforces the policy, and an answer it
+        // did not narrow must still come out narrowed (GW11).
+        (_, Some(_)) => Intersected {
+            geo_q: Some(granted.clone()),
+            grants: vec![granted],
+            caller: Some(asked.to_owned()),
+            restricted: true,
+        },
+        // The grant itself is unreadable: it is still forwarded, and it is also applied
+        // here, so an answer the broker did not narrow is narrowed on the way back.
+        (_, None) => Intersected {
+            geo_q: Some(granted.clone()),
+            grants: vec![granted],
+            caller: Some(asked.to_owned()),
+            restricted: true,
+        },
+    }
 }
 
 /// The polygon of an NGSI-LD `geoQ`, or `None` when it is not a `within` polygon.
@@ -138,4 +260,64 @@ fn on_segment((x1, y1): (f64, f64), (x2, y2): (f64, f64), (x, y): (f64, f64)) ->
         && x <= x1.max(x2) + EPSILON
         && y >= y1.min(y2) - EPSILON
         && y <= y1.max(y2) + EPSILON
+}
+
+/// The areas the gateway applies to the broker's answer itself (GW11, T-0149).
+///
+/// Built once per response, because parsing a polygon per entity would make a large page
+/// quadratic for no gain.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Areas {
+    /// The grant areas; an entity must lie inside at least one.
+    grants: Vec<Polygon>,
+    /// The caller's own area, when the broker was given the grant's instead.
+    caller: Option<Polygon>,
+    /// An area nobody could parse. Nothing is admitted then: an area the gateway cannot
+    /// read is an area no entity can be shown to be in.
+    unreadable: bool,
+}
+
+impl Areas {
+    /// The areas of one constraint set, or `None` when the broker's answer needs no
+    /// filtering at all.
+    pub fn of(grants: &[String], caller: Option<&str>) -> Option<Areas> {
+        if grants.is_empty() && caller.is_none() {
+            return None;
+        }
+        let parsed: Vec<Option<Polygon>> = grants
+            .iter()
+            .map(|grant| granted_polygon(grant))
+            .chain(std::iter::once(caller.and_then(granted_polygon)))
+            .collect();
+
+        Some(Areas {
+            unreadable: grants.len() + usize::from(caller.is_some())
+                != parsed.iter().flatten().count(),
+            caller: caller.and(parsed.last().cloned().flatten()),
+            grants: parsed.into_iter().take(grants.len()).flatten().collect(),
+        })
+    }
+
+    /// Whether the entity survives the areas.
+    ///
+    /// An entity with no readable point does not: the areas only apply when a grant or the
+    /// caller drew one, and an entity that cannot be placed cannot be shown to be inside
+    /// it. That is also the answer for a spatial query against a type that carries no
+    /// location at all.
+    pub fn admits(&self, entity: &serde_json::Value) -> bool {
+        if self.unreadable {
+            return false;
+        }
+        let Some(point) = entity_point(entity) else {
+            return false;
+        };
+        if self
+            .caller
+            .as_ref()
+            .is_some_and(|area| !area.contains(point))
+        {
+            return false;
+        }
+        self.grants.is_empty() || self.grants.iter().any(|area| area.contains(point))
+    }
 }

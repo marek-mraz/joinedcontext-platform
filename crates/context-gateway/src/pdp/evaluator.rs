@@ -11,6 +11,8 @@
 //! against (GW10). The floor for an ordinary caller is always REWRITE: the tenant alone is
 //! pinned by the gateway, never chosen by the client (GW3, GW20).
 
+use crate::pdp::temporal::{self, Window};
+use crate::pdp::{geo, scope_folding};
 use chrono::{DateTime, Utc};
 use jc_core::kinds::{
     Operation, OperationRef, PolicySpec, Principal, PrincipalKind, RegistrationInfo,
@@ -83,14 +85,31 @@ pub struct Constraints {
     pub id_patterns: BTreeSet<String>,
     /// The attributes the response is projected to; empty means no projection (R9).
     pub attrs: BTreeSet<String>,
-    /// The `q` sent to the broker: the caller's, conjoined with the grants'.
+    /// The `q` sent to the broker: the caller's, AND the union of the per-policy filters,
+    /// each of which already carries that policy's own scopes as an anchored regex
+    /// (R12, R13).
     pub q: Option<String>,
-    /// The `scopeQ` sent to the broker.
-    pub scope_q: Option<String>,
+    /// The scope tree the grants cover, which a write payload's own `scope` must sit
+    /// inside (R29, R30).
+    ///
+    /// Never sent upstream and never carrying anything the caller wrote: a caller that
+    /// could add a path here would be granting itself a district.
+    pub granted_scopes: Option<String>,
     /// The `geoQ` sent to the broker.
     pub geo_q: Option<String>,
+    /// Grant areas the answer is filtered against here, because the broker was given
+    /// something wider; an entity must lie inside at least one (GW11).
+    pub geo_grants: Vec<String>,
+    /// The caller's own area, when the broker was given the grant's instead (R14).
+    pub geo_caller: Option<String>,
     /// The `temporalQ` sent to the broker.
     pub temporal_q: Option<String>,
+    /// The windows an attribute instance must fall into, when the forwarded interval is
+    /// the hull of several (GW26).
+    pub temporal_windows: Vec<Window>,
+    /// The caller asked for a period no grant reaches: the answer is an empty list rather
+    /// than a refusal, and the broker is never called (GW26).
+    pub empty: bool,
     /// Whether the caller asked for more than the grants cover, so the answer is a
     /// narrowed one and says so (R22).
     pub restricted: bool,
@@ -157,7 +176,7 @@ pub fn evaluate(
         return Verdict::Deny;
     }
 
-    Verdict::Rewrite(Box::new(intersect(request, tenant, &grants)))
+    Verdict::Rewrite(Box::new(intersect(request, tenant, &grants, now)))
 }
 
 /// Whether a policy speaks about this caller and this operation at all (GW7).
@@ -195,7 +214,12 @@ fn covers_request(policy: &PolicySpec, request: &Request) -> bool {
 }
 
 /// Intersects the request with the union of the grants (GW10, GW11).
-fn intersect(request: &Request, tenant: &str, grants: &[&PolicySpec]) -> Constraints {
+fn intersect(
+    request: &Request,
+    tenant: &str,
+    grants: &[&PolicySpec],
+    now: DateTime<Utc>,
+) -> Constraints {
     let granted_types: BTreeSet<String> = grants
         .iter()
         .flat_map(|policy| granted_types(&policy.information))
@@ -208,9 +232,32 @@ fn intersect(request: &Request, tenant: &str, grants: &[&PolicySpec]) -> Constra
     let types = narrow(&request.types, &granted_types);
     let attrs = narrow(&request.attrs, &granted_attrs);
 
+    let filters: Vec<String> = grants
+        .iter()
+        .filter_map(|policy| policy_filter(policy))
+        .collect();
+    let geo = geo::intersect(
+        request.geo_q.as_deref(),
+        &grants
+            .iter()
+            .filter_map(|policy| policy.geo_q.as_deref())
+            .collect::<Vec<_>>(),
+    );
+    let clamped = temporal::clamp(
+        request.temporal_q.as_deref(),
+        &grants
+            .iter()
+            .filter_map(|policy| policy.temporal_q.as_deref())
+            .collect::<Vec<_>>(),
+        now,
+    );
+
     Constraints {
         tenant: tenant.to_owned(),
-        restricted: types.len() < request.types.len() || attrs.len() < request.attrs.len(),
+        restricted: types.len() < request.types.len()
+            || attrs.len() < request.attrs.len()
+            || geo.restricted
+            || clamped.restricted,
         types,
         id_patterns: grants
             .iter()
@@ -219,23 +266,46 @@ fn intersect(request: &Request, tenant: &str, grants: &[&PolicySpec]) -> Constra
             .filter_map(|selector| selector.id_pattern.clone())
             .collect(),
         attrs,
-        q: conjoin(
-            request.q.as_deref(),
-            grants.iter().filter_map(|p| p.q.as_deref()),
-        ),
-        scope_q: conjoin(
-            request.scope_q.as_deref(),
-            grants.iter().filter_map(|p| p.scope_q.as_deref()),
-        ),
-        geo_q: conjoin(
-            request.geo_q.as_deref(),
-            grants.iter().filter_map(|p| p.geo_q.as_deref()),
-        ),
-        temporal_q: conjoin(
-            request.temporal_q.as_deref(),
-            grants.iter().filter_map(|p| p.temporal_q.as_deref()),
-        ),
+        q: conjoin(request.q.as_deref(), &filters),
+        granted_scopes: union(grants.iter().filter_map(|policy| policy.scope_q.as_deref())),
+        geo_q: geo.geo_q,
+        geo_grants: geo.grants,
+        geo_caller: geo.caller,
+        temporal_q: clamped.temporal_q,
+        temporal_windows: clamped.windows,
+        empty: clamped.empty,
     }
+}
+
+/// One policy's whole residual as one `q` conjunction (R12, R13).
+///
+/// This is what stops the cross-policy bleed of ADR 006: a policy's `q` and its scopes
+/// travel together in one parenthesized term, so no expression can ever pair one policy's
+/// filter with another policy's area.
+fn policy_filter(policy: &PolicySpec) -> Option<String> {
+    let parts: Vec<String> = [
+        policy
+            .q
+            .as_deref()
+            .filter(|filter| is_balanced(filter))
+            .map(|filter| format!("({filter})")),
+        policy.scope_q.as_deref().and_then(scope_folding::fold),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    match parts.len() {
+        0 => None,
+        1 => parts.into_iter().next(),
+        _ => Some(format!("({})", parts.join(";"))),
+    }
+}
+
+/// The scope tree the grants cover, for the write guard alone (R29).
+fn union<'a>(scopes: impl Iterator<Item = &'a str>) -> Option<String> {
+    let scopes: Vec<&str> = scopes.collect();
+    (!scopes.is_empty()).then(|| scopes.join("|"))
 }
 
 /// `requested ∩ granted`, or the granted set when the caller asked for nothing specific
@@ -302,21 +372,20 @@ pub fn granted_attrs(information: &[RegistrationInfo]) -> BTreeSet<String> {
         .collect()
 }
 
-/// The caller's filter AND the union of the grants' filters, in NGSI-LD's own syntax
+/// The caller's filter AND the union of the per-policy filters, in NGSI-LD's own syntax
 /// (`;` is AND, `|` is OR, and parentheses group).
 ///
 /// Every operand is parenthesized, so no operand can reach outside itself and change how
 /// its neighbours are grouped. That only holds if the caller's filter is balanced, which
 /// [`is_balanced`] establishes: an unbalanced filter is dropped rather than conjoined,
 /// leaving the grants alone in force.
-fn conjoin<'a>(requested: Option<&str>, granted: impl Iterator<Item = &'a str>) -> Option<String> {
-    let granted: Vec<&str> = granted.collect();
-    let union = match granted.len() {
+fn conjoin(requested: Option<&str>, filters: &[String]) -> Option<String> {
+    let union = match filters.len() {
         0 => None,
-        1 => Some(format!("({})", granted[0])),
+        1 => Some(format!("({})", filters[0])),
         _ => Some(format!(
             "({})",
-            granted
+            filters
                 .iter()
                 .map(|filter| format!("({filter})"))
                 .collect::<Vec<_>>()

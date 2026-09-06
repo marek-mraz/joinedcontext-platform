@@ -3,6 +3,8 @@
 pub mod evaluator;
 pub mod geo;
 pub mod projection;
+pub mod scope_folding;
+pub mod temporal;
 pub mod write_guard;
 
 use crate::resolver::Endpoint;

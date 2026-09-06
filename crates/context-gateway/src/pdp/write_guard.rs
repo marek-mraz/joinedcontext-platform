@@ -202,7 +202,7 @@ fn check_no_smuggled_policy(entity: &Value) -> Result<(), Refusal> {
 /// The entity's `scope` must sit inside the granted scope tree: a grant on `/geo/SK/BB`
 /// covers `/geo/SK/BB/Sasova`, never `/geo/SK/ZA` and never `/geo/SK/BBB` (R13, R29, R30).
 fn check_scope(entity: &Value, constraints: &Constraints) -> Result<(), Refusal> {
-    let Some(granted) = constraints.scope_q.as_deref() else {
+    let Some(granted) = constraints.granted_scopes.as_deref() else {
         return Ok(());
     };
     let scopes = match entity.get("scope") {

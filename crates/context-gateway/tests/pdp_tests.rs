@@ -73,8 +73,13 @@ fn an_anonymous_caller_gets_the_public_grant_as_a_rewrite() {
         set(&["dateObserved", "location", "pm10", "pm25"]),
         "asking for nothing yields the granted set, which is what the response is cut to"
     );
-    assert_eq!(constraints.q.as_deref(), Some("(pm10>=0)"));
-    assert_eq!(constraints.scope_q.as_deref(), Some("(/geo/SK/BB)"));
+    // R13: the grant's scope travels inside its own q term, anchored, never as a
+    // separate parameter that another policy's q could pair with.
+    assert_eq!(
+        constraints.q.as_deref(),
+        Some(r#"(((pm10>=0);scope~="^/geo/SK/BB(/.*)?$"))"#)
+    );
+    assert_eq!(constraints.granted_scopes.as_deref(), Some("/geo/SK/BB"));
     assert!(constraints
         .id_patterns
         .iter()
@@ -270,7 +275,7 @@ fn asking_for_more_than_the_grant_covers_narrows_to_the_grant() {
     assert_eq!(constraints.attrs, set(&["pm10"]), "attrs narrowed");
     assert_eq!(
         constraints.q.as_deref(),
-        Some("(pm10>50);(pm10>=0)"),
+        Some(r#"(pm10>50);(((pm10>=0);scope~="^/geo/SK/BB(/.*)?$"))"#),
         "the caller's filter is conjoined with the grant's, never replaced by it"
     );
     assert!(
@@ -306,7 +311,7 @@ fn a_caller_filter_cannot_break_out_of_its_parentheses() {
         .expect("the grant's own filter stays");
 
     assert_eq!(
-        q, "(pm10>=0)",
+        q, r#"(((pm10>=0);scope~="^/geo/SK/BB(/.*)?$"))"#,
         "the unbalanced filter was dropped, not conjoined"
     );
     assert!(!q.contains("pm10<0"));
@@ -344,7 +349,10 @@ q: "availableSpotNumber>0"
 
     assert_eq!(
         constraints.q.as_deref(),
-        Some("(dateObserved>\"2026-09-01\");((pm10>=0)|(availableSpotNumber>0))")
+        Some(concat!(
+            "(dateObserved>\"2026-09-01\");",
+            r#"((((pm10>=0);scope~="^/geo/SK/BB(/.*)?$"))|((availableSpotNumber>0)))"#
+        ))
     );
     assert_eq!(
         constraints.types,
@@ -407,11 +415,20 @@ temporalQ: "timerel=after;timeAt=P-1D"
     );
     assert!(constraints.restricted);
 
+    // The grant's last-day window, resolved against the same `now` as the decision: the
+    // caller's ten years never reach the broker.
+    let yesterday =
+        (now() - chrono::Duration::days(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     for (dimension, value, granted) in [
         ("q", &constraints.q, "pm10>=0"),
-        ("scopeQ", &constraints.scope_q, "/geo/SK/BB"),
+        ("q", &constraints.q, r#"scope~="^/geo/SK/BB(/.*)?$""#),
+        ("scopes", &constraints.granted_scopes, "/geo/SK/BB"),
         ("geoQ", &constraints.geo_q, "coordinates=[[[19.1,48.7]"),
-        ("temporalQ", &constraints.temporal_q, "timeAt=P-1D"),
+        (
+            "temporalQ",
+            &constraints.temporal_q,
+            &format!("timerel=after;timeAt={yesterday}"),
+        ),
     ] {
         let value = value
             .as_deref()
@@ -421,4 +438,17 @@ temporalQ: "timerel=after;timeAt=P-1D"
             "{dimension} lost the grant's own constraint: {value}"
         );
     }
+    assert!(
+        !constraints
+            .q
+            .as_deref()
+            .unwrap_or_default()
+            .contains("/geo/SK\""),
+        "the caller's wider scope is not in the grant term"
+    );
+    assert!(!constraints
+        .temporal_q
+        .as_deref()
+        .unwrap_or_default()
+        .contains("P-10Y"));
 }

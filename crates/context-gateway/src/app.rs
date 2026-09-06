@@ -16,7 +16,7 @@ use crate::auth::token::{self, Claims, Verifier};
 use crate::handlers::schema;
 use crate::pdp::evaluator::{Constraints, Subject, Verdict};
 use crate::pdp::write_guard;
-use crate::pdp::{projection, Pdp};
+use crate::pdp::{geo, projection, temporal, Pdp};
 use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, Model, SlugResolver};
 use crate::translators::geojson;
@@ -184,6 +184,16 @@ async fn ngsi_ld(
         return refused(operation, &path);
     };
 
+    // The caller asked for a period no grant reaches. The request was well formed and its
+    // answer is genuinely nothing, so it is answered here: forwarding it without a
+    // temporal window would ask the broker for everything (GW26).
+    if constraints.empty {
+        return match operations::addressed_entity(&path) {
+            Some(_) => ProblemDetails::not_found().into_response(),
+            None => empty_list(&constraints),
+        };
+    }
+
     // The identifier in the path belongs to this organization and this space or the
     // request is malformed, whichever verb carries it (PF-10, PF-42).
     if let Some(raw) = operations::addressed_entity(&path) {
@@ -288,6 +298,17 @@ fn refuse_write(
 ///
 /// A single entity the grants do not reach is a miss, not a refusal: the caller must not
 /// learn that it exists (R20).
+/// The answer to a read whose granted window the caller's request does not reach (GW26).
+fn empty_list(constraints: &Constraints) -> Response<Body> {
+    let mut response = json_response(&Value::Array(Vec::new()));
+    if constraints.restricted {
+        response
+            .headers_mut()
+            .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
+    }
+    response
+}
+
 async fn project_answer(
     answer: Response<Body>,
     operation: Operation,
@@ -313,13 +334,19 @@ async fn project_answer(
         return proxy::with_body(parts, bytes.to_vec());
     };
 
+    let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
     match &mut payload {
         Value::Array(entities) => {
-            entities.retain(|entity| projection::permitted(entity, &constraints.id_patterns));
+            entities.retain(|entity| {
+                projection::permitted(entity, &constraints.id_patterns)
+                    && areas.as_ref().is_none_or(|areas| areas.admits(entity))
+            });
             projection::project(&mut payload, &constraints.attrs);
         }
         entity if entity.is_object() && entity.get("id").is_some() => {
-            if !projection::permitted(entity, &constraints.id_patterns) {
+            if !projection::permitted(entity, &constraints.id_patterns)
+                || !areas.as_ref().is_none_or(|areas| areas.admits(entity))
+            {
                 return ProblemDetails::not_found().into_response();
             }
             projection::project(&mut payload, &constraints.attrs);
@@ -328,6 +355,9 @@ async fn project_answer(
         // project.
         _ => {}
     }
+    // The forwarded window is the hull of several grants; what falls in the gaps between
+    // them was never granted (GW26).
+    temporal::keep_windows(&mut payload, &constraints.temporal_windows);
 
     match serde_json::to_vec(&payload) {
         Ok(bytes) => proxy::with_body(parts, bytes),
@@ -741,6 +771,9 @@ async fn query_entities(
     let Verdict::Rewrite(constraints) = verdict else {
         return Err(Box::new(ProblemDetails::forbidden().into_response()));
     };
+    if constraints.empty {
+        return Ok((Value::Array(Vec::new()), true));
+    }
     tenancy::pin_tenant(request, &endpoint.space)
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
 
@@ -769,8 +802,12 @@ async fn query_entities(
     let mut entities: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
 
+    let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
     if let Value::Array(list) = &mut entities {
-        list.retain(|entity| projection::permitted(entity, &constraints.id_patterns));
+        list.retain(|entity| {
+            projection::permitted(entity, &constraints.id_patterns)
+                && areas.as_ref().is_none_or(|areas| areas.admits(entity))
+        });
     }
     projection::project(&mut entities, &constraints.attrs);
     Ok((entities, constraints.restricted))

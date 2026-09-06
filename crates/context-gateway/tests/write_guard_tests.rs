@@ -14,7 +14,7 @@ fn grant() -> Constraints {
         tenant: SPACE.to_owned(),
         types: names(&["AirQualityObserved"]),
         attrs: names(&["pm10", "pm25", "dateObserved", "location"]),
-        scope_q: Some("/geo/SK/BB".to_owned()),
+        granted_scopes: Some("/geo/SK/BB".to_owned()),
         geo_q: Some(
             "georel=within;geometry=Polygon;coordinates=[[[19.10,48.70],[19.20,48.70],[19.20,48.76],[19.10,48.76],[19.10,48.70]]]"
                 .to_owned(),

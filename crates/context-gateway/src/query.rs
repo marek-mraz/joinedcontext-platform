@@ -32,6 +32,7 @@ const PASSTHROUGH: &[&str] = &[
     "offset",
     "omit",
     "options",
+    "scopeQ",
     "pick",
     "timeproperty",
     "via",
@@ -88,13 +89,13 @@ pub fn upstream(params: &[(String, String)], constraints: &Constraints) -> Strin
     if !constraints.attrs.is_empty() {
         out.push(("attrs".to_owned(), join_list(&constraints.attrs)));
     }
-    for (name, value) in [("q", &constraints.q), ("scopeQ", &constraints.scope_q)] {
-        if let Some(value) = value {
-            out.push((name.to_owned(), value.clone()));
-        }
+    // The grants' scopes are not a `scopeQ` any more: each policy carries its own, folded
+    // into its own `q` term, so no expression can pair one policy's filter with another
+    // policy's scope (R12, R13). The caller's own `scopeQ` rides through untouched and the
+    // broker ANDs it, which can only narrow.
+    if let Some(q) = &constraints.q {
+        out.push(("q".to_owned(), q.clone()));
     }
-    // ponytail: the grant's own temporal window is forwarded verbatim; clamping a caller
-    // window against it is T-0150.
     for compound in [&constraints.geo_q, &constraints.temporal_q]
         .into_iter()
         .flatten()
@@ -246,14 +247,19 @@ mod tests {
 
     /// GW2: the caller's own filters never reach the broker as they were sent; the
     /// constraint set replaces every dimension a grant can narrow.
+    ///
+    /// `scopeQ` is the exception and it is not a widening: the grants' scopes travel
+    /// inside `q` now (R13), and the caller's own `scopeQ` is a filter the broker ANDs on
+    /// top, which can only narrow.
     #[test]
     fn a_governed_parameter_is_replaced_and_an_unknown_one_is_dropped() {
-        let params = parse("q=1%3D1&type=Secret&attrs=everything&scopeQ=%2F&danger=drop%20table");
+        let params =
+            parse("q=1%3D1&type=Secret&attrs=everything&scopeQ=%2Fgeo%2FSK&danger=drop%20table");
         let constraints = Constraints {
             types: BTreeSet::from(["AirQualityObserved".to_owned()]),
             attrs: BTreeSet::from(["pm10".to_owned()]),
             q: Some("(1=1);((pm10>=0))".to_owned()),
-            scope_q: Some("/geo/SK/BB".to_owned()),
+            granted_scopes: Some("/geo/SK/BB".to_owned()),
             ..Constraints::default()
         };
         let sent = parse(&upstream(&params, &constraints));
@@ -261,7 +267,11 @@ mod tests {
         assert_eq!(first(&sent, "type"), Some("AirQualityObserved"));
         assert_eq!(first(&sent, "attrs"), Some("pm10"));
         assert_eq!(first(&sent, "q"), Some("(1=1);((pm10>=0))"));
-        assert_eq!(first(&sent, "scopeQ"), Some("/geo/SK/BB"));
+        assert_eq!(
+            first(&sent, "scopeQ"),
+            Some("/geo/SK"),
+            "the caller's own scope filter rides through; the grants' are inside q"
+        );
         assert_eq!(
             first(&sent, "danger"),
             None,
