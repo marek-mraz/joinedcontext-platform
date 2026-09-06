@@ -193,7 +193,7 @@ fn did_web_syntax_table_valid_and_invalid() {
     }
 
     let invalid_cases = [
-        "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+        "did:key:z6MkExample",
         "did:web:",
         "did:web:banskabystrica",
         "did:web:BANSKABYSTRICA.SK",
