@@ -35,6 +35,9 @@ const ORDER: &[(u8, &str)] = &[
     (WAVE_SPACES, "ServiceAccount"),
     (WAVE_ACCESS, "ScopeDefinition"),
     (WAVE_ACCESS, "Policy"),
+    // The catalogue connection and its API token resolve before an Endpoint's
+    // `spec.publish.ckan` block can be acted on (EP-62, EP-67).
+    (WAVE_EXPOSURE, "CkanInstance"),
     (WAVE_EXPOSURE, "Endpoint"),
     (WAVE_FEDERATION, "SharedSpaceReference"),
     (WAVE_FEDERATION, "DataOffer"),
@@ -112,4 +115,46 @@ pub fn plan(repo: &Repository) -> Plan {
         }
     }
     Plan { waves }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Kinds the reconciler never converges: a `Bundle` exists only for a download and a
+    /// `Blueprint` is expanded at authoring time (CC-22, CC-25).
+    const ARTIFACTS: &[&str] = &["Bundle", "Blueprint"];
+
+    /// A kind added to the catalogue without a wave never reconciles, and the repository
+    /// it appears in converges silently short of what Git says.
+    ///
+    /// The same invariant is asserted in `tests/waves_tests.rs`, but that target runs in
+    /// `ci-full` and this one runs in the fast lane, which is where a new kind is added.
+    #[test]
+    fn every_catalogued_kind_has_a_wave_or_is_a_known_artifact() {
+        for info in jc_core::registry::KINDS {
+            match wave_of(info.kind) {
+                Some(wave) => assert!(
+                    wave <= WAVE_RUNTIME && !ARTIFACTS.contains(&info.kind),
+                    "kind `{}` has wave {wave}",
+                    info.kind
+                ),
+                None => assert!(
+                    ARTIFACTS.contains(&info.kind),
+                    "catalogued kind `{}` has no sync wave: add it to ORDER and to the \
+                     wave table in Architecture/06 section 3, or list it as an artifact",
+                    info.kind
+                ),
+            }
+        }
+    }
+
+    /// The table is the order, so a kind listed twice would silently take the first wave.
+    #[test]
+    fn no_kind_is_listed_in_two_waves() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (_, kind) in ORDER {
+            assert!(seen.insert(*kind), "kind `{kind}` is listed twice");
+        }
+    }
 }
