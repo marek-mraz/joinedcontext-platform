@@ -3,6 +3,7 @@
 pub mod evaluator;
 pub mod geo;
 pub mod projection;
+pub mod reaper;
 pub mod scope_folding;
 pub mod temporal;
 pub mod write_guard;

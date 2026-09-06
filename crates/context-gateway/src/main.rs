@@ -76,7 +76,15 @@ async fn main() -> ExitCode {
         }
     };
 
-    let app = router(Arc::new(gateway)).layer(tower_http::trace::TraceLayer::new_for_http());
+    let gateway = Arc::new(gateway);
+    // The repository is a cache of the enforcement point's decisions, so it is followed
+    // rather than read once: a revoked Policy or ServiceAccount stops granting within a
+    // second, without a restart (R48, EP-19, OPS-45).
+    if let Some(dir) = config.repo_dir.clone() {
+        tokio::spawn(context_gateway::pdp::reaper::Reaper::new(Arc::clone(&gateway), dir).run());
+    }
+
+    let app = router(gateway).layer(tower_http::trace::TraceLayer::new_for_http());
     let listener = match tokio::net::TcpListener::bind(config.bind).await {
         Ok(listener) => listener,
         Err(error) => {

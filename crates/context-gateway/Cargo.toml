@@ -34,4 +34,6 @@ base64 = "0.22"
 serde_norway = "0.9"
 # `oneshot`, so the tenancy middleware is tested through a real tower stack.
 tower = { version = "0.5", features = ["util"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# `test-util` pauses the clock, so the reaper's five-second bound is measured
+# without a test that actually sleeps for five seconds.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }

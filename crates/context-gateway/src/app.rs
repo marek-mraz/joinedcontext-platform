@@ -14,6 +14,7 @@
 use crate::auth::accounts::ServiceAccounts;
 use crate::auth::token::{self, Claims, Verifier};
 use crate::handlers::schema;
+use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::evaluator::{Constraints, Subject, Verdict};
 use crate::pdp::write_guard;
 use crate::pdp::{geo, projection, temporal, Pdp};
@@ -21,6 +22,7 @@ use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, Model, SlugResolver};
 use crate::translators::geojson;
 use crate::{handlers, middleware::tenancy, operations, query};
+use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::header::AUTHORIZATION;
@@ -57,10 +59,13 @@ pub struct Gateway {
     pub org_domain: String,
     /// The realm's token verifier; absent means no token is accepted at all (PF-46).
     pub verifier: Option<Arc<Verifier>>,
-    /// The service accounts a token's `azp` can name.
-    pub accounts: ServiceAccounts,
+    /// The service accounts a token's `azp` can name; swapped whole when the repository
+    /// changes, so a withdrawn credential stops resolving without a restart (R48).
+    accounts: ArcSwap<ServiceAccounts>,
     /// The gateway's public base URL, when the deployment names one.
     pub public_url: Option<String>,
+    /// One token bucket per endpoint and caller (EP-20).
+    pub rate_limiter: RateLimiter,
 }
 
 impl Gateway {
@@ -72,8 +77,9 @@ impl Gateway {
             pdp,
             org_domain: org_domain.into(),
             verifier: None,
-            accounts: ServiceAccounts::new(),
+            accounts: ArcSwap::from_pointee(ServiceAccounts::new()),
             public_url: None,
+            rate_limiter: RateLimiter::new(),
         }
     }
 
@@ -85,7 +91,7 @@ impl Gateway {
         public_url: Option<String>,
     ) -> Self {
         self.verifier = Some(verifier);
-        self.accounts = accounts;
+        self.accounts.store(Arc::new(accounts));
         self.public_url = public_url;
         self
     }
@@ -99,6 +105,14 @@ impl Gateway {
         audiences
     }
 
+    /// Replaces the service account table (R48, PF-46).
+    ///
+    /// Called by the reaper when the repository changed: `azp` values the repository no
+    /// longer names stop resolving from the next request on.
+    pub fn replace_accounts(&self, accounts: ServiceAccounts) {
+        self.accounts.store(Arc::new(accounts));
+    }
+
     /// Replaces the endpoint table (EP-19).
     pub fn serve(self, endpoints: impl IntoIterator<Item = Endpoint>) -> Self {
         self.resolver.replace(endpoints);
@@ -109,8 +123,6 @@ impl Gateway {
 /// The router: two probes and the endpoint surface.
 pub fn router(gateway: Arc<Gateway>) -> Router {
     Router::new()
-        .route("/healthz", get(ok))
-        .route("/livez", get(ok))
         .route("/api/endpoint/{slug}/ngsi-ld/v1/{*rest}", any(ngsi_ld))
         .route("/api/endpoint/{slug}/access", get(access))
         .route("/api/endpoint/{slug}/access/check", post(access_check))
@@ -120,6 +132,14 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
             "/api/endpoint/{slug}/schema/{version}/{artifact}",
             get(schema_artifact),
         )
+        // Every endpoint surface passes the limiter; the two probes do not, so a full
+        // bucket can never make a pod look unhealthy (EP-20).
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&gateway),
+            rate_limit::enforce,
+        ))
+        .route("/healthz", get(ok))
+        .route("/livez", get(ok))
         .with_state(gateway)
         .fallback(missing)
 }
@@ -525,7 +545,7 @@ fn subject_of(
     // token is valid and the account is unknown, which is an account with no grants
     // (PF-46).
     if let Some(azp) = claims.azp.as_deref() {
-        if let Some(account) = gateway.accounts.resolve(azp) {
+        if let Some(account) = gateway.accounts.load().resolve(azp) {
             if !endpoint.admits(Some(&account.project)) {
                 return Err(Box::new(ProblemDetails::forbidden()));
             }
