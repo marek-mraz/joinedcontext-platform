@@ -3,6 +3,7 @@
 pub mod app;
 pub mod blueprint;
 pub mod data_model;
+pub mod data_source;
 pub mod dataspace;
 pub mod endpoint;
 pub mod mapping;
@@ -20,6 +21,10 @@ pub use app::{
 pub use blueprint::{BlueprintSpec, BlueprintTemplate, RiskClass};
 pub use data_model::{
     DataModelLifecycle, DataModelSource, DataModelSpec, GeneratedArtifacts, RemoteSource, SemVer,
+};
+pub use data_source::{
+    Authorization, DataSourceSpec, DataSourceType, GtfsFeed, GtfsRtConnection, HttpConnection,
+    MqttConnection, TlsSettings, WebSocketConnection,
 };
 pub use dataspace::{
     AgreementConstraints, AgreementRole, AgreementState, ConnectorEngine, DataAgreementSpec,

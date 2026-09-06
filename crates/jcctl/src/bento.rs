@@ -1,0 +1,264 @@
+//! Rendering a `DataSource` into the Bento input of one pipeline (T-0291, PL-39, MF-35).
+//!
+//! The author writes what the data means: the processors that turn a payload into entities and
+//! the output that writes them. Where the payload comes from is a `DataSource`, declared once
+//! and referenced, and this module is the translation between the two (Architecture/08 §6).
+//!
+//! Two rules make the result reviewable. A credential is never written, only its environment
+//! variable interpolation (PL-16), and nothing below the input is touched: the author's
+//! `bento.yaml` comes back with an `input` in front of it and everything else byte for byte,
+//! except for the decoder the GTFS-realtime type has to prepend.
+
+use jc_core::kinds::data_source::env_var_of;
+use jc_core::kinds::{DataSourceSpec, DataSourceType, GtfsFeed};
+use serde_norway::{Mapping, Value};
+
+/// The GTFS-realtime descriptors the runner image carries, so no pipeline ships a copy.
+const GTFS_IMPORT_PATH: &str = "/opt/bento/gtfs-realtime";
+/// The protobuf message every GTFS-realtime feed is wrapped in.
+const GTFS_MESSAGE: &str = "transit_realtime.FeedMessage";
+
+/// What the renderer needs beyond the connection itself.
+#[derive(Debug, Clone, Copy)]
+pub struct InputContext<'a> {
+    /// The `DataSource` name, which seeds the environment variable names.
+    pub source: &'a str,
+    /// The project the pipeline belongs to, part of the MQTT client id.
+    pub project: &'a str,
+    /// The pipeline name, part of the MQTT client id so two streams never collide.
+    pub pipeline: &'a str,
+}
+
+/// Why a pipeline and a connection cannot be rendered together.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RenderError {
+    /// The author's `bento.yaml` is not a YAML mapping.
+    #[error("bento.yaml is not a mapping, so there is nothing to add an input to")]
+    NotAMapping,
+    /// The author wrote an input and the reference names another one (PL-39).
+    #[error("bento.yaml already declares an input, and spec.source.dataSourceRef names another one; keep one of the two")]
+    InputAlreadyDeclared,
+    /// The text does not parse as YAML.
+    #[error("bento.yaml does not parse: {0}")]
+    Parse(String),
+}
+
+/// The `input` block one connection becomes (PL-39).
+pub fn input_of(spec: &DataSourceSpec, context: &InputContext) -> Value {
+    let block = match spec.source_type {
+        DataSourceType::Mqtt => ("mqtt", mqtt(spec, context)),
+        DataSourceType::Http => ("http_client", http(spec, context)),
+        DataSourceType::WebSocket => ("websocket", websocket(spec)),
+        DataSourceType::GtfsRt => ("http_client", gtfs(spec)),
+    };
+    let mut input = Mapping::new();
+    input.insert(key(block.0), Value::Mapping(block.1));
+    Value::Mapping(input)
+}
+
+/// The processors the connection contributes before the author's own (PL-39).
+///
+/// Only GTFS-realtime has any: the feed arrives as protobuf and every pipeline reading it would
+/// otherwise decode it again in its own mapping.
+pub fn prepended_processors(spec: &DataSourceSpec) -> Vec<Value> {
+    if spec.source_type != DataSourceType::GtfsRt {
+        return Vec::new();
+    }
+    let mut protobuf = Mapping::new();
+    protobuf.insert(key("operator"), text("to_json"));
+    protobuf.insert(key("message"), text(GTFS_MESSAGE));
+    protobuf.insert(
+        key("import_paths"),
+        Value::Sequence(vec![text(GTFS_IMPORT_PATH)]),
+    );
+    let mut processor = Mapping::new();
+    processor.insert(key("protobuf"), Value::Mapping(protobuf));
+    vec![Value::Mapping(processor)]
+}
+
+/// The author's `bento.yaml` with the connection's input in front of it (PL-03, PL-39).
+///
+/// Returns the rendered YAML. Everything the author wrote is preserved as parsed: the input is
+/// added, the GTFS decoder is prepended to `pipeline.processors`, and no other key is read,
+/// reordered or removed.
+pub fn render(
+    bento_yaml: &str,
+    spec: &DataSourceSpec,
+    context: &InputContext,
+) -> Result<String, RenderError> {
+    let parsed: Value = match bento_yaml.trim().is_empty() {
+        true => Value::Mapping(Mapping::new()),
+        false => {
+            serde_norway::from_str(bento_yaml).map_err(|e| RenderError::Parse(e.to_string()))?
+        }
+    };
+    let Value::Mapping(mut config) = parsed else {
+        return Err(RenderError::NotAMapping);
+    };
+    if config.contains_key(key("input")) {
+        return Err(RenderError::InputAlreadyDeclared);
+    }
+
+    let decoders = prepended_processors(spec);
+    if !decoders.is_empty() {
+        let mut pipeline = match config.remove(key("pipeline")) {
+            Some(Value::Mapping(existing)) => existing,
+            _ => Mapping::new(),
+        };
+        let mut processors = decoders;
+        if let Some(Value::Sequence(authored)) = pipeline.remove(key("processors")) {
+            processors.extend(authored);
+        }
+        pipeline.insert(key("processors"), Value::Sequence(processors));
+        config.insert(key("pipeline"), Value::Mapping(pipeline));
+    }
+
+    // The input goes first, the way an author would write it, so the generated file reads like
+    // a hand-written one: rebuild the mapping rather than appending at the end.
+    let mut out = Mapping::new();
+    out.insert(key("input"), input_of(spec, context));
+    for (k, v) in config {
+        out.insert(k, v);
+    }
+    serde_norway::to_string(&Value::Mapping(out)).map_err(|e| RenderError::Parse(e.to_string()))
+}
+
+fn mqtt(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
+    let Some(connection) = &spec.mqtt else {
+        return Mapping::new();
+    };
+    let mut out = Mapping::new();
+    out.insert(key("urls"), sequence(&connection.urls));
+    out.insert(key("topics"), sequence(&connection.topics));
+    out.insert(
+        key("client_id"),
+        text(&format!("jc-{}-{}", context.project, context.pipeline)),
+    );
+    if let Some(qos) = connection.qos {
+        out.insert(key("qos"), Value::Number(qos.into()));
+    }
+    if let Some(clean) = connection.clean_session {
+        out.insert(key("clean_session"), Value::Bool(clean));
+    }
+    if let Some(user) = &connection.username {
+        out.insert(key("user"), text(user));
+    }
+    if let Some(password) = &connection.password_ref {
+        out.insert(
+            key("password"),
+            text(&interpolation(context.source, password)),
+        );
+    }
+    let encrypted = connection
+        .urls
+        .iter()
+        .any(|url| url.starts_with("tls://") || url.starts_with("wss://"));
+    if let Some(tls) = tls_block(spec, context, encrypted) {
+        out.insert(key("tls"), Value::Mapping(tls));
+    }
+    out
+}
+
+fn http(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
+    let Some(connection) = &spec.http else {
+        return Mapping::new();
+    };
+    let mut out = Mapping::new();
+    out.insert(key("url"), text(&connection.url));
+    out.insert(
+        key("verb"),
+        text(connection.verb.as_deref().unwrap_or("GET")),
+    );
+
+    let mut headers = Mapping::new();
+    for (name, value) in &connection.headers {
+        headers.insert(key(name), text(value));
+    }
+    if let Some(authorization) = &connection.authorization {
+        let scheme = authorization.scheme.as_deref().unwrap_or("Bearer");
+        headers.insert(
+            key("Authorization"),
+            text(&format!(
+                "{scheme} {}",
+                interpolation(context.source, &authorization.header_ref)
+            )),
+        );
+    }
+    if !headers.is_empty() {
+        out.insert(key("headers"), Value::Mapping(headers));
+    }
+    if let Some(timeout) = &connection.timeout {
+        out.insert(key("timeout"), text(timeout));
+    }
+    if let Some(tls) = tls_block(spec, context, connection.url.starts_with("https://")) {
+        out.insert(key("tls"), Value::Mapping(tls));
+    }
+    out
+}
+
+fn websocket(spec: &DataSourceSpec) -> Mapping {
+    let Some(connection) = &spec.web_socket else {
+        return Mapping::new();
+    };
+    let mut out = Mapping::new();
+    out.insert(key("url"), text(&connection.url));
+    if let Some(message) = &connection.open_message {
+        out.insert(key("open_message"), text(message));
+        out.insert(key("open_message_type"), text("text"));
+    }
+    out
+}
+
+fn gtfs(spec: &DataSourceSpec) -> Mapping {
+    let Some(connection) = &spec.gtfs_rt else {
+        return Mapping::new();
+    };
+    let mut out = Mapping::new();
+    out.insert(key("url"), text(&connection.url));
+    out.insert(key("verb"), text("GET"));
+    // The feed says which messages the decoded envelope carries; it travels as metadata so a
+    // mapping can branch on it without parsing the URL.
+    let mut metadata = Mapping::new();
+    metadata.insert(key("gtfs_feed"), text(feed_name(connection.feed)));
+    out.insert(key("metadata"), Value::Mapping(metadata));
+    out
+}
+
+const fn feed_name(feed: GtfsFeed) -> &'static str {
+    feed.as_str()
+}
+
+/// Bento's TLS block, rendered only when it says something: an encrypted scheme or a private
+/// certificate authority. Verification is never switched off, so no key does that here.
+fn tls_block(spec: &DataSourceSpec, context: &InputContext, encrypted: bool) -> Option<Mapping> {
+    let authority = spec.tls.as_ref().and_then(|tls| tls.ca_cert_ref.as_ref());
+    if !encrypted && authority.is_none() {
+        return None;
+    }
+    let mut out = Mapping::new();
+    out.insert(key("enabled"), Value::Bool(true));
+    if let Some(reference) = authority {
+        out.insert(
+            key("root_cas"),
+            text(&interpolation(context.source, reference)),
+        );
+    }
+    Some(out)
+}
+
+/// `${DS_MQTT_MESTO_PASSWORD}`: the only form a credential takes in a generated config (PL-16).
+fn interpolation(source: &str, reference: &jc_core::envelope::SecretRef) -> String {
+    format!("${{{}}}", env_var_of(source, reference))
+}
+
+fn key(name: &str) -> Value {
+    Value::String(name.to_owned())
+}
+
+fn text(value: &str) -> Value {
+    Value::String(value.to_owned())
+}
+
+fn sequence(values: &[String]) -> Value {
+    Value::Sequence(values.iter().map(|v| text(v)).collect())
+}

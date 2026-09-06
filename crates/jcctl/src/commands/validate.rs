@@ -105,6 +105,17 @@ pub fn run(repo_dir: &Path) -> Report {
         }
     }
 
+    for (id, resource, reference) in dangling_data_sources(&repo) {
+        report.findings.push(Finding {
+            path: resource.0,
+            document: resource.1,
+            line: resource.2,
+            message: format!(
+                "{id} references DataSource `{reference}`, which no manifest of this project declares (PL-39)"
+            ),
+        });
+    }
+
     for (id, actual, expected) in repo.misplaced() {
         let resource = repo.get(&id).expect("misplaced reports loaded resources");
         report.findings.push(Finding {
@@ -116,6 +127,56 @@ pub fn run(repo_dir: &Path) -> Report {
     }
 
     report
+}
+
+/// Where a finding sits: the file, the document inside it and its first line.
+type Location = (PathBuf, usize, usize);
+
+/// Every `spec.source.dataSourceRef` that names no `DataSource` of the same project (PL-39).
+///
+/// The reference is resolved here, at plan time, and not by the runner: a pipeline whose
+/// connection is missing would otherwise start, fail to build an input and restart forever,
+/// with the reason three layers away from the person who wrote the reference.
+fn dangling_data_sources(repo: &Repository) -> Vec<(String, Location, String)> {
+    let declared: std::collections::BTreeSet<(Option<String>, String)> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "DataSource")
+        .map(|(id, _)| (id.namespace.clone(), id.name.clone()))
+        .collect();
+
+    let mut dangling = Vec::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "Pipeline" {
+            continue;
+        }
+        let Some(reference) = resource
+            .manifest
+            .spec
+            .get("source")
+            .and_then(|source| source.get("dataSourceRef"))
+        else {
+            continue;
+        };
+        // A reference is a bare name or a typed `{kind, name, namespace?}`; the namespace of a
+        // typed one is the pipeline's own, because a connection is owned by the team that owns
+        // its credentials.
+        let name = match reference {
+            serde_json::Value::String(name) => Some(name.clone()),
+            serde_json::Value::Object(map) => {
+                map.get("name").and_then(|n| n.as_str()).map(str::to_owned)
+            }
+            _ => None,
+        };
+        let Some(name) = name else { continue };
+        if !declared.contains(&(id.namespace.clone(), name.clone())) {
+            dangling.push((
+                id.to_string(),
+                (resource.path.clone(), resource.document, resource.line),
+                name,
+            ));
+        }
+    }
+    dangling
 }
 
 /// Turns the error that stopped the walk into a finding, keeping whatever location it

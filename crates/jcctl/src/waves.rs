@@ -39,6 +39,8 @@ const ORDER: &[(u8, &str)] = &[
     (WAVE_FEDERATION, "SharedSpaceReference"),
     (WAVE_FEDERATION, "DataOffer"),
     (WAVE_FEDERATION, "DataAgreement"),
+    // A DataSource converges before the pipelines that render their input from it.
+    (WAVE_RUNTIME, "DataSource"),
     (WAVE_RUNTIME, "Pipeline"),
     (WAVE_RUNTIME, "App"),
     (WAVE_RUNTIME, "SyncSource"),

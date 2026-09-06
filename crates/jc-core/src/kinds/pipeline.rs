@@ -90,6 +90,40 @@ pub struct PipelineSource {
     /// Event subscription trigger for resident processing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<Trigger>,
+    /// Reference to the `DataSource` whose connection becomes this pipeline's Bento input
+    /// (PL-39, MF-35). Excludes `endpointRef`: a pipeline reads the outside world or the
+    /// platform's own spaces, not both in one input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_source_ref: Option<Ref>,
+}
+
+impl PipelineSource {
+    /// Validates the input side of a pipeline (PL-31, PL-39).
+    ///
+    /// One input: either the platform's own spaces through an Endpoint, or the outside world
+    /// through a `DataSource`. A manifest naming both describes two inputs and the reconciler
+    /// would have to choose one, so it is refused here instead.
+    pub fn validate(&self) -> Result<()> {
+        let Some(reference) = &self.data_source_ref else {
+            return Ok(());
+        };
+        if self.endpoint_ref.is_some() {
+            return Err(Error::Name {
+                field: "spec.source.dataSourceRef",
+                value: reference.name().to_owned(),
+                reason: "a pipeline reads a DataSource or an Endpoint, not both (PL-39)",
+            });
+        }
+        if let Some(kind) = reference.kind() {
+            if kind != "DataSource" {
+                return Err(Error::Kind {
+                    expected: "DataSource",
+                    got: kind.to_string(),
+                });
+            }
+        }
+        names::validate_dns1123_label(reference.name())
+    }
 }
 
 /// NGSI-LD query parameters for pipeline source entity retrieval.
@@ -281,6 +315,10 @@ impl PipelineSpec {
                 expected: "Endpoint",
                 got: self.target_endpoint.entity_type().to_string(),
             });
+        }
+
+        if let Some(source) = &self.source {
+            source.validate()?;
         }
 
         match self.class {

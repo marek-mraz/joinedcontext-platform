@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 pub mod apisix;
+pub mod bento;
 pub mod blueprints;
 pub mod commands;
 pub mod diff;

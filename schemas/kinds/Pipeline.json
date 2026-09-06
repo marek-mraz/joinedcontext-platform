@@ -324,6 +324,17 @@
       "additionalProperties": false,
       "description": "Source specification for derived pipelines (PL-31).",
       "properties": {
+        "dataSourceRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Ref"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Reference to the `DataSource` whose connection becomes this pipeline's Bento input (PL-39, MF-35). Excludes `endpointRef`: a pipeline reads the outside world or the platform's own spaces, not both in one input."
+        },
         "endpointRef": {
           "anyOf": [
             {

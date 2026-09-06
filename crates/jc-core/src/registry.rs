@@ -74,6 +74,7 @@ catalogue!(
     crate::kinds::SharedSpaceReferenceSpec,
     crate::kinds::ServiceAccountSpec,
     crate::kinds::PipelineSpec,
+    crate::kinds::DataSourceSpec,
     crate::kinds::AppSpec,
     crate::kinds::BlueprintSpec,
     crate::kinds::DataSpaceParticipantSpec,
