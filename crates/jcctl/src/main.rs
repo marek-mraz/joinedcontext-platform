@@ -1,7 +1,7 @@
 //! `jcctl`, the reconciler and repository CLI (API/03).
 //!
-//! Only `schema export` is implemented so far (MF-09, CC-12); `plan`, `apply`, `drift`,
-//! `export`, `validate` and `serve` land with the jcctl-plan-apply group.
+//! `schema export` (MF-09, CC-12) and `validate` (CC-12, MF-09, TS-18) are implemented;
+//! `plan`, `apply`, `drift`, `export` and `serve` follow in the jcctl-plan-apply group.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
