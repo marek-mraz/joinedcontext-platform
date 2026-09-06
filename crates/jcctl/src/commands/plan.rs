@@ -7,6 +7,7 @@
 use crate::diff::{diff, FieldDiff};
 use crate::loader::{RawManifest, Repository, ResourceId};
 use crate::platform::{Platform, PlatformError};
+use crate::service_accounts::owner_policies;
 use crate::waves::wave_of;
 use jc_core::registry;
 use serde_json::{json, Map, Value};
@@ -143,12 +144,12 @@ pub fn compute(repo: &Repository, platform: &dyn Platform) -> Result<ChangeSet, 
 
     let mut by_wave: BTreeMap<u8, Vec<ResourceChange>> = BTreeMap::new();
 
-    for (id, resource) in repo.iter() {
+    for (id, declared) in desired(repo) {
         let Some(wave) = wave_of(&id.kind) else {
             continue;
         };
-        let declared = &resource.manifest;
-        let change = match live.remove(id) {
+        let declared = &declared;
+        let change = match live.remove(&id) {
             None => ResourceChange {
                 id: id.clone(),
                 action: Action::Create,
@@ -188,6 +189,43 @@ pub fn compute(repo: &Repository, platform: &dyn Platform) -> Result<ChangeSet, 
     Ok(ChangeSet {
         waves: by_wave.into_iter().collect(),
     })
+}
+
+/// Every resource the repository asks for: what it declares, plus what the reconciler
+/// generates from it. A ServiceAccount brings its own owner policies, so no writer can
+/// reach live state without a policy governing it (CC-61).
+fn desired(repo: &Repository) -> BTreeMap<ResourceId, RawManifest> {
+    let org_domain = organization_domain(repo);
+    let mut desired = BTreeMap::new();
+
+    for (id, resource) in repo.iter() {
+        desired.insert(id.clone(), resource.manifest.clone());
+    }
+    // Second pass, so a hand-written manifest always wins over a generated one of the
+    // same identity: what somebody committed is never silently replaced.
+    for (_, resource) in repo.iter() {
+        for policy in owner_policies(&resource.manifest, &org_domain) {
+            desired
+                .entry(ResourceId::from_manifest(&policy))
+                .or_insert(policy);
+        }
+    }
+    desired
+}
+
+/// The organization's domain, which every generated policy names as its assigner.
+fn organization_domain(repo: &Repository) -> String {
+    repo.iter()
+        .find(|(id, _)| id.kind == "Organization")
+        .and_then(|(_, resource)| {
+            resource
+                .manifest
+                .spec
+                .get("domain")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
 }
 
 /// The `(project, plural)` collections worth listing: every project the repository or the

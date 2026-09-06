@@ -9,6 +9,7 @@ pub mod diff;
 pub mod loader;
 pub mod pipelines;
 pub mod platform;
+pub mod service_accounts;
 pub mod waves;
 
 pub use diff::{diff, FieldDiff};
