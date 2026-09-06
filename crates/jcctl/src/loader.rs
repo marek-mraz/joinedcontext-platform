@@ -389,10 +389,21 @@ impl Repository {
 
 /// The `{space}` placeholder of a path template: every space-scoped kind names it
 /// `contextSpaceRef` (Architecture/06 section 2).
-fn extract_space(spec: &serde_json::Value) -> &str {
-    spec.get("contextSpaceRef")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
+///
+/// Two kinds write it two ways and both are the same space: most specs carry the bare
+/// DNS-1123 label, while `Policy` and the federation kinds carry a typed `{kind, name}`
+/// reference (MF-07). Reading only the first form put every `Policy` at
+/// `projects/{project}/spaces//policies/…` and made `validate` report a correctly placed
+/// manifest as misplaced.
+pub(crate) fn extract_space(spec: &serde_json::Value) -> &str {
+    match spec.get("contextSpaceRef") {
+        Some(serde_json::Value::String(name)) => name,
+        Some(serde_json::Value::Object(reference)) => reference
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+        _ => "",
+    }
 }
 
 fn is_empty_doc(s: &str) -> bool {

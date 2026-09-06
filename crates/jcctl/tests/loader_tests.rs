@@ -428,3 +428,54 @@ spec:
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// MF-06 and MF-07: `contextSpaceRef` is written two ways and both name the same space.
+/// Reading only the bare-label form put every `Policy` at `.../spaces//policies/…`, so
+/// `validate` reported a correctly placed manifest as misplaced.
+#[test]
+fn a_typed_context_space_reference_resolves_the_space_placeholder() {
+    let dir = unique_temp_dir("typed-space-ref");
+    let policies = dir.join("projects/ovzdusie/spaces/ovzdusie/policies");
+    std::fs::create_dir_all(&policies).unwrap();
+
+    std::fs::write(
+        policies.parent().unwrap().join("space.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: ContextSpace
+metadata:
+  name: ovzdusie
+  namespace: ovzdusie
+spec:
+  isSandbox: false
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        policies.join("public-air-quality.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Policy
+metadata:
+  name: public-air-quality
+  namespace: ovzdusie
+spec:
+  contextSpaceRef:
+    kind: ContextSpace
+    name: ovzdusie
+  assigner: "did:web:banskabystrica.sk"
+  assignee: { kind: role, id: public }
+  operations: [queryEntity]
+  information:
+    - entities:
+        - type: AirQualityObserved
+"#,
+    )
+    .unwrap();
+
+    let repo = Repository::load(&dir).expect("the repository loads");
+    assert!(
+        repo.misplaced().is_empty(),
+        "a typed reference names its space too: {:?}",
+        repo.misplaced()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

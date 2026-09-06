@@ -11,8 +11,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str =
-    "usage: jcctl validate --repo-dir <path>\n       jcctl schema export [--out <dir>]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl schema export [--out <dir>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -27,6 +26,10 @@ fn main() -> ExitCode {
         },
         ["apply", "--repo-dir", dir, rest @ ..] => match apply_options(rest) {
             Some(options) => apply(Path::new(dir), options),
+            None => usage(),
+        },
+        ["export", rest @ ..] => match export_options(rest) {
+            Some((space, out, project)) => export(&space, &out, project.as_deref()),
             None => usage(),
         },
         ["schema", "export", rest @ ..] => match out_dir(rest) {
@@ -152,6 +155,53 @@ fn apply_options(args: &[&str]) -> Option<commands::apply::Options> {
     Some(options)
 }
 
+/// Copies one context space out of the live platform as a repository (CC-22, MF-16).
+///
+/// Like `plan` and `apply`, this runs against the in-process platform until the Context
+/// Gateway serves the configuration API, so today it exports a fresh installation: an
+/// empty space. The cleaning and the redaction are what the command is for and they are
+/// exercised by `commands::export` directly.
+fn export(space: &str, out: &Path, project: Option<&str>) -> ExitCode {
+    // A space lives in a project and the platform has no project directory to ask; the
+    // usual naming has the two equal, and `--project` names them when they are not.
+    let project = project.unwrap_or(space);
+    let report = match commands::export::collect(&InMemory::new(), project, space) {
+        Ok(report) => report,
+        Err(err) => return fail(&err.to_string()),
+    };
+    let written = match commands::export::write(out, &report) {
+        Ok(written) => written,
+        Err(err) => return fail(&err.to_string()),
+    };
+
+    for redaction in &report.redactions {
+        eprintln!(
+            "jcctl: redacted {redaction} (MF-17: a manifest carries a secretRef, never a secret)"
+        );
+    }
+    println!("{written} manifests written to {}", out.display());
+    ExitCode::SUCCESS
+}
+
+/// Parses `--space`, `--out-dir` and the optional `--project`, in any order.
+fn export_options(args: &[&str]) -> Option<(String, PathBuf, Option<String>)> {
+    let (mut space, mut out, mut project) = (None, None, None);
+    let mut rest = args;
+    while let [flag, value, tail @ ..] = rest {
+        match *flag {
+            "--space" => space = Some((*value).to_owned()),
+            "--out-dir" => out = Some(PathBuf::from(value)),
+            "--project" => project = Some((*value).to_owned()),
+            _ => return None,
+        }
+        rest = tail;
+    }
+    if !rest.is_empty() {
+        return None;
+    }
+    Some((space?, out?, project))
+}
+
 fn fail(message: &str) -> ExitCode {
     eprintln!("jcctl: {message}");
     ExitCode::FAILURE
@@ -182,6 +232,26 @@ fn export_schemas(out: &std::path::Path) -> std::io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_option_parsing() {
+        assert_eq!(
+            export_options(&["--space", "ovzdusie", "--out-dir", "/tmp/x"]),
+            Some(("ovzdusie".to_owned(), PathBuf::from("/tmp/x"), None))
+        );
+        assert_eq!(
+            export_options(&["--out-dir", "/tmp/x", "--project", "bb", "--space", "air"]),
+            Some((
+                "air".to_owned(),
+                PathBuf::from("/tmp/x"),
+                Some("bb".to_owned())
+            ))
+        );
+        assert_eq!(export_options(&["--space", "ovzdusie"]), None, "no out-dir");
+        assert_eq!(export_options(&["--out-dir", "/tmp/x"]), None, "no space");
+        assert_eq!(export_options(&["--space"]), None, "no value");
+        assert_eq!(export_options(&["--repo-dir", "x", "--space", "y"]), None);
+    }
 
     #[test]
     fn out_dir_parsing() {
