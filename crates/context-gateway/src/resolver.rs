@@ -12,7 +12,7 @@
 
 use arc_swap::ArcSwap;
 use jc_core::kinds::{Audience, FileLimits, PolicySpec, RateLimits, Representation};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Everything the gateway needs about one endpoint, resolved in a single lookup.
@@ -34,6 +34,8 @@ pub struct Endpoint {
     pub rate_limit: Option<RateLimits>,
     /// The ceiling on one `file.*` download, absent when the endpoint sets none (EP-44).
     pub file_limits: Option<FileLimits>,
+    /// Attributes this endpoint never serves, whatever the policies grant (EP-61).
+    pub hidden_attributes: BTreeSet<String>,
     /// The path this record answers under, which is also its RFC 8707 resource when the
     /// deployment names a public URL: `/api/endpoint/{slug}` or `/cs/{space}` (SP-01).
     pub base_path: String,

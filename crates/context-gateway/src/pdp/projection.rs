@@ -15,29 +15,35 @@ use std::collections::BTreeSet;
 /// not a valid NGSI-LD entity.
 const STRUCTURAL: &[&str] = &["id", "type", "@context", "@id", "@type", "scope"];
 
-/// Strips from one entity every attribute the grants do not name (R9).
+/// Strips from one entity every attribute the grants do not name and every attribute the
+/// endpoint hides (R9, EP-61).
 ///
 /// An empty `granted` set means the grants named no attribute whitelist at all, which is
-/// a grant over the whole entity: nothing is stripped.
-pub fn project_entity(entity: &mut Value, granted: &BTreeSet<String>) {
-    if granted.is_empty() {
+/// a grant over the whole entity. `hidden` is the opposite kind of set: a denial that
+/// applies whether or not there is a whitelist, which is why the endpoint's narrowing
+/// cannot be expressed by shrinking `granted`.
+pub fn project_entity(entity: &mut Value, granted: &BTreeSet<String>, hidden: &BTreeSet<String>) {
+    if granted.is_empty() && hidden.is_empty() {
         return;
     }
     let Some(members) = entity.as_object_mut() else {
         return;
     };
-    members.retain(|name, _| STRUCTURAL.contains(&name.as_str()) || granted.contains(name));
+    members.retain(|name, _| {
+        STRUCTURAL.contains(&name.as_str())
+            || ((granted.is_empty() || granted.contains(name)) && !hidden.contains(name))
+    });
 }
 
-/// Strips a whole broker answer, whether it is one entity or an array of them (R9).
-pub fn project(body: &mut Value, granted: &BTreeSet<String>) {
+/// Strips a whole broker answer, whether it is one entity or an array of them (R9, EP-61).
+pub fn project(body: &mut Value, granted: &BTreeSet<String>, hidden: &BTreeSet<String>) {
     match body {
         Value::Array(entities) => {
             for entity in entities {
-                project_entity(entity, granted);
+                project_entity(entity, granted, hidden);
             }
         }
-        entity => project_entity(entity, granted),
+        entity => project_entity(entity, granted, hidden),
     }
 }
 

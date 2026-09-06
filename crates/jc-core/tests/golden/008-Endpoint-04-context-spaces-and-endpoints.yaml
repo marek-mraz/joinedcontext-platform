@@ -24,3 +24,6 @@ spec:
     maxFileBytes: 33554432
   caching:
     maxAgeSeconds: 60
+  projection:            # Never served here, whatever the Policy allows (EP-61)
+    hiddenAttributes:
+      - calibrationOffset

@@ -26,8 +26,8 @@ pub use dataspace::{
     DataOfferSpec, DataSpaceParticipantSpec, Did,
 };
 pub use endpoint::{
-    Audience, Caching, EndpointSlug, EndpointSpec, FileLimits, RateLimits, Representation,
-    SharedSpaceReferenceSpec,
+    Audience, Caching, EndpointSlug, EndpointSpec, FileLimits, Projection, RateLimits,
+    Representation, SharedSpaceReferenceSpec,
 };
 pub use mapping::{
     DataModelRef, MappingSpec, MappingTest, NativeBlock, NativeLanguage, VocabularyAlignment,

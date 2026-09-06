@@ -143,6 +143,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         representations: vec![Representation::NgsiLd, Representation::GeoJson],
         rate_limit: None,
         file_limits: None,
+        hidden_attributes: Default::default(),
         models: Vec::new(),
         policies: vec![public_grant()],
     }
@@ -438,6 +439,7 @@ async fn a_service_account_writes_only_what_its_own_manifest_grants() {
         representations: vec![Representation::NgsiLd],
         rate_limit: None,
         file_limits: None,
+        hidden_attributes: Default::default(),
         models: Vec::new(),
         policies: vec![serde_norway::from_str(
             r#"contextSpaceRef: ovzdusie

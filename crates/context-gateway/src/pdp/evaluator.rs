@@ -85,6 +85,11 @@ pub struct Constraints {
     pub id_patterns: BTreeSet<String>,
     /// The attributes the response is projected to; empty means no projection (R9).
     pub attrs: BTreeSet<String>,
+    /// The attributes the endpoint publishes nothing of, whatever the grants say (EP-61).
+    ///
+    /// A denial rather than a second whitelist: `attrs` empty means "every granted
+    /// attribute", and subtracting from an empty whitelist would say the opposite.
+    pub hidden: BTreeSet<String>,
     /// The `q` sent to the broker: the caller's, AND the union of the per-policy filters,
     /// each of which already carries that policy's own scopes as an anchored regex
     /// (R12, R13).
@@ -232,6 +237,12 @@ fn intersect(
     let types = narrow(&request.types, &granted_types);
     let attrs = narrow(&request.attrs, &granted_attrs);
 
+    // The caller named types, the grants name types, and nothing is left: the answer is
+    // genuinely nothing. It has to be said here, because an empty `types` set means "no
+    // type filter" downstream, and forwarding no filter would ask the broker for every
+    // type in the tenant instead of none of them (T-0381, GW10, R20).
+    let no_type_left = !request.types.is_empty() && !granted_types.is_empty() && types.is_empty();
+
     let filters: Vec<String> = grants
         .iter()
         .filter_map(|policy| policy_filter(policy))
@@ -266,6 +277,7 @@ fn intersect(
             .filter_map(|selector| selector.id_pattern.clone())
             .collect(),
         attrs,
+        hidden: BTreeSet::new(),
         q: conjoin(request.q.as_deref(), &filters),
         granted_scopes: union(grants.iter().filter_map(|policy| policy.scope_q.as_deref())),
         geo_q: geo.geo_q,
@@ -273,7 +285,7 @@ fn intersect(
         geo_caller: geo.caller,
         temporal_q: clamped.temporal_q,
         temporal_windows: clamped.windows,
-        empty: clamped.empty,
+        empty: clamped.empty || no_type_left,
     }
 }
 

@@ -266,6 +266,9 @@ pub struct EndpointSpec {
     /// Optional response caching configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caching: Option<Caching>,
+    /// Optional publication narrowing applied to every representation (EP-61).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<Projection>,
 }
 
 impl Kind for EndpointSpec {
@@ -348,6 +351,10 @@ impl EndpointSpec {
             limits.validate()?;
         }
 
+        if let Some(ref projection) = self.projection {
+            projection.validate()?;
+        }
+
         if let Some(ref policy) = self.policy_ref {
             if policy.entity_type() != "Policy" {
                 return Err(Error::Kind {
@@ -406,6 +413,49 @@ impl FileLimits {
                 value: "0".to_string(),
                 reason: "a limit of zero returns no bytes at all; omit the field instead",
             });
+        }
+        Ok(())
+    }
+}
+
+/// What this Endpoint never serves, whatever the Policy set allows (EP-61).
+///
+/// A publication decision, not an authorization one: the gateway intersects this list with
+/// the caller's policy projection, so an Endpoint can subtract from a grant and never add to
+/// it. The same space can therefore be published twice with different amounts of detail
+/// without writing a second Policy, and because the subtraction happens where every
+/// representation reads its entities, a hidden attribute is missing from the CSV, the
+/// GeoJSON, the MCP tool result and the schema surface alike (EP-06, EP-07, EP-47).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Projection {
+    /// Attribute names this endpoint removes from every representation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_attributes: Vec<String>,
+}
+
+impl Projection {
+    /// Validates that every hidden attribute is a usable NGSI-LD attribute name.
+    ///
+    /// An empty or repeated name is refused rather than ignored: a steward who writes one
+    /// means to hide something, and a list that quietly drops an entry hides nothing.
+    pub fn validate(&self) -> Result<()> {
+        let mut seen = std::collections::BTreeSet::new();
+        for attribute in &self.hidden_attributes {
+            if attribute.trim().is_empty() {
+                return Err(Error::Name {
+                    field: "projection.hiddenAttributes",
+                    value: attribute.clone(),
+                    reason: "an attribute name must not be empty",
+                });
+            }
+            if !seen.insert(attribute.as_str()) {
+                return Err(Error::Name {
+                    field: "projection.hiddenAttributes",
+                    value: attribute.clone(),
+                    reason: "duplicate attribute in hiddenAttributes",
+                });
+            }
         }
         Ok(())
     }

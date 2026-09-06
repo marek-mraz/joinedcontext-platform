@@ -31,6 +31,7 @@ fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
         representations: vec![Representation::NgsiLd, Representation::GeoJson],
         rate_limit,
         file_limits: None,
+        hidden_attributes: Default::default(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         policies: Vec::new(),

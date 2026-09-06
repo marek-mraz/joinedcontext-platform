@@ -38,6 +38,7 @@ information:
         representations: vec![Representation::NgsiLd],
         rate_limit: None,
         file_limits: None,
+        hidden_attributes: Default::default(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         policies: vec![grant],

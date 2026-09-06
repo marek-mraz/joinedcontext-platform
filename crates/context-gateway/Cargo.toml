@@ -30,6 +30,8 @@ ring = "0.17"
 # xlsx is a zip of XML parts: the XML is written here, the container is not worth rewriting
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+jsonschema = { version = "0.54", default-features = false }
+
 [dev-dependencies]
 # a throwaway signing key per test run, so no private key is ever written into the repo
 base64 = "0.22"

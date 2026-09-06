@@ -144,7 +144,29 @@ pub fn visible(subject: &Subject, endpoint: &Endpoint, now: DateTime<Utc>) -> Vi
             visible.denied_attrs.extend(attrs);
         }
     }
+    // EP-61: what the endpoint does not serve is not described either, so the schema and
+    // the data cannot disagree about which attributes exist.
     visible
+        .denied_attrs
+        .extend(endpoint.hidden_attributes.iter().cloned());
+    visible
+}
+
+/// The entity types the caller may see described, across every model the endpoint
+/// publishes (EP-47).
+///
+/// Sorted and deduplicated: two model versions declare the same class, and a list that
+/// named it twice would suggest two different things exist.
+pub fn visible_types(endpoint: &Endpoint, visible: &Visible) -> Vec<String> {
+    let mut types: BTreeSet<&str> = BTreeSet::new();
+    for model in &endpoint.models {
+        for class in &model.classes {
+            if visible.covers_type(class) {
+                types.insert(class.as_str());
+            }
+        }
+    }
+    types.into_iter().map(str::to_owned).collect()
 }
 
 /// The catalogue of what this endpoint publishes (EP-46).

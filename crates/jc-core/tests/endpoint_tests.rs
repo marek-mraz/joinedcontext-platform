@@ -235,3 +235,39 @@ fn a_zero_file_limit_is_refused() {
         );
     }
 }
+
+#[test]
+fn a_hidden_attribute_list_must_name_real_attributes_once() {
+    let with_projection = |body: &str| {
+        GOLDEN.replace(
+            "  caching:\n    maxAgeSeconds: 60\n",
+            &format!("  caching:\n    maxAgeSeconds: 60\n  projection:\n{body}"),
+        )
+    };
+
+    let good = Endpoint::from_yaml(&with_projection(
+        "    hiddenAttributes:\n      - calibrationOffset\n      - deviceSerial\n",
+    ))
+    .expect("valid YAML");
+    good.validate().expect("two distinct names validate");
+    assert_eq!(
+        good.spec
+            .projection
+            .as_ref()
+            .map(|projection| projection.hidden_attributes.len()),
+        Some(2)
+    );
+
+    // An empty or repeated entry is refused: a steward who writes one means to hide
+    // something, and a list that quietly drops an entry hides nothing (EP-61).
+    for body in [
+        "    hiddenAttributes:\n      - \"\"\n",
+        "    hiddenAttributes:\n      - pm10\n      - pm10\n",
+    ] {
+        let endpoint = Endpoint::from_yaml(&with_projection(body)).expect("valid YAML");
+        assert!(
+            endpoint.validate().is_err(),
+            "an unusable hidden attribute must be refused: {body}"
+        );
+    }
+}

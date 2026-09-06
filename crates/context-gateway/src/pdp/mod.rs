@@ -41,14 +41,26 @@ impl Pdp for PolicyPdp {
         request: &Request,
         endpoint: &Endpoint,
     ) -> Verdict {
-        evaluator::evaluate(
+        let verdict = evaluator::evaluate(
             subject,
             operation,
             request,
             &endpoint.space,
             &endpoint.policies,
             now(),
-        )
+        );
+
+        // EP-61: the endpoint's own publication narrowing, folded into the one decision
+        // every representation reads, so no encoder can forget it and no new
+        // representation has to remember it.
+        match verdict {
+            Verdict::Rewrite(mut constraints) if !endpoint.hidden_attributes.is_empty() => {
+                constraints.hidden = endpoint.hidden_attributes.clone();
+                constraints.restricted = true;
+                Verdict::Rewrite(constraints)
+            }
+            verdict => verdict,
+        }
     }
 }
 

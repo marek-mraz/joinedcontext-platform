@@ -6,6 +6,11 @@ fn granted(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
 }
 
+/// No endpoint-level narrowing: the grant alone decides (EP-61).
+fn nothing() -> BTreeSet<String> {
+    BTreeSet::new()
+}
+
 fn station() -> Value {
     json!({
         "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:station-01",
@@ -23,7 +28,7 @@ fn station() -> Value {
 #[test]
 fn ungranted_attributes_are_stripped_and_the_entity_stays_valid_ngsi_ld() {
     let mut entity = station();
-    project_entity(&mut entity, &granted(&["pm10", "location"]));
+    project_entity(&mut entity, &granted(&["pm10", "location"]), &nothing());
 
     assert_eq!(entity["pm10"]["value"], json!(34.2));
     assert_eq!(entity["location"]["value"]["type"], json!("Point"));
@@ -45,7 +50,7 @@ fn ungranted_attributes_are_stripped_and_the_entity_stays_valid_ngsi_ld() {
 #[test]
 fn a_granted_relationship_survives_and_an_ungranted_one_does_not() {
     let mut entity = station();
-    project_entity(&mut entity, &granted(&["refDistrict"]));
+    project_entity(&mut entity, &granted(&["refDistrict"]), &nothing());
 
     assert_eq!(
         entity["refDistrict"]["object"],
@@ -58,7 +63,7 @@ fn a_granted_relationship_survives_and_an_ungranted_one_does_not() {
 fn an_empty_grant_list_is_a_grant_over_the_whole_entity() {
     let mut entity = station();
     let before = entity.clone();
-    project_entity(&mut entity, &BTreeSet::new());
+    project_entity(&mut entity, &BTreeSet::new(), &nothing());
 
     assert_eq!(entity, before, "no whitelist means nothing to strip");
 }
@@ -66,7 +71,7 @@ fn an_empty_grant_list_is_a_grant_over_the_whole_entity() {
 #[test]
 fn a_whole_query_answer_is_projected_entity_by_entity() {
     let mut answer = json!([station(), station()]);
-    project(&mut answer, &granted(&["pm25"]));
+    project(&mut answer, &granted(&["pm25"]), &nothing());
 
     for entity in answer.as_array().expect("an array of entities") {
         assert!(entity.get("pm25").is_some());
@@ -89,4 +94,33 @@ fn ungranted_lists_exactly_the_attributes_outside_the_grant() {
         &granted(&["pm10", "pm25", "operatorPhone", "refDistrict", "location"])
     )
     .is_empty());
+}
+
+/// EP-61: what the endpoint hides is gone whether or not the grant names a whitelist, so
+/// publishing the same space twice with different detail needs no second Policy.
+#[test]
+fn an_endpoint_can_hide_an_attribute_the_grant_allows() {
+    let mut whitelisted = station();
+    project_entity(
+        &mut whitelisted,
+        &granted(&["pm10", "operatorPhone"]),
+        &granted(&["operatorPhone"]),
+    );
+    assert_eq!(whitelisted["pm10"]["value"], json!(34.2));
+    assert!(
+        whitelisted.get("operatorPhone").is_none(),
+        "an endpoint that hides an attribute hides it from a caller the policy allows it to"
+    );
+
+    // The dangerous case: no whitelist at all means "every granted attribute", and the
+    // denial has to survive that, not be swallowed by an empty set.
+    let mut everything = station();
+    project_entity(
+        &mut everything,
+        &BTreeSet::new(),
+        &granted(&["operatorPhone"]),
+    );
+    assert!(everything.get("operatorPhone").is_none());
+    assert_eq!(everything["pm25"]["value"], json!(12.0));
+    assert_eq!(everything["type"], json!("AirQualityObserved"));
 }

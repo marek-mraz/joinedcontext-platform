@@ -308,6 +308,7 @@ fn endpoint(representations: Vec<Representation>, file_limits: Option<FileLimits
         representations,
         rate_limit: None,
         file_limits,
+        hidden_attributes: Default::default(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         policies: vec![serde_norway::from_str(

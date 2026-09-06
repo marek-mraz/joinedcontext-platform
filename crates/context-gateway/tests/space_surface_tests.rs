@@ -72,6 +72,7 @@ fn space(name: &str, policies: Vec<PolicySpec>) -> Space {
             representations: vec![Representation::NgsiLd, Representation::Mcp],
             rate_limit: None,
             file_limits: None,
+            hidden_attributes: Default::default(),
             base_path: format!("/cs/{name}"),
             models: Vec::new(),
             policies,

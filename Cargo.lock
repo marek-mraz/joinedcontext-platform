@@ -409,6 +409,7 @@ dependencies = [
  "hyper-util",
  "jc-core",
  "jcctl",
+ "jsonschema",
  "jsonwebtoken",
  "regex",
  "ring",

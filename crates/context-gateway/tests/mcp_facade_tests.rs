@@ -37,6 +37,7 @@ fn endpoint(slug: &str, representations: Vec<Representation>) -> Endpoint {
         representations,
         rate_limit: None,
         file_limits: None,
+        hidden_attributes: Default::default(),
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         policies: vec![
@@ -279,6 +280,7 @@ async fn the_tool_list_is_the_callers_grants_and_grows_with_the_token() {
             "describe_access",
             "describe_schema",
             "get_entity",
+            "list_types",
             "query_entities",
             "query_temporal",
             "upsert_entity"
@@ -486,7 +488,7 @@ async fn a_body_that_is_not_json_and_a_method_nobody_defined_answer_as_json_rpc_
         message(
             SLUG,
             None,
-            json!({ "jsonrpc": "2.0", "id": 10, "method": "resources/list" }),
+            json!({ "jsonrpc": "2.0", "id": 10, "method": "prompts/get" }),
         ),
     )
     .await;

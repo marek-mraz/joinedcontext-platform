@@ -30,7 +30,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{any, get, post};
 use axum::Router;
-use jc_core::kinds::{Operation, Representation};
+use jc_core::kinds::{Audience, Operation, Representation};
 use jc_core::ProblemDetails;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -150,6 +150,11 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/cs", get(space_catalog))
         .route("/cs/{space}", get(space_record))
         .route("/cs/{space}/ngsi-ld/v1/{*rest}", any(space_ngsi_ld))
+        .route("/cs/{space}/mcp", post(space_mcp_message))
+        .route(
+            "/api/endpoint/{slug}/.well-known/oauth-protected-resource",
+            get(protected_resource),
+        )
         .route("/api/endpoint/{slug}/schema/index.json", get(schema_index))
         .route(
             "/api/endpoint/{slug}/schema/{version}/{artifact}",
@@ -229,14 +234,14 @@ async fn space_ngsi_ld(
 /// this one.
 pub async fn ngsi_ld_request(
     gateway: Arc<Gateway>,
-    slug: &str,
+    endpoint: &Endpoint,
     method: Method,
     path: &str,
     query: &str,
     body: Option<Vec<u8>>,
     authorization: Option<HeaderValue>,
 ) -> Response<Body> {
-    let prefix = format!("/api/endpoint/{slug}/ngsi-ld/v1");
+    let prefix = format!("{}/ngsi-ld/v1", endpoint.base_path);
     let uri = match query.is_empty() {
         true => format!("{prefix}{path}"),
         false => format!("{prefix}{path}?{query}"),
@@ -254,7 +259,24 @@ pub async fn ngsi_ld_request(
             .into_response();
     };
 
-    let admitted = admit(&gateway, slug, Some(Representation::Mcp), request.headers());
+    // Admitted again from the token alone, so a tool call carries no privilege the same
+    // call over HTTP would not have (EP-26). The record says which of the two surfaces it
+    // belongs to, so a space instance re-resolves through the space table (SP-14).
+    let admitted = match endpoint.base_path.strip_prefix("/cs/") {
+        Some(space) => admit_space(
+            &gateway,
+            space,
+            Some(Representation::Mcp),
+            request.headers(),
+        )
+        .map(|(space, subject)| (Arc::clone(&space.endpoint), subject)),
+        None => admit(
+            &gateway,
+            &endpoint.slug,
+            Some(Representation::Mcp),
+            request.headers(),
+        ),
+    };
     as_ngsi_ld_error(serve_ngsi_ld(&gateway, admitted, &prefix, request).await).await
 }
 
@@ -556,7 +578,7 @@ async fn project_answer(
                 projection::permitted(entity, &constraints.id_patterns)
                     && areas.as_ref().is_none_or(|areas| areas.admits(entity))
             });
-            projection::project(&mut payload, &constraints.attrs);
+            projection::project(&mut payload, &constraints.attrs, &constraints.hidden);
         }
         entity if entity.is_object() && entity.get("id").is_some() => {
             if !projection::permitted(entity, &constraints.id_patterns)
@@ -564,7 +586,7 @@ async fn project_answer(
             {
                 return ProblemDetails::not_found().into_response();
             }
-            projection::project(&mut payload, &constraints.attrs);
+            projection::project(&mut payload, &constraints.attrs, &constraints.hidden);
         }
         // A type list, an attribute list, a problem document: not entities, nothing to
         // project.
@@ -720,6 +742,17 @@ async fn mcp_message(
     mut request: Request,
 ) -> Response<Body> {
     tenancy::strip_client_headers(&mut request);
+
+    // AG-32: a client with no token is told where to get one, instead of being refused in
+    // a way it cannot act on. A public MCP instance needs none, so it is served first.
+    let public = gateway
+        .resolver
+        .resolve(&slug)
+        .is_some_and(|endpoint| endpoint.audience == Audience::Public);
+    if !public && request.headers().get(AUTHORIZATION).is_none() {
+        return unauthorized(&gateway, &slug);
+    }
+
     let (endpoint, subject) = match admit(
         &gateway,
         &slug,
@@ -730,6 +763,16 @@ async fn mcp_message(
         Err(problem) => return *problem,
     };
 
+    mcp_answer(gateway, endpoint, subject, request).await
+}
+
+/// One JSON-RPC message, whichever surface it arrived on.
+async fn mcp_answer(
+    gateway: Arc<Gateway>,
+    endpoint: Arc<Endpoint>,
+    subject: Subject,
+    request: Request,
+) -> Response<Body> {
     let authorization = request.headers().get(AUTHORIZATION).cloned();
     let (_, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
@@ -744,6 +787,71 @@ async fn mcp_message(
         // A notification is acknowledged and nothing more: there is no state to change.
         None => StatusCode::ACCEPTED.into_response(),
     }
+}
+
+/// The space's own MCP instance, the same façade the endpoint surface runs (SP-14).
+async fn space_mcp_message(
+    State(gateway): State<Arc<Gateway>>,
+    Path(space): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (space, subject) = match admit_space(
+        &gateway,
+        &space,
+        Some(Representation::Mcp),
+        request.headers(),
+    ) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+    mcp_answer(gateway, Arc::clone(&space.endpoint), subject, request).await
+}
+
+/// The protected-resource metadata of one MCP route (RFC 9728, AG-32).
+///
+/// Answered for every slug, whether or not one resolves: the document names the resource
+/// URL the caller already typed and the realm the deployment already publishes, so it
+/// discloses nothing, and a phone that has to discover its authorization server always
+/// can (R20, EP-23).
+async fn protected_resource(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+) -> Response<Body> {
+    let Some(issuer) = gateway.verifier.as_ref().map(|verifier| verifier.issuer()) else {
+        // No realm configured is a deployment that serves public endpoints only; there is
+        // no authorization server to point a client at.
+        return ProblemDetails::not_found().into_response();
+    };
+    json_response(&serde_json::json!({
+        "resource": format!("{}/api/endpoint/{slug}/mcp", gateway.base_url()),
+        "authorization_servers": [issuer],
+        "bearer_methods_supported": ["header"],
+        "resource_documentation": format!("{}/api/endpoint/{slug}/", gateway.base_url()),
+    }))
+}
+
+/// The `401` a client needs in order to find its authorization server (RFC 9728, AG-32).
+///
+/// Sent for every unauthenticated call that is not on a public MCP instance, whether the
+/// slug resolves or not, so the answer is the same for an endpoint that needs a login and
+/// for one that does not exist (R20).
+fn unauthorized(gateway: &Gateway, slug: &str) -> Response<Body> {
+    let metadata = format!(
+        "{}/api/endpoint/{slug}/.well-known/oauth-protected-resource",
+        gateway.base_url()
+    );
+    let mut response = ProblemDetails::new(401, "unauthorized", "Unauthorized")
+        .with_detail("this endpoint needs an access token; its authorization server is named by the resource metadata")
+        .into_response();
+    if let Ok(challenge) =
+        HeaderValue::from_str(&format!("Bearer resource_metadata=\"{metadata}\""))
+    {
+        response
+            .headers_mut()
+            .insert(axum::http::header::WWW_AUTHENTICATE, challenge);
+    }
+    response
 }
 
 /// What the caller may do here, from the same PDP that enforces it (T-0163, EP-55).
@@ -1060,7 +1168,7 @@ async fn query_entities(
                 && areas.as_ref().is_none_or(|areas| areas.admits(entity))
         });
     }
-    projection::project(&mut entities, &constraints.attrs);
+    projection::project(&mut entities, &constraints.attrs, &constraints.hidden);
     Ok((entities, constraints.restricted))
 }
 
@@ -1372,7 +1480,7 @@ async fn paged_entities(
     }
 
     let mut entities = Value::Array(collected);
-    projection::project(&mut entities, &constraints.attrs);
+    projection::project(&mut entities, &constraints.attrs, &constraints.hidden);
     Ok((entities, constraints.restricted))
 }
 

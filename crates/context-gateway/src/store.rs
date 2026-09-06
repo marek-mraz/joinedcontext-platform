@@ -12,7 +12,7 @@ use jc_core::kinds::{
     Audience, ContextSpaceSpec, DataModelSpec, EndpointSpec, PolicySpec, Representation,
 };
 use jcctl::loader::{RawManifest, Repository};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -66,6 +66,10 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
             representations: spec.enabled_representations,
             rate_limit: spec.rate_limits,
             file_limits: spec.file_limits,
+            hidden_attributes: spec
+                .projection
+                .map(|projection| projection.hidden_attributes.into_iter().collect())
+                .unwrap_or_default(),
             base_path: format!("/api/endpoint/{}", spec.slug),
         });
     }
@@ -103,6 +107,9 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
                 representations: vec![Representation::NgsiLd, Representation::Mcp],
                 rate_limit: None,
                 file_limits: None,
+                // A space is the whole space: narrowing is a decision of a published
+                // endpoint, and the canonical surface publishes nothing of its own.
+                hidden_attributes: BTreeSet::new(),
                 policies: policies.get(&key).cloned().unwrap_or_default(),
                 models: models.get(&key).cloned().unwrap_or_default(),
                 base_path: format!("/cs/{}", id.name),

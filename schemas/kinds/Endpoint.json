@@ -157,6 +157,17 @@
           ],
           "description": "Optional NGSI-LD Policy URN attached to this endpoint."
         },
+        "projection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Projection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional publication narrowing applied to every representation (EP-61)."
+        },
         "rateLimits": {
           "anyOf": [
             {
@@ -317,6 +328,20 @@
           "type": "string"
         }
       ]
+    },
+    "Projection": {
+      "additionalProperties": false,
+      "description": "What this Endpoint never serves, whatever the Policy set allows (EP-61).\n\nA publication decision, not an authorization one: the gateway intersects this list with the caller's policy projection, so an Endpoint can subtract from a grant and never add to it. The same space can therefore be published twice with different amounts of detail without writing a second Policy, and because the subtraction happens where every representation reads its entities, a hidden attribute is missing from the CSV, the GeoJSON, the MCP tool result and the schema surface alike (EP-06, EP-07, EP-47).",
+      "properties": {
+        "hiddenAttributes": {
+          "description": "Attribute names this endpoint removes from every representation.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
     },
     "RateLimits": {
       "additionalProperties": false,
