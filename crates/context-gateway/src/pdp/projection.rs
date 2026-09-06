@@ -63,3 +63,26 @@ pub fn ungranted<'a>(entity: &'a Value, granted: &BTreeSet<String>) -> Vec<&'a s
 pub fn was_projected(before: &Map<String, Value>, after: &Map<String, Value>) -> bool {
     before.len() != after.len()
 }
+
+/// Whether an entity may be returned at all, given the anchored id patterns of the
+/// matching grants (R24, GW11).
+///
+/// No pattern is no restriction. A pattern that does not compile matches nothing: a
+/// grant the gateway cannot evaluate must not become a grant that lets everything
+/// through. `jcctl validate` and the Portal reject an uncompilable pattern before it is
+/// committed, so this is the second line, not the first.
+pub fn permitted(entity: &Value, id_patterns: &BTreeSet<String>) -> bool {
+    if id_patterns.is_empty() {
+        return true;
+    }
+    let Some(id) = entity
+        .get("id")
+        .or_else(|| entity.get("@id"))
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    id_patterns
+        .iter()
+        .any(|pattern| regex::Regex::new(pattern).is_ok_and(|compiled| compiled.is_match(id)))
+}

@@ -82,9 +82,44 @@ pub fn check(
     check_no_smuggled_policy(entity)?;
     check_id(entity, space, org_domain)?;
     check_type(entity, constraints)?;
-    check_attributes(entity, constraints)?;
-    check_scope(entity, constraints)?;
-    check_location(entity, constraints)?;
+    check_fragment(entity, constraints)
+}
+
+/// Checks a payload that carries no identifier of its own: the attribute fragment of a
+/// `PATCH .../attrs` (GW17, R29, GW16).
+///
+/// The identifier of such a write is in the path, and the enforcement point checks it with
+/// [`check_identifier`] before calling this.
+pub fn check_fragment(fragment: &Value, constraints: &Constraints) -> Result<(), Refusal> {
+    check_no_smuggled_policy(fragment)?;
+    check_attributes(fragment, constraints)?;
+    check_scope(fragment, constraints)?;
+    check_location(fragment, constraints)
+}
+
+/// Checks one entity identifier against the organization and the space (PF-10, PF-42).
+///
+/// `declared_type` is the `type` the payload states, when it states one: the URN carries
+/// the type too, and the two must agree (PF-44).
+pub fn check_identifier(
+    raw: &str,
+    declared_type: Option<&str>,
+    space: &str,
+    org_domain: &str,
+) -> Result<(), Refusal> {
+    let urn: Urn = raw
+        .parse()
+        .map_err(|_| Refusal::MalformedId(raw.to_owned()))?;
+
+    if urn.org_domain() != org_domain || urn.space() != space {
+        return Err(Refusal::ForeignUrn {
+            id: raw.to_owned(),
+            space: space.to_owned(),
+        });
+    }
+    if declared_type.is_some_and(|declared| declared != urn.entity_type()) {
+        return Err(Refusal::MalformedId(raw.to_owned()));
+    }
     Ok(())
 }
 
@@ -112,32 +147,19 @@ fn check_location(entity: &Value, constraints: &Constraints) -> Result<(), Refus
     }
 }
 
-/// The id must be an NGSI-LD URN of this organization and this space (PF-10, PF-42).
+/// The id the payload carries must be an NGSI-LD URN of this organization and this space.
 fn check_id(entity: &Value, space: &str, org_domain: &str) -> Result<(), Refusal> {
     let raw = entity
         .get("id")
         .or_else(|| entity.get("@id"))
         .and_then(Value::as_str)
         .ok_or_else(|| Refusal::MalformedId(String::new()))?;
-
-    let urn: Urn = raw
-        .parse()
-        .map_err(|_| Refusal::MalformedId(raw.to_owned()))?;
-
-    if urn.org_domain() != org_domain || urn.space() != space {
-        return Err(Refusal::ForeignUrn {
-            id: raw.to_owned(),
-            space: space.to_owned(),
-        });
-    }
-
-    // The URN carries the type, and it must be the type the payload declares (PF-44).
-    if let Some(declared) = entity.get("type").and_then(Value::as_str) {
-        if declared != urn.entity_type() {
-            return Err(Refusal::MalformedId(raw.to_owned()));
-        }
-    }
-    Ok(())
+    check_identifier(
+        raw,
+        entity.get("type").and_then(Value::as_str),
+        space,
+        org_domain,
+    )
 }
 
 fn check_type(entity: &Value, constraints: &Constraints) -> Result<(), Refusal> {
