@@ -945,11 +945,7 @@ async fn schema_index(
     };
 
     let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
-    let document = schema::index(&endpoint, &visible, |body| {
-        serde_json::to_vec(body)
-            .map(|bytes| sha256_hex(&bytes))
-            .unwrap_or_default()
-    });
+    let document = schema::index(&endpoint, &visible, sha256_hex);
     revalidated(&document, "application/json", request.headers())
 }
 
@@ -989,19 +985,15 @@ async fn schema_artifact(
     if models.is_empty() {
         return ProblemDetails::not_found().into_response();
     }
-    // SHACL, OWL, RDF, LinkML and Markdown are Model Tools output: the gateway cannot
-    // produce them, and says so rather than handing back a formalism nobody asked for.
-    if wanted == schema::Artifact::Uncompiled {
-        return (
-            StatusCode::NOT_ACCEPTABLE,
-            ProblemDetails::new(406, "not-acceptable", "Representation Not Served").with_detail(
-                "this formalism is served once Model Tools has committed it beside the model",
-            ),
-        )
-            .into_response();
+    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
+    if !wanted.is_json() {
+        // SHACL, OWL, RDF, LinkML and Markdown are rendered from the projected model rather
+        // than served from a committed file, so no formalism can carry a slot the grant
+        // forbids (T-0284, EP-47).
+        let body = schema::render(&models, wanted, &visible);
+        return revalidated_text(body.into_bytes(), wanted.media_type(), request.headers());
     }
 
-    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
     let mut redacted = Vec::new();
     let document = match wanted {
         schema::Artifact::JsonSchema => schema::json_schema(&models, &visible, &mut redacted),
@@ -1021,16 +1013,27 @@ fn revalidated(document: &Value, media_type: &str, headers: &HeaderMap) -> Respo
         tracing::error!("a schema document does not serialize");
         return ProblemDetails::internal().into_response();
     };
+    revalidated_text(bytes, media_type, headers)
+}
+
+/// The same, for a document that is already the bytes the caller receives (T-0284).
+fn revalidated_text(bytes: Vec<u8>, media_type: &str, headers: &HeaderMap) -> Response<Body> {
     let etag = format!("\"{}\"", sha256_hex(&bytes));
 
     let mut response = if matches_etag(headers, &etag) {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
-        (
-            [(axum::http::header::CONTENT_TYPE, media_type)],
-            Body::from(bytes),
-        )
-            .into_response()
+        match HeaderValue::from_str(media_type) {
+            Ok(content_type) => (
+                [(axum::http::header::CONTENT_TYPE, content_type)],
+                Body::from(bytes),
+            )
+                .into_response(),
+            Err(_) => {
+                tracing::error!(media_type, "a schema media type is not a header value");
+                return ProblemDetails::internal().into_response();
+            }
+        }
     };
     let headers = response.headers_mut();
     if let Ok(value) = HeaderValue::from_str(&etag) {

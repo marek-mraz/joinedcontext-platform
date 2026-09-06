@@ -145,6 +145,36 @@ async fn call(
     )
 }
 
+/// The same call, for the formalisms whose body is text rather than JSON (T-0284).
+async fn text(
+    models: Vec<Model>,
+    request: Request<Body>,
+) -> (StatusCode, Vec<(String, String)>, String) {
+    let response = app(models)
+        .oneshot(request)
+        .await
+        .expect("the gateway answers");
+    let status = response.status();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                value.to_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    let body = axum::body::to_bytes(response.into_body(), 256 * 1024)
+        .await
+        .expect("a readable body");
+    (
+        status,
+        headers,
+        String::from_utf8(body.to_vec()).expect("a text document"),
+    )
+}
+
 fn get(path: &str) -> Request<Body> {
     Request::builder()
         .uri(path)
@@ -207,6 +237,49 @@ async fn the_index_describes_what_this_endpoint_publishes() {
         header(&headers, "etag"),
         Some(format!("\"{digest}\"").as_str())
     );
+
+    // All seven documents of API/02 section 7a are listed, and each digest is the digest of
+    // the projection a caller would fetch rather than of a file on disk (EP-46, EP-48).
+    let artifacts = models[0]["artifacts"].as_object().expect("artifacts");
+    let mut names: Vec<&str> = artifacts.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            "context.jsonld",
+            "model.linkml.yaml",
+            "model.md",
+            "model.owl.ttl",
+            "model.rdf.ttl",
+            "model.schema.json",
+            "model.shacl.ttl",
+        ]
+    );
+    for (name, media_type) in [
+        ("model.shacl.ttl", "text/turtle"),
+        ("model.owl.ttl", "text/turtle; profile=\"owl\""),
+        ("model.rdf.ttl", "text/turtle"),
+        ("model.linkml.yaml", "text/yaml"),
+        ("model.md", "text/markdown"),
+    ] {
+        assert_eq!(artifacts[name]["type"], json!(media_type), "{name}");
+        let listed = artifacts[name]["sha256"].as_str().expect("a digest");
+        let (_, headers, body) = text(
+            vec![air_quality(true)],
+            get(&format!("/api/endpoint/{SLUG}/schema/v1/{name}")),
+        )
+        .await;
+        assert_eq!(
+            header(&headers, "etag"),
+            Some(format!("\"{listed}\"").as_str()),
+            "{name}: the index and the document disagree about the bytes"
+        );
+        assert_eq!(
+            artifacts[name]["bytes"].as_u64(),
+            Some(body.len() as u64),
+            "{name}"
+        );
+    }
 }
 
 /// EP-47 and the task's security property: a slot the endpoint's policy set forbids is
@@ -315,26 +388,192 @@ async fn content_negotiation_serves_what_the_gateway_has_and_refuses_the_rest() 
     );
     assert!(document["@context"].is_array());
 
-    // Turtle is SHACL, OWL and RDF; YAML is the LinkML source. Neither is in the checkout
-    // until Model Tools commits it (T-0168, T-0169).
-    for accept in ["text/turtle", "text/turtle; profile=\"owl\"", "text/yaml"] {
-        let (status, _, problem) = call(vec![air_quality(true)], accepting(&path, accept)).await;
-        assert_eq!(status, StatusCode::NOT_ACCEPTABLE, "{accept}");
-        assert_eq!(problem["status"], json!(406));
-    }
-    // And the same by name, which is how the index would link them.
-    for name in [
-        "model.shacl.ttl",
-        "model.owl.ttl",
-        "model.linkml.yaml",
-        "model.md",
+    // Turtle picks the SHACL, the `owl` profile the ontology, YAML the LinkML source: each
+    // formalism the gateway renders from the projection has its own media type (EP-49).
+    for (accept, media_type) in [
+        ("text/turtle", "text/turtle"),
+        (
+            "text/turtle; profile=\"owl\"",
+            "text/turtle; profile=\"owl\"",
+        ),
+        ("text/yaml", "text/yaml"),
+        ("text/markdown", "text/markdown"),
     ] {
-        let (status, _, _) = call(
+        let (status, headers, body) = text(vec![air_quality(true)], accepting(&path, accept)).await;
+        assert_eq!(status, StatusCode::OK, "{accept}");
+        assert_eq!(
+            header(&headers, "content-type"),
+            Some(media_type),
+            "{accept}"
+        );
+        assert!(!body.trim().is_empty(), "{accept} answered an empty body");
+    }
+
+    // And the same by name, which is how the index links them.
+    for (name, media_type) in [
+        ("model.shacl.ttl", "text/turtle"),
+        ("model.owl.ttl", "text/turtle; profile=\"owl\""),
+        ("model.rdf.ttl", "text/turtle"),
+        ("model.linkml.yaml", "text/yaml"),
+        ("model.md", "text/markdown"),
+    ] {
+        let (status, headers, _) = text(
             vec![air_quality(true)],
             get(&format!("/api/endpoint/{SLUG}/schema/v1/{name}")),
         )
         .await;
-        assert_eq!(status, StatusCode::NOT_ACCEPTABLE, "{name}");
+        assert_eq!(status, StatusCode::OK, "{name}");
+        assert_eq!(header(&headers, "content-type"), Some(media_type), "{name}");
+    }
+
+    // A name no formalism answers to is still a miss, not an empty document.
+    let (status, _, _) = call(
+        vec![air_quality(true)],
+        get(&format!("/api/endpoint/{SLUG}/schema/v1/model.avro.json")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// EP-47: what the JSON Schema hides, every other formalism hides too. This is the whole
+/// reason the gateway renders them instead of serving the committed bytes (T-0284).
+#[tokio::test]
+async fn a_forbidden_slot_is_absent_from_every_formalism() {
+    for name in [
+        "model.shacl.ttl",
+        "model.owl.ttl",
+        "model.rdf.ttl",
+        "model.linkml.yaml",
+        "model.md",
+    ] {
+        let (status, _, body) = text(
+            vec![air_quality(true)],
+            get(&format!("/api/endpoint/{SLUG}/schema/v1/{name}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name}");
+
+        // The grant names pm10, pm25 and location of one type, and nothing else.
+        assert!(body.contains("pm10"), "{name} lost a granted slot");
+        assert!(
+            !body.contains("internalNote"),
+            "{name} carries a slot the grant forbids:\n{body}"
+        );
+        assert!(
+            !body.contains("InternalIncident"),
+            "{name} carries a class the grant forbids:\n{body}"
+        );
+    }
+}
+
+/// The rendered Turtle says what a validator needs and nothing the projection cannot back.
+#[tokio::test]
+async fn the_shacl_shape_targets_the_class_and_is_never_closed() {
+    let (status, _, shapes) = text(
+        vec![air_quality(true)],
+        get(&format!("/api/endpoint/{SLUG}/schema/v1/model.shacl.ttl")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert!(shapes.contains("@prefix sh: <http://www.w3.org/ns/shacl#> ."));
+    assert!(shapes.contains("a sh:NodeShape"));
+    assert!(shapes
+        .contains("sh:targetClass <urn:joinedcontext:model:bb-air-quality:v1:AirQualityObserved>"));
+    assert!(
+        shapes.contains("sh:path <urn:joinedcontext:model:bb-air-quality:v1:pm10>"),
+        "{shapes}"
+    );
+    assert!(
+        shapes.contains("sh:datatype xsd:double"),
+        "a numeric slot carries its datatype:\n{shapes}"
+    );
+    assert!(
+        shapes.contains("sh:closed false"),
+        "a projected shape is never closed: the entity carries slots this caller may not see"
+    );
+    // `pm10` is required in the compiled schema and survives the projection; `internalNote`
+    // was required too and was removed, so no shape may still demand it.
+    assert!(shapes.contains("sh:minCount 1"), "{shapes}");
+}
+
+/// The OWL and the RDFS renderings name the same terms as the SHACL, so a consumer that
+/// reads two of them sees one vocabulary (T-0284).
+#[tokio::test]
+async fn the_rdf_family_shares_one_vocabulary() {
+    let mut documents = Vec::new();
+    for name in ["model.shacl.ttl", "model.owl.ttl", "model.rdf.ttl"] {
+        let (_, _, body) = text(
+            vec![air_quality(true)],
+            get(&format!("/api/endpoint/{SLUG}/schema/v1/{name}")),
+        )
+        .await;
+        documents.push(body);
+    }
+    for document in &documents {
+        assert!(
+            document.contains("urn:joinedcontext:model:bb-air-quality:v1:pm10"),
+            "{document}"
+        );
+    }
+    assert!(documents[1].contains("a owl:Class"), "{}", documents[1]);
+    assert!(
+        documents[1].contains("owl:DatatypeProperty"),
+        "{}",
+        documents[1]
+    );
+    assert!(documents[2].contains("a rdfs:Class"), "{}", documents[2]);
+    assert!(documents[2].contains("a rdf:Property"), "{}", documents[2]);
+}
+
+/// The LinkML source and the Markdown describe the projection in their own shapes.
+#[tokio::test]
+async fn the_linkml_and_the_documentation_describe_the_projection() {
+    let (_, _, source) = text(
+        vec![air_quality(true)],
+        get(&format!("/api/endpoint/{SLUG}/schema/v1/model.linkml.yaml")),
+    )
+    .await;
+    let parsed: Value = serde_norway::from_str(&source).expect("the rendered LinkML is YAML");
+    assert_eq!(parsed["id"], "urn:joinedcontext:model:bb-air-quality:v1");
+    assert_eq!(parsed["name"], "bb-air-quality");
+    let attributes = &parsed["classes"]["AirQualityObserved"]["attributes"];
+    assert_eq!(attributes["pm10"]["range"], "float");
+    assert!(
+        attributes.get("internalNote").is_none(),
+        "the LinkML carries only the granted slots"
+    );
+    assert!(parsed["classes"].get("InternalIncident").is_none());
+
+    let (_, _, docs) = text(
+        vec![air_quality(true)],
+        get(&format!("/api/endpoint/{SLUG}/schema/v1/model.md")),
+    )
+    .await;
+    assert!(docs.starts_with("# bb-air-quality 1.4.0"), "{docs}");
+    assert!(docs.contains("## AirQualityObserved"), "{docs}");
+    assert!(docs.contains("| pm10 | float | yes |"), "{docs}");
+}
+
+/// A model with no committed artifacts renders every formalism from the grant, so the
+/// surface answers the same seven names either way (EP-46).
+#[tokio::test]
+async fn a_model_without_artifacts_still_answers_every_formalism() {
+    for name in [
+        "model.shacl.ttl",
+        "model.owl.ttl",
+        "model.rdf.ttl",
+        "model.linkml.yaml",
+        "model.md",
+    ] {
+        let (status, _, body) = text(
+            vec![air_quality(false)],
+            get(&format!("/api/endpoint/{SLUG}/schema/v1/{name}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name}");
+        assert!(body.contains("pm10"), "{name}: {body}");
+        assert!(!body.contains("internalNote"), "{name}: {body}");
     }
 }
 

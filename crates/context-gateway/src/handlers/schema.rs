@@ -10,6 +10,7 @@
 //! slot the caller may not read is absent, and named in `redactedSlots` so the absence is
 //! visible rather than mysterious (EP-47).
 
+use super::formalisms;
 use crate::pdp::evaluator::{effective, granted_attrs, granted_types, Subject};
 use crate::resolver::{Endpoint, Model};
 use chrono::{DateTime, Utc};
@@ -39,6 +40,15 @@ const STRUCTURAL: &[&str] = &[
     "deletedAt",
 ];
 
+/// The media type of a Turtle document (EP-49).
+pub const TURTLE: &str = "text/turtle";
+/// The media type the OWL rendering is negotiated by, a Turtle profile (EP-49).
+pub const TURTLE_OWL: &str = "text/turtle; profile=\"owl\"";
+/// The media type of the LinkML source (EP-49).
+pub const YAML: &str = "text/yaml";
+/// The media type of the human documentation (EP-49).
+pub const MARKDOWN: &str = "text/markdown";
+
 /// Which schema document was asked for (EP-49).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Artifact {
@@ -46,8 +56,16 @@ pub enum Artifact {
     JsonSchema,
     /// The JSON-LD `@context` of the model (DM-05).
     Context,
-    /// A formalism only Model Tools produces: SHACL, OWL, RDF, LinkML, Markdown.
-    Uncompiled,
+    /// The SHACL shapes, rendered from the projection (T-0284).
+    Shacl,
+    /// The OWL ontology, rendered from the projection (T-0284).
+    Owl,
+    /// The RDFS rendering of the projection (T-0284).
+    Rdf,
+    /// The LinkML source of the projection (T-0284).
+    LinkMl,
+    /// The human documentation of the projection (T-0284).
+    Markdown,
 }
 
 impl Artifact {
@@ -55,9 +73,42 @@ impl Artifact {
     pub fn media_type(self) -> &'static str {
         match self {
             Artifact::JsonSchema => JSON_SCHEMA,
-            _ => JSON_LD,
+            Artifact::Context => JSON_LD,
+            Artifact::Shacl | Artifact::Rdf => TURTLE,
+            Artifact::Owl => TURTLE_OWL,
+            Artifact::LinkMl => YAML,
+            Artifact::Markdown => MARKDOWN,
         }
     }
+
+    /// Whether the artifact is a JSON document rather than a rendered text one.
+    pub fn is_json(self) -> bool {
+        matches!(self, Artifact::JsonSchema | Artifact::Context)
+    }
+
+    /// The file name this artifact is published under (API/02 section 7a).
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Artifact::JsonSchema => "model.schema.json",
+            Artifact::Context => "context.jsonld",
+            Artifact::Shacl => "model.shacl.ttl",
+            Artifact::Owl => "model.owl.ttl",
+            Artifact::Rdf => "model.rdf.ttl",
+            Artifact::LinkMl => "model.linkml.yaml",
+            Artifact::Markdown => "model.md",
+        }
+    }
+
+    /// The seven documents an endpoint publishes about one major (EP-46).
+    pub const ALL: [Artifact; 7] = [
+        Artifact::LinkMl,
+        Artifact::JsonSchema,
+        Artifact::Context,
+        Artifact::Shacl,
+        Artifact::Owl,
+        Artifact::Rdf,
+        Artifact::Markdown,
+    ];
 }
 
 /// Names the artifact behind one path segment, or `None` when the surface has no such
@@ -69,27 +120,62 @@ pub fn artifact_of(segment: &str, accept: &str) -> Option<Artifact> {
     match segment {
         "json-schema" | "model.schema.json" => Some(Artifact::JsonSchema),
         "context.jsonld" | "context" => Some(Artifact::Context),
+        "model.shacl.ttl" | "shacl" => Some(Artifact::Shacl),
+        "model.owl.ttl" | "owl" => Some(Artifact::Owl),
+        "model.rdf.ttl" | "rdf" => Some(Artifact::Rdf),
+        "model.linkml.yaml" | "linkml" => Some(Artifact::LinkMl),
+        "model.md" | "docs" => Some(Artifact::Markdown),
         "model" => Some(negotiated(accept)),
-        // The names Model Tools generates, answered 406 rather than 404: the document
-        // exists in the model, it is the compiled form the checkout has not got.
-        _ if segment.ends_with(".ttl")
-            || segment.ends_with(".linkml.yaml")
-            || segment.ends_with(".md") =>
-        {
-            Some(Artifact::Uncompiled)
-        }
         _ => None,
     }
 }
 
 /// The formalism an `Accept` header asks `schema/v{major}/model` for (EP-49).
+///
+/// `text/turtle` alone is the SHACL, which is what a validator wants; the OWL is the same
+/// media type with the `owl` profile, so the two share a name without sharing an answer.
 fn negotiated(accept: &str) -> Artifact {
-    if accept.contains("turtle") || accept.contains("yaml") || accept.contains("markdown") {
-        Artifact::Uncompiled
+    if accept.contains("turtle") {
+        if accept.contains("owl") {
+            Artifact::Owl
+        } else if accept.contains("rdf") {
+            Artifact::Rdf
+        } else {
+            Artifact::Shacl
+        }
+    } else if accept.contains("yaml") {
+        Artifact::LinkMl
+    } else if accept.contains("markdown") {
+        Artifact::Markdown
     } else if accept.contains("ld+json") {
         Artifact::Context
     } else {
         Artifact::JsonSchema
+    }
+}
+
+/// One rendered formalism, as the caller receives it (T-0284, EP-47).
+///
+/// Every non-JSON formalism is built from the projected JSON Schema rather than from a
+/// committed file, so a slot the projection removed cannot reappear in a Turtle document.
+pub fn render(models: &[&Model], wanted: Artifact, visible: &Visible) -> String {
+    let mut redacted = Vec::new();
+    let schema = json_schema(models, visible, &mut redacted);
+    let empty = Map::new();
+    let defs = schema
+        .get("$defs")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let classes = formalisms::classes(models, defs);
+
+    match wanted {
+        Artifact::Shacl => formalisms::shacl(&classes),
+        Artifact::Owl => formalisms::owl(&classes),
+        Artifact::Rdf => formalisms::rdf(&classes),
+        Artifact::LinkMl => formalisms::linkml(models, &classes),
+        Artifact::Markdown => formalisms::markdown(models, &classes),
+        // The two JSON documents have their own builders; this is not the way to them.
+        Artifact::JsonSchema | Artifact::Context => String::new(),
     }
 }
 
@@ -174,7 +260,7 @@ pub fn visible_types(endpoint: &Endpoint, visible: &Visible) -> Vec<String> {
 /// Only the artifacts the gateway can actually serve are listed, with the size and digest
 /// of the projected document rather than of the file on disk: what a client fetches is
 /// the projection, so that is what its `ETag` has to match.
-pub fn index(endpoint: &Endpoint, visible: &Visible, digest: impl Fn(&Value) -> String) -> Value {
+pub fn index(endpoint: &Endpoint, visible: &Visible, digest: impl Fn(&[u8]) -> String) -> Value {
     let mut models = Vec::new();
     for model in &endpoint.models {
         let mut redacted = Vec::new();
@@ -195,22 +281,51 @@ pub fn index(endpoint: &Endpoint, visible: &Visible, digest: impl Fn(&Value) -> 
             "semver": model.version,
             "types": types,
             "redactedSlots": redacted,
-            "artifacts": {
-                "model.schema.json": descriptor(&schema, JSON_SCHEMA, &digest),
-                "context.jsonld": descriptor(&context, JSON_LD, &digest),
-            },
+            "artifacts": artifacts(std::slice::from_ref(&model), visible, &schema, &context, &digest),
         }));
     }
 
     json!({ "endpoint": endpoint.slug, "models": models })
 }
 
+/// The seven documents one model publishes, each described by the projection a caller would
+/// actually fetch rather than by the file on disk (EP-46, EP-48).
+fn artifacts(
+    models: &[&Model],
+    visible: &Visible,
+    schema: &Value,
+    context: &Value,
+    digest: &impl Fn(&[u8]) -> String,
+) -> Value {
+    let mut described = Map::new();
+    for wanted in Artifact::ALL {
+        let entry = match wanted {
+            Artifact::JsonSchema => descriptor(schema, JSON_SCHEMA, digest),
+            Artifact::Context => descriptor(context, JSON_LD, digest),
+            other => text_descriptor(&render(models, other, visible), other.media_type(), digest),
+        };
+        described.insert(wanted.file_name().to_owned(), entry);
+    }
+    Value::Object(described)
+}
+
 /// One entry of the index's `artifacts` map.
-fn descriptor(document: &Value, media_type: &str, digest: impl Fn(&Value) -> String) -> Value {
+fn descriptor(document: &Value, media_type: &str, digest: impl Fn(&[u8]) -> String) -> Value {
+    let body = serde_json::to_vec(document).unwrap_or_default();
     json!({
         "type": media_type,
-        "bytes": serde_json::to_vec(document).map(|bytes| bytes.len()).unwrap_or_default(),
-        "sha256": digest(document),
+        "bytes": body.len(),
+        "sha256": digest(&body),
+    })
+}
+
+/// The same, for a rendered text document: the digest is of the bytes the caller receives, so
+/// the index and the `ETag` of the document agree.
+fn text_descriptor(body: &str, media_type: &str, digest: &impl Fn(&[u8]) -> String) -> Value {
+    json!({
+        "type": media_type,
+        "bytes": body.len(),
+        "sha256": digest(body.as_bytes()),
     })
 }
 
