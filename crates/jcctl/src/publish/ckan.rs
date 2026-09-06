@@ -12,7 +12,7 @@
 
 use crate::loader::RawManifest;
 use jc_core::kinds::ckan::{CkanInstanceSpec, CkanPublication};
-use jc_core::kinds::{EndpointSpec, Representation};
+use jc_core::kinds::{Audience, EndpointSpec, Representation};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -134,7 +134,8 @@ pub fn package(
         "owner_org": organization,
         "title": text(record.get("dct:title")).unwrap_or_else(|| name.to_owned()),
         "url": format!("{url}/"),
-        "resources": resources(&spec.enabled_representations, &url),
+        "private": spec.audience != Audience::Public,
+        "resources": resources(&spec.enabled_representations, &url, record),
         "extras": extras(record, &url),
     });
     if let Some(notes) = text(record.get("dct:description")) {
@@ -213,11 +214,12 @@ pub fn withdraw(api: &mut impl CkanApi, name: &str) -> Result<Outcome, PublishEr
     Ok(Outcome::Withdrawn)
 }
 
-/// One resource per enabled representation, plus the schema surface (EP-64).
+/// One resource per enabled representation, the schema index, and every schema
+/// artifact the record lists (EP-64, EP-68).
 ///
 /// The URL is always the representation's own URL under the Endpoint, so a download
 /// passes the gateway and its policy set rather than a copy nobody governs (EP-66).
-fn resources(enabled: &[Representation], url: &str) -> Value {
+fn resources(enabled: &[Representation], url: &str, record: &Value) -> Value {
     let mut resources: Vec<Value> = enabled
         .iter()
         .map(|representation| {
@@ -238,7 +240,61 @@ fn resources(enabled: &[Representation], url: &str) -> Value {
         "format": "JSON",
         "mimetype": "application/json",
     }));
+    resources.extend(schema_resources(record));
     Value::Array(resources)
+}
+
+/// One resource per schema artifact the record lists, so a citizen browsing the catalogue
+/// finds the model in every formalism next to the data itself (EP-68).
+///
+/// Read off the DCAT-AP record rather than rebuilt: a distribution with an `spdx:checksum`
+/// is a schema artifact, and the digest travels into CKAN's own `hash` field so a download
+/// can be checked without asking the Endpoint again.
+fn schema_resources(record: &Value) -> Vec<Value> {
+    let Some(distributions) = record.get("dcat:distribution").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    distributions
+        .iter()
+        .filter_map(|distribution| {
+            let sha256 = distribution
+                .get("spdx:checksum")?
+                .get("spdx:checksumValue")?
+                .as_str()?;
+            let url = distribution.get("dcat:accessURL")?.as_str()?;
+            let mut resource = json!({
+                "name": text(distribution.get("dct:title")).unwrap_or_else(|| url.to_owned()),
+                "url": url,
+                "format": format_of(url),
+                "hash": sha256,
+                "hash_algorithm": "sha256",
+            });
+            if let Some(media_type) = distribution.get("dcat:mediaType") {
+                resource["mimetype"] = media_type.clone();
+            }
+            if let Some(bytes) = distribution.get("dcat:byteSize") {
+                resource["size"] = bytes.clone();
+            }
+            Some(resource)
+        })
+        .collect()
+}
+
+/// The CKAN format label of one schema artifact, by the file name the Endpoint serves it
+/// under (EP-46). An unknown artifact keeps its extension rather than being dropped.
+fn format_of(url: &str) -> String {
+    let file_name = url.rsplit('/').next().unwrap_or(url);
+    match file_name {
+        "model.linkml.yaml" => "LinkML",
+        "model.schema.json" => "JSON Schema",
+        "context.jsonld" => "JSON-LD",
+        "model.shacl.ttl" => "SHACL",
+        "model.owl.ttl" => "OWL",
+        "model.rdf.ttl" => "RDF",
+        "model.md" => "Markdown",
+        _ => return file_name.rsplit('.').next().unwrap_or("").to_uppercase(),
+    }
+    .to_owned()
 }
 
 /// Path under the Endpoint, CKAN format, media type and resource title (API/02).
@@ -414,6 +470,9 @@ fn managed_resources(resources: Option<&Value>) -> Vec<Value> {
                         "url": resource.get("url"),
                         "format": resource.get("format"),
                         "mimetype": resource.get("mimetype"),
+                        // A regenerated model keeps its file names and changes its digest;
+                        // without this a stale hash would sit in CKAN as "unchanged".
+                        "hash": resource.get("hash"),
                     })
                 })
                 .collect()

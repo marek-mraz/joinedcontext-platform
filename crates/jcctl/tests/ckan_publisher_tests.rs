@@ -467,3 +467,191 @@ fn a_refusal_from_ckan_is_reported_without_a_credential() {
     assert!(message.contains("Authorization Error"), "{message}");
     assert!(!message.contains(TOKEN), "{message}");
 }
+
+/// The record of an endpoint that also serves its model, as EP-68 describes it.
+fn record_with_schema() -> Value {
+    let base = "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y";
+    let mut record = record();
+    record["dcat:distribution"] = json!([
+        {
+            "@type": "dcat:Distribution",
+            "dct:title": "NGSI-LD API",
+            "dcat:accessURL": format!("{base}/ngsi-ld/v1/"),
+            "dcat:mediaType": "application/ld+json"
+        },
+        {
+            "@type": "dcat:Distribution",
+            "dct:title": "bb-air-quality model.shacl.ttl",
+            "dcat:accessURL": format!("{base}/schema/v2/model.shacl.ttl"),
+            "dcat:mediaType": "text/turtle",
+            "dcat:byteSize": 4096,
+            "dct:conformsTo": "https://www.w3.org/TR/shacl/",
+            "spdx:checksum": {
+                "@type": "spdx:Checksum",
+                "spdx:algorithm": "spdx:checksumAlgorithm_sha256",
+                "spdx:checksumValue": "aa11"
+            }
+        },
+        {
+            "@type": "dcat:Distribution",
+            "dct:title": "bb-air-quality context.jsonld",
+            "dcat:accessURL": format!("{base}/schema/v2/context.jsonld"),
+            "dcat:mediaType": "application/ld+json",
+            "dct:conformsTo": "https://www.w3.org/TR/json-ld11/",
+            "spdx:checksum": {
+                "@type": "spdx:Checksum",
+                "spdx:algorithm": "spdx:checksumAlgorithm_sha256",
+                "spdx:checksumValue": "bb22"
+            }
+        }
+    ]);
+    record
+}
+
+fn resource<'a>(package: &'a Value, url_suffix: &str) -> &'a Value {
+    package["resources"]
+        .as_array()
+        .expect("resources")
+        .iter()
+        .find(|resource| {
+            resource["url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with(url_suffix))
+        })
+        .unwrap_or_else(|| panic!("no resource ending in {url_suffix}"))
+}
+
+/// EP-68: the model is discoverable from the catalogue in every formalism, not only the data.
+#[test]
+fn every_schema_artifact_the_record_lists_becomes_its_own_resource() {
+    let dataset = package(
+        &endpoint("[ngsi-ld]", PUBLISH),
+        &instance(),
+        &record_with_schema(),
+        &settings(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+
+    let base = "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y";
+    assert_eq!(
+        resource_urls(&dataset),
+        vec![
+            format!("{base}/ngsi-ld/v1/"),
+            format!("{base}/schema/index.json"),
+            format!("{base}/schema/v2/model.shacl.ttl"),
+            format!("{base}/schema/v2/context.jsonld"),
+        ],
+        "a representation distribution is not a schema artifact and must not be repeated"
+    );
+
+    let shapes = resource(&dataset, "model.shacl.ttl");
+    assert_eq!(shapes["name"], json!("bb-air-quality model.shacl.ttl"));
+    assert_eq!(shapes["format"], json!("SHACL"));
+    assert_eq!(shapes["mimetype"], json!("text/turtle"));
+    assert_eq!(shapes["size"], json!(4096));
+    // The digest the record declares is the one a downloader checks against (EP-68).
+    assert_eq!(shapes["hash"], json!("aa11"));
+    assert_eq!(shapes["hash_algorithm"], json!("sha256"));
+    assert_eq!(
+        resource(&dataset, "context.jsonld")["format"],
+        json!("JSON-LD")
+    );
+}
+
+/// EP-68: a model regenerated under the same file names is drift, not a converged run.
+#[test]
+fn a_new_digest_under_the_same_file_name_updates_the_dataset() {
+    let mut api = ckan();
+    let endpoint = endpoint("[ngsi-ld]", PUBLISH);
+    publish(
+        &mut api,
+        &endpoint,
+        &instance(),
+        &record_with_schema(),
+        &settings(),
+    )
+    .expect("the first run publishes");
+
+    let mut regenerated = record_with_schema();
+    regenerated["dcat:distribution"][1]["spdx:checksum"]["spdx:checksumValue"] = json!("cc33");
+
+    let outcome = publish(&mut api, &endpoint, &instance(), &regenerated, &settings())
+        .expect("the second run publishes");
+
+    assert_eq!(outcome, Outcome::Updated);
+    let dataset = api.package("kvalita-ovzdusia").expect("the dataset");
+    assert_eq!(resource(dataset, "model.shacl.ttl")["hash"], json!("cc33"));
+}
+
+/// An endpoint of a given audience, for the visibility mapping of EP-69.
+fn endpoint_for(audience: &str) -> RawManifest {
+    manifest(&format!(
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Endpoint
+metadata:
+  name: ovzdusie-public
+  namespace: ovzdusie
+spec:
+  contextSpaceRef: ovzdusie
+  slug: zt4qm7ge2xdv6ksb3ncf5arw2y
+  audience: {audience}
+  allowedProjects: {projects}
+  enabledRepresentations: [ngsi-ld]
+{PUBLISH}"#,
+        projects = if audience == "project-list" {
+            "[doprava]"
+        } else {
+            "[]"
+        }
+    ))
+}
+
+fn private_of(audience: &str) -> Value {
+    package(&endpoint_for(audience), &instance(), &record(), &settings())
+        .expect("the endpoint publishes")
+        .expect("a dataset")["private"]
+        .clone()
+}
+
+/// EP-69, PF-45: CKAN shows the same thing the endpoint does, and anything short of
+/// `public` is private.
+#[test]
+fn only_a_public_endpoint_becomes_a_public_dataset() {
+    assert_eq!(private_of("public"), json!(false));
+    assert_eq!(private_of("organization"), json!(true));
+    assert_eq!(private_of("project-list"), json!(true));
+}
+
+/// EP-69: closing an endpoint closes its dataset on the next reconcile.
+#[test]
+fn a_narrowed_audience_flips_the_dataset_to_private() {
+    let mut api = ckan();
+    publish(
+        &mut api,
+        &endpoint_for("public"),
+        &instance(),
+        &record(),
+        &settings(),
+    )
+    .expect("the first run publishes");
+    assert_eq!(
+        api.package("kvalita-ovzdusia").expect("the dataset")["private"],
+        json!(false)
+    );
+
+    let outcome = publish(
+        &mut api,
+        &endpoint_for("organization"),
+        &instance(),
+        &record(),
+        &settings(),
+    )
+    .expect("the second run publishes");
+
+    assert_eq!(outcome, Outcome::Updated);
+    assert_eq!(
+        api.package("kvalita-ovzdusia").expect("the dataset")["private"],
+        json!(true)
+    );
+}
