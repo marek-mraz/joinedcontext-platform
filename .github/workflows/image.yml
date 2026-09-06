@@ -41,5 +41,5 @@ jobs:
       - if: steps.has.outputs.df != ''
         run: echo "digest ${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
       - if: steps.has.outputs.df != ''
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.36.0
         with: { image-ref: "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }
