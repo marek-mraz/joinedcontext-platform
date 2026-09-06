@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "joinedcontext-model-tools"
+version = "0.1.0"
+description = "LinkML generators and the Smart Data Models importer, the one non-Rust runtime component"
+requires-python = ">=3.11"
+
+# Pinned exactly. The version that renders an artifact is recorded in the artifact itself
+# (DM-19, DM-43) and CI must run the same one as the Portal preview, so a floating range here
+# would silently make a committed artifact and a preview disagree.
+dependencies = [
+  "linkml==1.11.1",
+  "linkml-runtime==1.11.1",
+  "schema-automator==0.5.7",
+  "pyshacl==0.40.1",
+  "jsonschema==4.26.0",
+  "requests==2.34.2",
+  "rdflib==7.6.0",
+  "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+py-modules = ["common", "gen_json_schema", "gen_context", "gen_rdf_artifacts", "import_sdm"]
+
+[tool.setuptools.package-data]
+"*" = ["models/*.yaml"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

@@ -1,0 +1,58 @@
+id: https://uri.etsi.org/ngsi-ld/ngsi-ld-core
+name: ngsi-ld-core
+title: NGSI-LD core attributes
+description: >-
+  The attributes every NGSI-LD entity carries, as a LinkML import (DM-09). An imported or
+  authored model inherits them instead of redeclaring them, so `id`, `type`, `location` and
+  `observedAt` mean the same thing in every model of the platform and the gateway can rely on
+  their kinds. The IRIs are ETSI's, and each slot says so: they are cited, not minted here.
+license: https://forge.etsi.org/legal-matters
+prefixes:
+  linkml: https://w3id.org/linkml/
+  ngsi-ld: https://uri.etsi.org/ngsi-ld/
+  geojson: https://purl.org/geojson/vocab#
+default_prefix: ngsi-ld
+default_range: string
+imports:
+  - linkml:types
+
+slots:
+  id:
+    slot_uri: ngsi-ld:hasId
+    description: The entity id, urn:ngsi-ld:{Type}:{orgDomain}:{space}:{localId}.
+    identifier: true
+    required: true
+    annotations:
+      ngsi_ld_kind: Property
+      jsonld_keyword: "@id"
+      upstream_source: ETSI NGSI-LD core context v1.8
+  type:
+    slot_uri: ngsi-ld:hasType
+    description: The entity type, one class of a published data model.
+    required: true
+    annotations:
+      ngsi_ld_kind: Property
+      jsonld_keyword: "@type"
+      upstream_source: ETSI NGSI-LD core context v1.8
+  location:
+    slot_uri: geojson:geometry
+    description: Where the entity is, as GeoJSON geometry.
+    range: string
+    annotations:
+      ngsi_ld_kind: GeoProperty
+      upstream_source: ETSI NGSI-LD core context v1.8
+  observedAt:
+    slot_uri: ngsi-ld:observedAt
+    description: When the observation the entity reports was made.
+    range: datetime
+    annotations:
+      ngsi_ld_kind: Property
+      upstream_source: ETSI NGSI-LD core context v1.8
+
+classes:
+  Entity:
+    class_uri: ngsi-ld:Entity
+    description: The root every NGSI-LD entity class specialises.
+    slots: [id, type, location, observedAt]
+    annotations:
+      upstream_source: ETSI NGSI-LD core context v1.8

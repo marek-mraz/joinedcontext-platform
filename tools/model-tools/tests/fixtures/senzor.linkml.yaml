@@ -1,0 +1,64 @@
+# One model exercising every NGSI-LD kind the generators treat specially, plus a unit, an
+# enum and a class that accepts undeclared attributes. The tests read this instead of writing
+# a schema each: a generator that gets one kind wrong fails here and nowhere else.
+id: https://banskabystrica.sk/ns/senzor
+name: senzor
+title: Ovzdusie sensor readings
+prefixes:
+  linkml: https://w3id.org/linkml/
+  bb: https://banskabystrica.sk/ns/
+default_prefix: bb
+default_range: string
+imports:
+  - linkml:types
+  - ngsi-ld-core
+
+classes:
+  AirQualityObserved:
+    class_uri: bb:AirQualityObserved
+    description: One air quality reading of one sensor.
+    is_a: Entity
+    slots: [temperature, reliability, refDevice, label]
+  FreeForm:
+    class_uri: bb:FreeForm
+    description: A class that still accepts attributes the model does not declare.
+    is_a: Entity
+    annotations:
+      open_world: "true"
+
+slots:
+  temperature:
+    slot_uri: bb:temperature
+    description: Air temperature at the sensor.
+    range: float
+    required: true
+    unit:
+      ucum_code: Cel
+      symbol: "°C"
+      exact_mappings:
+        - unece:CEL
+    annotations:
+      ngsi_ld_kind: Property
+  reliability:
+    slot_uri: bb:reliability
+    description: How much the reading can be trusted.
+    range: ReliabilityLevel
+    annotations:
+      ngsi_ld_kind: Property
+  refDevice:
+    slot_uri: bb:refDevice
+    description: The device that produced the reading.
+    annotations:
+      ngsi_ld_kind: Relationship
+  label:
+    slot_uri: bb:label
+    description: What the sensor is called, per locale.
+    annotations:
+      ngsi_ld_kind: LanguageProperty
+
+enums:
+  ReliabilityLevel:
+    permissible_values:
+      low:
+      medium:
+      high:
