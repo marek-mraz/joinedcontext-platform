@@ -22,7 +22,10 @@ pub use envelope::{
 pub use error::{Error, Result, UrnError};
 pub use i18n::MultiLanguageMap;
 pub use kinds::{
-    Contact, ContactRole, ContextSpace, ContextSpaceSpec, Organization, OrganizationSpec, Project,
-    ProjectSpec, Quotas,
+    Audience, Caching, Contact, ContactRole, ContextSpace, ContextSpaceSpec, Endpoint,
+    EndpointSlug, EndpointSpec, EntitySelector, Operation, OperationGroup, OperationRef,
+    Organization, OrganizationSpec, Policy, PolicySpec, Principal, PrincipalKind, Project,
+    ProjectSpec, Quotas, RateLimits, RegistrationInfo, Representation, ScopeDefinition,
+    ScopeDefinitionSpec, SharedSpaceReference, SharedSpaceReferenceSpec, Validity,
 };
 pub use urn::Urn;
