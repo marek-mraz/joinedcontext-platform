@@ -66,6 +66,12 @@ fn change(action: Action, body: &str) -> ResourceChange {
         diff: Vec::new(),
         declared: match action {
             Action::Delete => None,
+            _ => Some(declared.clone()),
+        },
+        // The lane is decided from what the repository declares; the live copy only
+        // matters to `drift`, so a delete is the one case that has to carry it.
+        live: match action {
+            Action::Create => None,
             _ => Some(declared),
         },
     }

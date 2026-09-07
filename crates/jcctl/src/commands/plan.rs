@@ -49,6 +49,11 @@ pub struct ResourceChange {
     pub diff: Vec<FieldDiff>,
     /// The manifest to write, absent for a delete.
     pub declared: Option<RawManifest>,
+    /// The live resource as the platform answered, absent for a create.
+    ///
+    /// `plan` prints the diff and never needs it; `drift` does, because adopting live
+    /// state into Git means writing exactly what the platform holds (CC-22, CC-38).
+    pub live: Option<RawManifest>,
 }
 
 /// Everything `apply` would do, grouped into the waves it would do it in (CC-18).
@@ -155,6 +160,7 @@ pub fn compute(repo: &Repository, platform: &dyn Platform) -> Result<ChangeSet, 
                 action: Action::Create,
                 diff: Vec::new(),
                 declared: Some(declared.clone()),
+                live: None,
             },
             Some(existing) => {
                 let fields = diff(declared, &existing);
@@ -167,6 +173,7 @@ pub fn compute(repo: &Repository, platform: &dyn Platform) -> Result<ChangeSet, 
                     },
                     diff: fields,
                     declared: Some(declared.clone()),
+                    live: Some(existing),
                 }
             }
         };
@@ -175,13 +182,14 @@ pub fn compute(repo: &Repository, platform: &dyn Platform) -> Result<ChangeSet, 
 
     // Whatever is left lives on the platform and no longer in Git (CC-19). Deletion runs
     // in reverse wave order, so a wave is emptied before the wave it depends on.
-    for (id, _) in live {
+    for (id, existing) in live {
         if let Some(wave) = wave_of(&id.kind) {
             by_wave.entry(wave).or_default().push(ResourceChange {
                 id,
                 action: Action::Delete,
                 diff: Vec::new(),
                 declared: None,
+                live: Some(existing),
             });
         }
     }

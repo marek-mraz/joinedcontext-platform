@@ -438,17 +438,22 @@ pub(crate) fn extract_space(spec: &serde_json::Value) -> &str {
     }
 }
 
-fn is_empty_doc(s: &str) -> bool {
+/// Whether a YAML document carries nothing but blanks, comments and `...`.
+pub fn is_empty_doc(s: &str) -> bool {
     s.lines().all(|line| {
         let t = line.trim();
         t.is_empty() || t.starts_with('#') || t == "..."
     })
 }
 
-struct DocChunk {
-    document_index: usize,
-    start_line: usize,
-    content: String,
+/// One YAML document of a file, located well enough to report on.
+pub struct DocChunk {
+    /// 1-based index of the document inside the file.
+    pub document_index: usize,
+    /// 1-based line the document starts at.
+    pub start_line: usize,
+    /// The document text.
+    pub content: String,
 }
 
 /// A line that starts a YAML document: `---` at column 0. An indented `---` belongs to
@@ -464,7 +469,7 @@ fn is_doc_separator(line: &str) -> bool {
 /// Splits a file into its YAML documents, keeping the 1-based document index and start
 /// line of each for diagnostics. Empty documents count towards the index, as they do in
 /// the YAML stream, so `document 3` means the third `---` block a reader sees.
-fn parse_yaml_documents(text: &str) -> Vec<DocChunk> {
+pub fn parse_yaml_documents(text: &str) -> Vec<DocChunk> {
     let mut chunks: Vec<DocChunk> = Vec::new();
     let mut current: Vec<&str> = Vec::new();
     let mut start_line = 1;

@@ -12,7 +12,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl schema export [--out <dir>]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -27,6 +27,14 @@ fn main() -> ExitCode {
         },
         ["apply", "--repo-dir", dir, rest @ ..] => match apply_options(rest) {
             Some(options) => apply(Path::new(dir), options),
+            None => usage(),
+        },
+        ["drift", "--repo-dir", dir, rest @ ..] => match drift_options(rest) {
+            Some((as_json, adopt_dir)) => drift(Path::new(dir), as_json, adopt_dir.as_deref()),
+            None => usage(),
+        },
+        ["import", source, rest @ ..] => match bundle_options(rest) {
+            Some((dir, options, as_json)) => import(Path::new(source), &dir, options, as_json),
             None => usage(),
         },
         ["export", rest @ ..] => match export_options(rest) {
@@ -113,6 +121,76 @@ fn plan(dir: &Path, as_json: bool) -> ExitCode {
     } else {
         ExitCode::from(2)
     }
+}
+
+/// Reports what changed on the platform behind Git's back (API/03 section 3, CC-21).
+///
+/// Exit 2 means drift, the same code `plan` uses for pending changes: a scheduled run is a
+/// cron job whose exit code is the alert, and an operator reads the two resolutions per
+/// resource (CC-38, UI-26).
+fn drift(dir: &Path, as_json: bool, adopt_dir: Option<&Path>) -> ExitCode {
+    let repo = match Repository::load(dir) {
+        Ok(repo) => repo,
+        Err(err) => return fail(&err.to_string()),
+    };
+    let report = match commands::drift::detect(&repo, &InMemory::new()) {
+        Ok(report) => report,
+        Err(err) => return fail(&err.to_string()),
+    };
+
+    if let Some(out) = adopt_dir {
+        match commands::drift::write_adoptions(out, &report) {
+            Ok(written) => eprintln!(
+                "jcctl: {written} adoptable manifests written to {}",
+                out.display()
+            ),
+            Err(err) => return fail(&err.to_string()),
+        }
+    }
+    for drifted in &report.drifted {
+        for redaction in &drifted.redactions {
+            eprintln!(
+                "jcctl: {}/{} adopts without `{redaction}` (MF-17: a manifest carries a \
+                 secretRef, never a secret)",
+                drifted.id.kind, drifted.id.name
+            );
+        }
+    }
+
+    if as_json {
+        println!("{}", json(&report.to_json()));
+    } else {
+        print!("{}", report.render());
+    }
+
+    if report.is_clean() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    }
+}
+
+/// Parses `--json` and the optional `--adopt-dir <path>`, in any order.
+fn drift_options(args: &[&str]) -> Option<(bool, Option<PathBuf>)> {
+    let (mut as_json, mut adopt_dir) = (false, None);
+    let mut rest = args;
+    while let Some((flag, tail)) = rest.split_first() {
+        match *flag {
+            "--json" => {
+                as_json = true;
+                rest = tail;
+            }
+            "--adopt-dir" => match tail.split_first() {
+                Some((value, next)) => {
+                    adopt_dir = Some(PathBuf::from(value));
+                    rest = next;
+                }
+                None => return None,
+            },
+            _ => return None,
+        }
+    }
+    Some((as_json, adopt_dir))
 }
 
 /// Converges the platform and prints the per-resource result (CC-18, CC-20).
@@ -270,6 +348,80 @@ fn apply_options(args: &[&str]) -> Option<commands::apply::Options> {
         }
     }
     Some(options)
+}
+
+/// Imports a bundle into the repository, rewritten for this project (MF-20…MF-24, PF-22).
+///
+/// Exit 1 on any rejection, and nothing is written then: MF-24 is a gate, so half an import
+/// is not a smaller import, it is a repository that no longer validates.
+fn import(
+    source: &Path,
+    repo_dir: &Path,
+    options: commands::import::Options,
+    as_json: bool,
+) -> ExitCode {
+    let report = match commands::import::collect(source, repo_dir, &options) {
+        Ok(report) => report,
+        Err(err) => return fail(&err.to_string()),
+    };
+
+    for rejection in &report.rejections {
+        eprintln!("jcctl: {rejection}");
+    }
+    if !report.is_acceptable() {
+        eprintln!(
+            "jcctl: {} of the bundle refused, nothing written",
+            report.rejections.len()
+        );
+        if as_json {
+            println!("{}", json(&report.to_json()));
+        }
+        return ExitCode::FAILURE;
+    }
+
+    let written = match commands::import::write(repo_dir, &report) {
+        Ok(written) => written,
+        Err(err) => return fail(&err.to_string()),
+    };
+
+    if as_json {
+        println!("{}", json(&report.to_json()));
+    } else {
+        for resource in &report.imported {
+            println!(
+                "{:<9} {}",
+                resource.outcome.as_str().to_lowercase(),
+                resource.path.display()
+            );
+        }
+        println!("{written} manifests written to {}", repo_dir.display());
+    }
+    ExitCode::SUCCESS
+}
+
+/// Parses `--repo-dir`, `--namespace`, `--org-domain`, `--conflict` and `--json`, in any order.
+fn bundle_options(args: &[&str]) -> Option<(PathBuf, commands::import::Options, bool)> {
+    let mut dir = None;
+    let mut options = commands::import::Options::default();
+    let mut as_json = false;
+    let mut rest = args;
+    while let Some((flag, tail)) = rest.split_first() {
+        if *flag == "--json" {
+            as_json = true;
+            rest = tail;
+            continue;
+        }
+        let (value, next) = tail.split_first()?;
+        match *flag {
+            "--repo-dir" => dir = Some(PathBuf::from(value)),
+            "--namespace" => options.namespace = Some((*value).to_owned()),
+            "--org-domain" => options.org_domain = Some((*value).to_owned()),
+            "--conflict" => options.conflict = commands::import::Conflict::parse(value)?,
+            _ => return None,
+        }
+        rest = next;
+    }
+    dir.map(|dir| (dir, options, as_json))
 }
 
 /// Copies one context space out of the live platform as a repository (CC-22, MF-16).

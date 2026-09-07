@@ -148,6 +148,31 @@ pub fn collect(
     Ok(report)
 }
 
+/// One live resource cleaned into the manifest that would declare it (CC-22, CC-38).
+///
+/// The same cleaning `export` does, for one resource instead of a space: this is what
+/// *adopt* commits when an operator decides the live state is the truth (CC-68). The
+/// second half of the answer is what had to be dropped to make it committable.
+pub fn adopt(live: &RawManifest) -> (RawManifest, Vec<String>) {
+    let mut manifest = live.clone();
+    strip_system_metadata(&mut manifest.metadata.rest);
+    let mut dropped = Vec::new();
+    redact(&mut manifest.spec, &mut dropped);
+    (manifest, dropped)
+}
+
+/// The literal credentials a spec carries, named, without changing it (MF-24).
+///
+/// `export` drops these because a manifest may not carry one; `import` refuses a manifest
+/// that does, for the same reason read the other way round. One list, one definition of
+/// what counts as a credential.
+pub fn literal_credentials(spec: &Value) -> Vec<String> {
+    let mut copy = spec.clone();
+    let mut found = Vec::new();
+    redact(&mut copy, &mut found);
+    found
+}
+
 /// Writes a collected report as a repository under `out_dir`.
 pub fn write(out_dir: &Path, report: &Report) -> std::io::Result<usize> {
     for resource in &report.resources {
