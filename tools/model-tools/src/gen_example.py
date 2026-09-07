@@ -41,9 +41,13 @@ SCALARS: dict[str, Any] = {
     "time": "00:00:00",
 }
 
-#: A GeoProperty carries a GeoJSON geometry. `ngsi-ld-core` gives `location` a string range, so
-#: the example carries the geometry as the JSON text that range describes.
-GEOMETRY = json.dumps({"type": "Point", "coordinates": [0.0, 0.0]})
+#: A GeoProperty carries a GeoJSON geometry object, which is what the JSON Schema describes for
+#: the kind rather than for the range (T-0416).
+GEOMETRY = {"type": "Point", "coordinates": [0.0, 0.0]}
+
+#: A LanguageProperty carries a language map. The model declares no locale, so the example uses
+#: the one every instance of the platform offers.
+EXAMPLE_LANGUAGE = "en"
 
 #: The space segment of the example entity id. The LinkML source knows the organisation (it is
 #: the host of the schema id) and cannot know the Context Space the model will be used in, so
@@ -89,9 +93,6 @@ def _scalar(view: SchemaView, slot: SlotDefinition, name: str) -> Any:
             raise ModelError(f"enum `{name}` permits no value, so `{slot.name}` has none")
         return values[0]
 
-    if ngsi_ld_kind(slot) == "GeoProperty":
-        return GEOMETRY
-
     base = name
     seen = set()
     # Follow `typeof` down to the base type: a model may declare `Celsius` as a float.
@@ -123,6 +124,11 @@ def _value(view: SchemaView, slot: SlotDefinition, domain: str, depth: int) -> A
         # The object of a Relationship is the id of another entity, never an inline object.
         entity_type = target.name if target is not None else "Entity"
         value: Any = _urn(entity_type, domain)
+    elif kind == "GeoProperty":
+        value = dict(GEOMETRY)
+    elif kind == "LanguageProperty":
+        # A language map, which is the shape the JSON Schema describes for the kind (T-0416).
+        value = {EXAMPLE_LANGUAGE: _scalar(view, slot, range_name)}
     elif target is not None:
         value = _object(view, target, domain, depth + 1)
     else:

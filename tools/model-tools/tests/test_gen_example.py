@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 import jsonschema
@@ -51,9 +49,13 @@ def test_an_enum_slot_takes_a_permissible_value(senzor):
     assert compile_example(senzor)["reliability"] == "low"
 
 
-def test_a_geoproperty_carries_a_geometry_and_not_a_placeholder(senzor):
-    geometry = json.loads(compile_example(senzor)["location"])
-    assert geometry["type"] == "Point" and len(geometry["coordinates"]) == 2
+def test_a_geoproperty_carries_a_geojson_geometry_object(senzor):
+    """The simplified form of a GeoProperty is a geometry, not a string holding one (T-0416)."""
+    assert compile_example(senzor)["location"] == {"type": "Point", "coordinates": [0.0, 0.0]}
+
+
+def test_a_languageproperty_carries_a_language_map(senzor):
+    assert compile_example(senzor)["label"] == {"en": "label"}
 
 
 def test_nothing_in_the_example_moves_between_two_runs(senzor):

@@ -79,6 +79,43 @@ def test_the_ngsi_ld_kind_of_every_slot_travels_with_the_schema(senzor):
     assert properties["location"]["x-ngsi-ld-kind"] == "GeoProperty"
 
 
+def test_a_language_map_and_a_geometry_are_objects_and_not_strings(senzor):
+    """T-0416: the range of both is a string; the JSON shape ETSI 9.3.2.3 defines is an object,
+    and a schema that says otherwise refuses exactly what a conforming partner sends."""
+    schema = compile_schema(senzor)
+    validator = Draft7Validator({**schema, "$ref": "#/definitions/AirQualityObserved"})
+    entity = {
+        "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:senzor-01",
+        "type": "AirQualityObserved",
+        "temperature": 12.5,
+    }
+
+    conforming = {
+        **entity,
+        "label": {"sk": "Senzor pri škole", "en": "Sensor by the school"},
+        "location": {"type": "Point", "coordinates": [19.15, 48.73]},
+    }
+    assert list(validator.iter_errors(conforming)) == []
+
+    # And the plain string the old schema accepted is now what fails.
+    assert list(validator.iter_errors({**entity, "label": "Sensor"})) != []
+    assert list(validator.iter_errors({**entity, "location": "POINT(19.15 48.73)"})) != []
+    # A geometry without coordinates, and one of a type no geo-query operator covers.
+    assert list(validator.iter_errors({**entity, "location": {"type": "Point"}})) != []
+    assert list(
+        validator.iter_errors(
+            {**entity, "location": {"type": "GeometryCollection", "coordinates": []}}
+        )
+    ) != []
+
+
+def test_a_language_map_keeps_the_description_of_its_slot(senzor):
+    """The shape replaces the type, not the documentation the editor and the docs page read."""
+    label = compile_schema(senzor)["definitions"]["AirQualityObserved"]["properties"]["label"]
+    assert label["description"] == "What the sensor is called, per locale."
+    assert label["additionalProperties"] == {"type": "string"}
+
+
 def test_the_unit_travels_with_the_schema(senzor):
     temperature = compile_schema(senzor)["definitions"]["AirQualityObserved"]["properties"][
         "temperature"

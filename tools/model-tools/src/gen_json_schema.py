@@ -1,9 +1,15 @@
-"""LinkML → JSON Schema draft-07 (T-0168, DM-02, DM-03, DM-18, TS-18).
+"""LinkML → JSON Schema draft-07 (T-0168, T-0416, DM-02, DM-03, DM-05, DM-18, TS-18).
 
 `gen-json-schema` renders 2019-09. The gateway validates every write against these schemas
 with a draft-07 validator (CC-12, stack verdict S4), and a 2019-09 keyword there is not a
 validation error but a silently ignored constraint, so the dialect is converted here rather
 than hoped for.
+
+It also knows nothing about NGSI-LD, and for two kinds the JSON shape is not the LinkML range:
+a LanguageProperty carries a language map and a GeoProperty a GeoJSON geometry, both objects
+where the range is a string. The `@context` and the SHACL shapes are already driven by
+`ngsi_ld_kind` for the same reason (DM-05); this generator follows the same rule, because a
+schema that calls a language map a string rejects exactly what ETSI 9.3.2.3 prescribes.
 """
 
 from __future__ import annotations
@@ -69,12 +75,61 @@ def _to_draft_07(node: Any) -> Any:
     return out
 
 
+#: The GeoJSON geometry types an NGSI-LD GeoProperty value may take. `GeometryCollection` is
+#: left out: it carries `geometries` instead of `coordinates`, and no geo-query operator of
+#: ETSI 4.10 is defined over one, so accepting it would promise a query that cannot run.
+GEOMETRY_TYPES = (
+    "Point",
+    "MultiPoint",
+    "LineString",
+    "MultiLineString",
+    "Polygon",
+    "MultiPolygon",
+)
+
+
+def _value_node(prop: dict[str, Any]) -> dict[str, Any]:
+    """The node describing one value: an array's `items` where the slot is multivalued."""
+    declared = prop.get("type")
+    array = declared == "array" or (isinstance(declared, list) and "array" in declared)
+    items = prop.get("items")
+    return items if array and isinstance(items, dict) else prop
+
+
+def _shape_of(kind: str, node: dict[str, Any]) -> dict[str, Any] | None:
+    """The JSON shape of one NGSI-LD kind, or None where the range already describes it.
+
+    A Property and a Relationship are what LinkML rendered: a value of the declared type, and
+    an entity id, which is a string either way. The other two are objects.
+    """
+    declared = node.get("type")
+    nullable = isinstance(declared, list) and "null" in declared
+    types: Any = ["object", "null"] if nullable else "object"
+
+    if kind == "LanguageProperty":
+        # A language map: one string per language tag, keys the model cannot enumerate.
+        return {"type": types, "additionalProperties": {"type": "string"}}
+    if kind == "GeoProperty":
+        return {
+            "type": types,
+            "properties": {
+                "type": {"type": "string", "enum": list(GEOMETRY_TYPES)},
+                "coordinates": {"type": "array"},
+            },
+            "required": ["type", "coordinates"],
+        }
+    return None
+
+
 def _annotate(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
     """Carry the NGSI-LD kind and the UN/CEFACT unit into the schema (DM-05, DM-06).
 
     Both are `x-` keywords: a draft-07 validator ignores unknown keywords, so the metadata
     travels with the schema without changing what it validates. Exports read the unit for the
     column header, the editor reads the kind to pick a form control (DM-20).
+
+    The kind also decides the shape of a LanguageProperty and of a GeoProperty, which the
+    range cannot express, so those two are rewritten here rather than described wrongly.
     """
     definitions = schema.get("definitions", {})
     for cls in view.all_classes().values():
@@ -86,7 +141,19 @@ def _annotate(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
             prop = properties.get(slot.alias or slot.name)
             if not isinstance(prop, dict):
                 continue
-            prop["x-ngsi-ld-kind"] = ngsi_ld_kind(slot)
+            kind = ngsi_ld_kind(slot)
+            node = _value_node(prop)
+            shape = _shape_of(kind, node)
+            if shape is not None:
+                # The description is the only thing worth keeping from a node that described
+                # the wrong type; every constraint on it was about a string.
+                description = node.get("description")
+                node.clear()
+                node.update(shape)
+                if description:
+                    node["description"] = description
+
+            prop["x-ngsi-ld-kind"] = kind
             unit = unit_of(slot)
             if unit:
                 prop["x-unit"] = unit

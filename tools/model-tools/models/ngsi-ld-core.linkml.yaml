@@ -37,6 +37,11 @@ slots:
   location:
     slot_uri: geojson:geometry
     description: Where the entity is, as GeoJSON geometry.
+    # The range is the LinkML type of the value; `ngsi_ld_kind` is what decides the JSON and
+    # RDF shape, because two of the kinds have a shape LinkML has no range for: a GeoProperty
+    # is a GeoJSON geometry object and a LanguageProperty a map keyed by language tag. The
+    # `@context`, the JSON Schema and the SHACL shapes all read the annotation for that, so a
+    # model author sets the kind and never fights the range (DM-05, T-0416).
     range: string
     annotations:
       ngsi_ld_kind: GeoProperty

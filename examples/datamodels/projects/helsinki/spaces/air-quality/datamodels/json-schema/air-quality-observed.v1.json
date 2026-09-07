@@ -20,8 +20,28 @@
         },
         "location": {
           "description": "Where the entity is, as GeoJSON geometry.",
+          "properties": {
+            "coordinates": {
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "Point",
+                "MultiPoint",
+                "LineString",
+                "MultiLineString",
+                "Polygon",
+                "MultiPolygon"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "coordinates"
+          ],
           "type": [
-            "string",
+            "object",
             "null"
           ],
           "x-ngsi-ld-kind": "GeoProperty"
@@ -56,9 +76,12 @@
           "x-ngsi-ld-kind": "Relationship"
         },
         "stationName": {
+          "additionalProperties": {
+            "type": "string"
+          },
           "description": "What the station is called, per locale.",
           "type": [
-            "string",
+            "object",
             "null"
           ],
           "x-ngsi-ld-kind": "LanguageProperty"
@@ -104,8 +127,28 @@
         },
         "location": {
           "description": "Where the entity is, as GeoJSON geometry.",
+          "properties": {
+            "coordinates": {
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "Point",
+                "MultiPoint",
+                "LineString",
+                "MultiLineString",
+                "Polygon",
+                "MultiPolygon"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "coordinates"
+          ],
           "type": [
-            "string",
+            "object",
             "null"
           ],
           "x-ngsi-ld-kind": "GeoProperty"
