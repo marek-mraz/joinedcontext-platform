@@ -5,4 +5,5 @@ pub mod drift;
 pub mod export;
 pub mod import;
 pub mod plan;
+pub mod publish_ckan;
 pub mod validate;

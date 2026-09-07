@@ -219,10 +219,13 @@ pub fn ensure(
     if missing.is_empty() {
         return Ok((id, Outcome::Unchanged));
     }
-    api.action(
-        "datastore_create",
-        &json!({ "resource_id": id, "fields": missing, "force": true }),
-    )?;
+    let mut payload = json!({ "resource_id": id, "fields": missing, "force": true });
+    // A resource that exists without a table yet gets its table here, and a table without
+    // a primary key cannot be upserted into.
+    if known.is_empty() {
+        payload["primary_key"] = json!([PRIMARY_KEY]);
+    }
+    api.action("datastore_create", &payload)?;
     Ok((id, Outcome::Extended))
 }
 

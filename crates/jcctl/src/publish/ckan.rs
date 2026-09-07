@@ -188,13 +188,34 @@ pub fn publish(
             api.action("package_create", &desired)?;
             Ok(Outcome::Created)
         }
-        Some(live) if same(&live, &desired) => Ok(Outcome::Unchanged),
+        Some(live) if !deleted(&live) && same(&live, &desired) => Ok(Outcome::Unchanged),
         Some(live) => {
             let mut payload = desired;
             // CKAN addresses an update by id when it has one; the name is what a URL shows
             // and may be what this run is changing.
             if let Some(id) = live.get("id") {
                 payload["id"] = id.clone();
+            }
+            // A withdrawn dataset keeps its name in CKAN, so publishing it again is an
+            // update that brings it back rather than a creation CKAN would refuse.
+            if deleted(&live) {
+                payload["state"] = json!("active");
+            }
+            // `package_update` replaces the resource list, so the DataStore table the
+            // mirror created (EP-65) is carried over by id or CKAN drops it with its rows.
+            let kept: Vec<Value> = live
+                .get("resources")
+                .and_then(Value::as_array)
+                .map(|resources| {
+                    resources
+                        .iter()
+                        .filter(|resource| is_datastore(resource))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(resources) = payload["resources"].as_array_mut() {
+                resources.extend(kept);
             }
             api.action("package_update", &payload)?;
             Ok(Outcome::Updated)
@@ -205,13 +226,27 @@ pub fn publish(
 /// Removes the dataset an Endpoint no longer publishes (EP-62, CC-19).
 ///
 /// Removing what is not there succeeds: a publication run has to be re-runnable after a
-/// partial failure.
+/// partial failure. A sysadmin token still sees a deleted dataset in `package_show`, so a
+/// dataset CKAN already marked deleted is "not there" too.
 pub fn withdraw(api: &mut impl CkanApi, name: &str) -> Result<Outcome, PublishError> {
-    if api.show("package_show", name)?.is_none() {
-        return Ok(Outcome::Unchanged);
+    match api.show("package_show", name)? {
+        None => return Ok(Outcome::Unchanged),
+        Some(live) if deleted(&live) => return Ok(Outcome::Unchanged),
+        Some(_) => {}
     }
     api.action("package_delete", &json!({ "id": name }))?;
     Ok(Outcome::Withdrawn)
+}
+
+/// Whether CKAN holds the dataset as deleted: `package_delete` marks rather than purges.
+fn deleted(live: &Value) -> bool {
+    live.get("state").and_then(Value::as_str) == Some("deleted")
+}
+
+/// Whether a live resource is a DataStore table rather than one of the representation
+/// resources this module writes; CKAN marks the ones `datastore_create` made (EP-65).
+fn is_datastore(resource: &Value) -> bool {
+    resource.get("url_type").and_then(Value::as_str) == Some("datastore")
 }
 
 /// One resource per enabled representation, the schema index, and every schema
@@ -445,17 +480,54 @@ fn flatten(value: &Value) -> Option<String> {
 
 /// Whether the live dataset already says what this run would say.
 ///
-/// Only the fields the publisher owns are compared: CKAN adds ids, timestamps and
-/// revision bookkeeping of its own, and none of that is drift.
+/// Only the fields the publisher owns are compared, in the shape `package_show` answers
+/// them: CKAN adds ids, timestamps and revision bookkeeping of its own, answers the
+/// organization by id beside a nested `organization`, decorates every tag and sorts the
+/// extras, and none of that is drift (CC-18).
 fn same(live: &Value, desired: &Value) -> bool {
     desired.as_object().is_some_and(|fields| {
         fields.iter().all(|(key, value)| match key.as_str() {
             "resources" => {
                 managed_resources(live.get("resources")) == managed_resources(Some(value))
             }
+            "owner_org" => {
+                live.get("owner_org") == Some(value)
+                    || live.get("organization").and_then(|org| org.get("name")) == Some(value)
+            }
+            "tags" => tag_names(live.get("tags")) == tag_names(Some(value)),
+            "extras" => extras_by_key(live.get("extras")) == extras_by_key(Some(value)),
             _ => live.get(key) == Some(value),
         })
     })
+}
+
+fn tag_names(tags: Option<&Value>) -> BTreeSet<String> {
+    tags.and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|tag| tag.get("name")?.as_str())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn extras_by_key(extras: Option<&Value>) -> BTreeMap<String, Value> {
+    extras
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|extra| {
+                    Some((
+                        extra.get("key")?.as_str()?.to_owned(),
+                        extra.get("value").cloned().unwrap_or(Value::Null),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn managed_resources(resources: Option<&Value>) -> Vec<Value> {
@@ -464,6 +536,7 @@ fn managed_resources(resources: Option<&Value>) -> Vec<Value> {
         .map(|items| {
             items
                 .iter()
+                .filter(|resource| !is_datastore(resource))
                 .map(|resource| {
                     json!({
                         "name": resource.get("name"),

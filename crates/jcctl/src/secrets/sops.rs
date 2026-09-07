@@ -70,6 +70,18 @@ impl SecretValue {
         Self(Zeroizing::new(plaintext))
     }
 
+    /// A secret the process environment carries: a token injected into a Job, or the
+    /// variable `jcctl publish ckan --api-token-env` names (EP-67).
+    ///
+    /// `None` when the variable is unset or empty, which are the same thing to a caller
+    /// that needs a credential; the value is moved into the wiped buffer, not copied.
+    pub fn from_env(variable: &str) -> Option<Self> {
+        std::env::var(variable)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(Self::new)
+    }
+
     /// The plaintext. Every call site that uses this is a place where a secret can escape.
     pub fn expose(&self) -> &str {
         &self.0

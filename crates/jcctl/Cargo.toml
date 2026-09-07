@@ -12,6 +12,11 @@ age = { version = "0.12", default-features = false, features = ["armor"] }
 base64 = "0.22"
 jsonschema = { version = "0.54", default-features = false }
 minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
+# The CKAN Action API and the gateway's DCAT record are reached over TLS, which the crate's
+# own plaintext client (`model::http`) does not speak. `ring`, as the gateway's TLS stack
+# already links it, and the platform's root store rather than a bundled one: a withdrawn
+# root then leaves with the next base image, not with a crate release.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_norway = "0.9"

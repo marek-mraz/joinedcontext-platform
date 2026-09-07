@@ -6,3 +6,4 @@
 
 pub mod ckan;
 pub mod ckan_datastore;
+pub mod ckan_http;

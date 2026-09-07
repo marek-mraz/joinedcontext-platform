@@ -12,7 +12,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -48,6 +48,10 @@ fn main() -> ExitCode {
         ["model", verb, rest @ ..] => match (model_mode(verb), model_options(rest)) {
             (Some(mode), Some((dir, url))) => model(&dir, url, mode),
             _ => usage(),
+        },
+        ["publish", "ckan", rest @ ..] => match publish_ckan_options(rest) {
+            Some(options) => publish_ckan(&options),
+            None => usage(),
         },
         ["schema", "export", rest @ ..] => match out_dir(rest) {
             Some(out) => match export_schemas(&out) {
@@ -278,6 +282,160 @@ fn model_import(id: &str, out: &Path, url: Option<String>) -> ExitCode {
     let failed = result["errors"].as_array().is_some_and(|e| !e.is_empty());
     println!("{}", json(&result));
     if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// What `jcctl publish ckan` was asked to do.
+struct PublishCkanOptions {
+    repo_dir: PathBuf,
+    project: String,
+    host: String,
+    organization_title: Option<String>,
+    api_token_env: Option<String>,
+    age_key_file: Option<PathBuf>,
+    withdraw: bool,
+}
+
+/// Parses the options of `publish ckan`, in any order; `--repo` is accepted for
+/// `--repo-dir`. The host is taken without a scheme or a trailing slash, so a URL pasted
+/// in place of a host still names the host.
+fn publish_ckan_options(args: &[&str]) -> Option<PublishCkanOptions> {
+    let mut options = PublishCkanOptions {
+        repo_dir: PathBuf::new(),
+        project: String::new(),
+        host: String::new(),
+        organization_title: None,
+        api_token_env: None,
+        age_key_file: None,
+        withdraw: false,
+    };
+    let mut rest = args;
+    while let Some((flag, tail)) = rest.split_first() {
+        match (*flag, tail) {
+            ("--repo-dir" | "--repo", [dir, tail @ ..]) => {
+                options.repo_dir = PathBuf::from(dir);
+                rest = tail;
+            }
+            ("--project", [project, tail @ ..]) => {
+                options.project = (*project).to_owned();
+                rest = tail;
+            }
+            ("--host", [host, tail @ ..]) => {
+                let host = host
+                    .strip_prefix("https://")
+                    .or_else(|| host.strip_prefix("http://"))
+                    .unwrap_or(host);
+                options.host = host.trim_end_matches('/').to_owned();
+                rest = tail;
+            }
+            ("--organization-title", [title, tail @ ..]) => {
+                options.organization_title = Some((*title).to_owned());
+                rest = tail;
+            }
+            ("--api-token-env", [variable, tail @ ..]) => {
+                options.api_token_env = Some((*variable).to_owned());
+                rest = tail;
+            }
+            ("--age-key-file", [path, tail @ ..]) => {
+                options.age_key_file = Some(PathBuf::from(path));
+                rest = tail;
+            }
+            ("--withdraw", tail) => {
+                options.withdraw = true;
+                rest = tail;
+            }
+            _ => return None,
+        }
+    }
+    let complete = options.repo_dir.as_os_str().is_empty()
+        || options.project.is_empty()
+        || options.host.is_empty();
+    (!complete).then_some(options)
+}
+
+/// Publishes every Endpoint of one project that declares `spec.publish.ckan` (T-0487,
+/// EP-62…EP-67, CC-18).
+///
+/// One line per Endpoint; an Endpoint that fails is reported on stderr and the run goes
+/// on to the next, so one unreachable record does not hold the other datasets back. Exit
+/// 1 when any Endpoint failed. A second run over an unchanged repository prints
+/// `unchanged` for every dataset and writes nothing (CC-18).
+fn publish_ckan(options: &PublishCkanOptions) -> ExitCode {
+    use jcctl::commands::publish_ckan::{self as command, TokenSource};
+    use jcctl::publish::ckan::Settings;
+    use jcctl::publish::ckan_http::HttpCkan;
+
+    let repo = match Repository::load(&options.repo_dir) {
+        Ok(repo) => repo,
+        Err(err) => return fail(&err.to_string()),
+    };
+    let targets = match command::targets(&repo, &options.project) {
+        Ok(targets) => targets,
+        Err(err) => return fail(&err.to_string()),
+    };
+    if targets.is_empty() {
+        println!(
+            "no endpoint of project {} declares spec.publish.ckan",
+            options.project
+        );
+        return ExitCode::SUCCESS;
+    }
+    let mut settings = Settings::new(options.host.clone());
+    if let Some(title) = &options.organization_title {
+        settings = settings.titled(title.clone());
+    }
+    let source = TokenSource {
+        env: options.api_token_env.as_deref(),
+        age_key_file: options.age_key_file.as_deref(),
+    };
+
+    // One client per instance, built when the first Endpoint of that instance comes up;
+    // an instance whose token cannot be read fails every Endpoint that names it.
+    let mut clients: std::collections::BTreeMap<String, Result<HttpCkan, String>> =
+        std::collections::BTreeMap::new();
+    let mut failed = 0usize;
+    for target in &targets {
+        let client = clients
+            .entry(target.instance_name.clone())
+            .or_insert_with(|| {
+                command::token(&target.instance, repo.root(), source)
+                    .map_err(|e| e.to_string())
+                    .and_then(|token| {
+                        HttpCkan::new(target.instance.base_url(), token).map_err(|e| e.to_string())
+                    })
+            });
+        let api = match client {
+            Ok(api) => api,
+            Err(message) => {
+                eprintln!("{}: {message}", target.id);
+                failed += 1;
+                continue;
+            }
+        };
+        let line = if options.withdraw {
+            command::withdraw_one(api, target)
+        } else {
+            command::record(target, &settings).and_then(|record| {
+                let rows = command::rows(target, &settings)?;
+                command::publish_one(api, target, &record, rows.as_deref(), &settings)
+            })
+        };
+        match line {
+            Ok(line) => println!("{line}"),
+            Err(err) => {
+                eprintln!("{}: {err}", target.id);
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        eprintln!(
+            "{failed} of {} endpoints failed; the others are as reported",
+            targets.len()
+        );
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
