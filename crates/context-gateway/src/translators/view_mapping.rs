@@ -10,6 +10,11 @@
 //! cannot answer differently. Nothing here parses LinkML-Map: this module only interprets an
 //! IR that was already reduced to the invertible subset DM-51 allows.
 //!
+//! A computed (`expr`) slot is the one entry that is neither inverted nor read straight from
+//! the broker: the IR carries its expression as a typed tree, and this module evaluates that
+//! tree over the attributes the entity already has. Nothing here parses a language, for the
+//! same reason the rest of the IR carries precomputed tables rather than rules.
+//!
 //! A view is read only. A mapping is invertible per slot, not per entity — a required source
 //! slot no target slot derives has no value to reconstruct, and a constant or an `expr` slot
 //! has none at all — so a write in the target model is refused rather than half-inverted.
@@ -19,7 +24,10 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 /// The IR schema version this interpreter understands (DM-52).
-pub const IR_VERSION: u64 = 1;
+///
+/// Version 2 added the expression tree of a computed slot. A gateway runs exactly the version
+/// it was built for, so a repository holding version-1 artifacts recompiles them.
+pub const IR_VERSION: u64 = 2;
 
 /// The members of an entity that belong to NGSI-LD rather than to a model, and travel
 /// through a view untouched. `type` is not one of them: a view answers with the target class.
@@ -71,9 +79,243 @@ pub enum Derivation {
     Cast(Cast),
     /// A value that depends on no source slot at all.
     Constant(Value),
-    /// A computed slot. The IR carries no expression, so live translation neither produces
-    /// nor filters it (DM-51).
-    Expr,
+    /// A computed slot: evaluated here from the attributes it reads, and never filtered,
+    /// because an expression has no inverse (DM-51).
+    Expr(Expression),
+}
+
+/// One node of the expression a computed slot carries (DM-51, DM-52).
+///
+/// The six forms are the whole of what the Bloblang compiler accepts, because both artifacts
+/// are rendered from one validated parse; a node this interpreter does not know is an IR from
+/// a Model Tools newer than this build, and is refused as such rather than skipped.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expression {
+    /// The value of a source attribute, unwrapped from whichever NGSI-LD shape it arrived in.
+    Slot(String),
+    /// A literal.
+    Constant(Value),
+    /// Arithmetic over two numbers, or `+` over two strings.
+    Arithmetic {
+        /// Which operation.
+        operator: Arithmetic,
+        /// The left operand.
+        left: Box<Expression>,
+        /// The right operand.
+        right: Box<Expression>,
+    },
+    /// A comparison, answering a boolean.
+    Comparison {
+        /// Which comparison.
+        operator: Comparison,
+        /// The left operand.
+        left: Box<Expression>,
+        /// The right operand.
+        right: Box<Expression>,
+    },
+    /// `and` or `or` over booleans.
+    Junction {
+        /// True for `and`, false for `or`.
+        all: bool,
+        /// The operands.
+        operands: Vec<Expression>,
+    },
+    /// `-operand`, over a number.
+    Negate(Box<Expression>),
+    /// `not operand`, over a boolean.
+    Not(Box<Expression>),
+}
+
+/// The arithmetic the expression subset allows (DM-36).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arithmetic {
+    /// `+`: addition, or concatenation when both operands are strings.
+    Add,
+    /// `-`.
+    Subtract,
+    /// `*`.
+    Multiply,
+    /// `/`, which answers a fraction even for two whole numbers, as Python and Bloblang do.
+    Divide,
+}
+
+/// The comparisons the expression subset allows (DM-36).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comparison {
+    /// `==`.
+    Equal,
+    /// `!=`.
+    NotEqual,
+    /// `<`.
+    Less,
+    /// `<=`.
+    LessOrEqual,
+    /// `>`.
+    Greater,
+    /// `>=`.
+    GreaterOrEqual,
+}
+
+impl Expression {
+    /// The source slots this expression reads, appended to `into` if not already there.
+    ///
+    /// A caller who asks for a computed attribute is asking for these: without them the
+    /// broker's answer has nothing to compute from, and the attribute would be absent for a
+    /// reason the caller never sees (DM-51).
+    fn reads(&self, into: &mut Vec<String>) {
+        match self {
+            Expression::Slot(name) => {
+                if !into.iter().any(|seen| seen == name) {
+                    into.push(name.clone());
+                }
+            }
+            Expression::Constant(_) => {}
+            Expression::Arithmetic { left, right, .. }
+            | Expression::Comparison { left, right, .. } => {
+                left.reads(into);
+                right.reads(into);
+            }
+            Expression::Junction { operands, .. } => {
+                for operand in operands {
+                    operand.reads(into);
+                }
+            }
+            Expression::Negate(operand) | Expression::Not(operand) => operand.reads(into),
+        }
+    }
+
+    /// The value this expression has for one entity, or `None` where it has none.
+    ///
+    /// `None` is an attribute the answer leaves out: an input the broker did not send, or
+    /// operands the expression cannot combine, such as a string added to a number. NGSI-LD
+    /// has no null attribute and a view must not invent a value, which is the rule a cast the
+    /// gateway cannot perform already follows.
+    fn evaluate(&self, members: &Map<String, Value>) -> Option<Value> {
+        match self {
+            Expression::Slot(name) => members.get(name).map(plain_value),
+            Expression::Constant(value) => Some(value.clone()),
+            Expression::Arithmetic {
+                operator,
+                left,
+                right,
+            } => arithmetic(
+                *operator,
+                &left.evaluate(members)?,
+                &right.evaluate(members)?,
+            ),
+            Expression::Comparison {
+                operator,
+                left,
+                right,
+            } => compare(
+                *operator,
+                &left.evaluate(members)?,
+                &right.evaluate(members)?,
+            ),
+            // Every operand is evaluated, rather than stopping at the one that settles the
+            // answer: an operand that cannot be evaluated is an expression the view cannot
+            // serve, and hiding that behind a short circuit would make the attribute appear
+            // or vanish depending on the order somebody wrote the terms in.
+            Expression::Junction { all, operands } => {
+                let mut answer = *all;
+                for operand in operands {
+                    let value = operand.evaluate(members)?;
+                    let value = value.as_bool()?;
+                    answer = if *all {
+                        answer && value
+                    } else {
+                        answer || value
+                    };
+                }
+                Some(Value::Bool(answer))
+            }
+            Expression::Negate(operand) => match operand.evaluate(members)? {
+                Value::Number(number) => match number.as_i64() {
+                    Some(whole) => Some(Value::from(-whole)),
+                    None => finite(-number.as_f64()?),
+                },
+                _ => None,
+            },
+            Expression::Not(operand) => Some(Value::Bool(!operand.evaluate(members)?.as_bool()?)),
+        }
+    }
+}
+
+/// One attribute's value, whatever NGSI-LD shape it arrived in: the read side of `map_value`.
+fn plain_value(attribute: &Value) -> Value {
+    let Some(members) = attribute.as_object() else {
+        return attribute.clone();
+    };
+    ["value", "object"]
+        .into_iter()
+        .find_map(|key| members.get(key))
+        .cloned()
+        .unwrap_or_else(|| attribute.clone())
+}
+
+/// `left <operator> right`, or `None` where the two do not combine.
+fn arithmetic(operator: Arithmetic, left: &Value, right: &Value) -> Option<Value> {
+    // Concatenation is the one operation over strings, and the one place `+` is not addition.
+    if let (Some(head), Some(tail)) = (left.as_str(), right.as_str()) {
+        return match operator {
+            Arithmetic::Add => Some(Value::String(format!("{head}{tail}"))),
+            _ => None,
+        };
+    }
+    // Two whole numbers stay whole, as they do in Python and in Bloblang, so a count does not
+    // come back from a view with a decimal point it never had.
+    if let (Some(left), Some(right)) = (left.as_i64(), right.as_i64()) {
+        return match operator {
+            Arithmetic::Add => left.checked_add(right).map(Value::from),
+            Arithmetic::Subtract => left.checked_sub(right).map(Value::from),
+            Arithmetic::Multiply => left.checked_mul(right).map(Value::from),
+            Arithmetic::Divide => divide(left as f64, right as f64),
+        };
+    }
+    let (left, right) = (left.as_f64()?, right.as_f64()?);
+    match operator {
+        Arithmetic::Add => finite(left + right),
+        Arithmetic::Subtract => finite(left - right),
+        Arithmetic::Multiply => finite(left * right),
+        Arithmetic::Divide => divide(left, right),
+    }
+}
+
+/// A quotient, or `None` for a division by zero, which has no value to serve.
+fn divide(left: f64, right: f64) -> Option<Value> {
+    if right == 0.0 {
+        return None;
+    }
+    finite(left / right)
+}
+
+/// A JSON number, or `None` where the result is not one: JSON has no NaN and no infinity.
+fn finite(value: f64) -> Option<Value> {
+    serde_json::Number::from_f64(value).map(Value::Number)
+}
+
+/// `left <operator> right`, or `None` where the two are not comparable.
+fn compare(operator: Comparison, left: &Value, right: &Value) -> Option<Value> {
+    if let (Some(left), Some(right)) = (left.as_bool(), right.as_bool()) {
+        return match operator {
+            Comparison::Equal => Some(Value::Bool(left == right)),
+            Comparison::NotEqual => Some(Value::Bool(left != right)),
+            // Ordering two booleans is not a comparison this subset defines.
+            _ => None,
+        };
+    }
+    let ordering = match (left.as_str(), right.as_str()) {
+        (Some(left), Some(right)) => left.cmp(right),
+        _ => left.as_f64()?.partial_cmp(&right.as_f64()?)?,
+    };
+    Some(Value::Bool(match operator {
+        Comparison::Equal => ordering.is_eq(),
+        Comparison::NotEqual => ordering.is_ne(),
+        Comparison::Less => ordering.is_lt(),
+        Comparison::LessOrEqual => ordering.is_le(),
+        Comparison::Greater => ordering.is_gt(),
+        Comparison::GreaterOrEqual => ordering.is_ge(),
+    }))
 }
 
 /// The casts the IR uses, matching the reference engine exactly (DM-39).
@@ -187,9 +429,15 @@ impl ViewMapping {
                 translated.insert(slot.target.clone(), value.clone());
                 continue;
             }
+            if let Derivation::Expr(expression) = &slot.derivation {
+                // A computed slot reads the attributes the broker sent rather than one source
+                // attribute of its own; where it has no value it is left out (DM-51).
+                if let Some(value) = expression.evaluate(members) {
+                    translated.insert(slot.target.clone(), value);
+                }
+                continue;
+            }
             let Some(source) = slot.source.as_deref() else {
-                // An `expr` slot: the IR carries no expression, so nothing can be computed
-                // for it here (DM-51).
                 continue;
             };
             let Some(attribute) = members.get(source) else {
@@ -211,9 +459,16 @@ impl ViewMapping {
             let Some(slot) = self.by_target(asked) else {
                 return Err(Box::new(unknown(asked)));
             };
-            // A constant or an `expr` is produced here, so the broker is not asked for it.
-            if let Some(source) = &slot.source {
-                sources.push(source.clone());
+            // A constant is produced here, so the broker is not asked for it. A computed
+            // slot is produced here too, but not out of nothing: the broker has to send the
+            // attributes its expression reads, or there is nothing to compute (DM-51).
+            match &slot.derivation {
+                Derivation::Expr(expression) => expression.reads(&mut sources),
+                _ => {
+                    if let Some(source) = &slot.source {
+                        sources.push(source.clone());
+                    }
+                }
             }
         }
         Ok(sources.join(","))
@@ -328,7 +583,9 @@ fn invert_value(derivation: &Derivation, value: &str) -> String {
 /// The target value one source value becomes.
 fn forward(derivation: &Derivation, attribute: &Value) -> Value {
     match derivation {
-        Derivation::Rename | Derivation::Expr | Derivation::Constant(_) => attribute.clone(),
+        // A computed or constant slot never reaches here: `translate_entity` produces it
+        // before it looks for a source attribute.
+        Derivation::Rename | Derivation::Expr(_) | Derivation::Constant(_) => attribute.clone(),
         Derivation::UnitConversion { factor, offset } => {
             map_value(attribute, |value| match value.as_f64() {
                 Some(source) => number_value(source * factor + offset),
@@ -425,7 +682,12 @@ fn slot(index: usize, entry: &Value) -> Result<Slot, InvalidIr> {
 
     let derivation = match kind.as_str() {
         "rename" => Derivation::Rename,
-        "expr" => Derivation::Expr,
+        "expr" => Derivation::Expr(expression(
+            index,
+            members
+                .get("expression")
+                .ok_or_else(|| refuse("a computed slot carries no expression"))?,
+        )?),
         "constant" => Derivation::Constant(
             members
                 .get("value")
@@ -464,7 +726,7 @@ fn slot(index: usize, entry: &Value) -> Result<Slot, InvalidIr> {
         }
     };
 
-    if source.is_none() && !matches!(derivation, Derivation::Constant(_) | Derivation::Expr) {
+    if source.is_none() && !matches!(derivation, Derivation::Constant(_) | Derivation::Expr(_)) {
         return Err(refuse("names no source slot"));
     }
     Ok(Slot {
@@ -478,6 +740,100 @@ fn slot(index: usize, entry: &Value) -> Result<Slot, InvalidIr> {
             .unwrap_or(false),
         derivation,
     })
+}
+
+/// One expression node of the IR (DM-52).
+fn expression(index: usize, node: &Value) -> Result<Expression, InvalidIr> {
+    let refuse = |reason: String| InvalidIr::Slot { index, reason };
+    let members = node
+        .as_object()
+        .ok_or_else(|| refuse("an expression node is an object".to_owned()))?;
+
+    if let Some(name) = text(members.get("slot")) {
+        return Ok(Expression::Slot(name));
+    }
+    if let Some(value) = members.get("const") {
+        return Ok(Expression::Constant(value.clone()));
+    }
+    if let Some(operator) = text(members.get("binary")) {
+        let (left, right) = operands(index, members)?;
+        let operator = match operator.as_str() {
+            "+" => Arithmetic::Add,
+            "-" => Arithmetic::Subtract,
+            "*" => Arithmetic::Multiply,
+            "/" => Arithmetic::Divide,
+            other => return Err(refuse(format!("`{other}` is not an arithmetic operator"))),
+        };
+        return Ok(Expression::Arithmetic {
+            operator,
+            left: Box::new(left),
+            right: Box::new(right),
+        });
+    }
+    if let Some(operator) = text(members.get("compare")) {
+        let (left, right) = operands(index, members)?;
+        let operator = match operator.as_str() {
+            "==" => Comparison::Equal,
+            "!=" => Comparison::NotEqual,
+            "<" => Comparison::Less,
+            "<=" => Comparison::LessOrEqual,
+            ">" => Comparison::Greater,
+            ">=" => Comparison::GreaterOrEqual,
+            other => return Err(refuse(format!("`{other}` is not a comparison operator"))),
+        };
+        return Ok(Expression::Comparison {
+            operator,
+            left: Box::new(left),
+            right: Box::new(right),
+        });
+    }
+    if let Some(operator) = text(members.get("boolean")) {
+        let all = match operator.as_str() {
+            "and" => true,
+            "or" => false,
+            other => return Err(refuse(format!("`{other}` is not a boolean operator"))),
+        };
+        let listed = members
+            .get("operands")
+            .and_then(Value::as_array)
+            .ok_or_else(|| refuse("a boolean node lists no operands".to_owned()))?;
+        let mut operands = Vec::with_capacity(listed.len());
+        for operand in listed {
+            operands.push(expression(index, operand)?);
+        }
+        return Ok(Expression::Junction { all, operands });
+    }
+    if let Some(operator) = text(members.get("unary")) {
+        let operand = members
+            .get("operand")
+            .ok_or_else(|| refuse("a unary node carries no operand".to_owned()))?;
+        let operand = Box::new(expression(index, operand)?);
+        return match operator.as_str() {
+            "-" => Ok(Expression::Negate(operand)),
+            "not" => Ok(Expression::Not(operand)),
+            other => Err(refuse(format!("`{other}` is not a unary operator"))),
+        };
+    }
+    Err(refuse(
+        "an expression node names no form this gateway evaluates".to_owned(),
+    ))
+}
+
+/// The `left` and `right` of a two-operand expression node.
+fn operands(
+    index: usize,
+    members: &Map<String, Value>,
+) -> Result<(Expression, Expression), InvalidIr> {
+    let side = |key: &str| {
+        members.get(key).ok_or_else(|| InvalidIr::Slot {
+            index,
+            reason: format!("an operator node carries no `{key}`"),
+        })
+    };
+    Ok((
+        expression(index, side("left")?)?,
+        expression(index, side("right")?)?,
+    ))
 }
 
 fn table(value: Option<&Value>) -> Option<BTreeMap<String, Value>> {

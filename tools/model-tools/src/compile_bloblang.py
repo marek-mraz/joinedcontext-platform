@@ -411,17 +411,23 @@ def _integer(expression: str, name: str) -> str:
 
 BINARY = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/"}
 COMPARISON = {ast.Eq: "==", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">="}
-BOOLEAN = {ast.And: "&&", ast.Or: "||"}
+BOOLEAN = {ast.And: "and", ast.Or: "or"}
+#: Bloblang spells the two boolean operators differently from the tree the IR carries.
+BLOBLANG_BOOLEAN = {"and": "&&", "or": "||"}
 
 
-def _expression(name: str, expr: str) -> str:
-    """One `expr` derivation as Bloblang.
+def expression_tree(name: str, expr: str) -> dict[str, Any]:
+    """One `expr` derivation as the typed tree both artifacts are rendered from (DM-51, DM-52).
 
     The expression is parsed rather than rewritten with string surgery, and only the node
     types DM-36 names survive the walk: arithmetic, concatenation and comparison over source
     slots and literals. Everything else — a call, a subscript, a comprehension, an attribute
     on a name — is refused by node type, which is what makes "rejects arbitrary code" a
     property of the parser and not of a blocklist somebody has to keep current.
+
+    The tree is the acceptance surface for both compilers. Bento gets Bloblang rendered from
+    it, and the gateway gets it as it stands inside the mapping IR, so the two executors
+    cannot be handed expressions the other would refuse and no second parser exists to drift.
     """
     text = expr.replace("{", "").replace("}", "")
     try:
@@ -431,22 +437,28 @@ def _expression(name: str, expr: str) -> str:
     return _node(name, tree.body)
 
 
-def _node(name: str, node: ast.AST) -> str:
+def _node(name: str, node: ast.AST) -> dict[str, Any]:
     if isinstance(node, ast.Name):
-        return f"this.{node.id}"
+        return {"slot": node.id}
     if isinstance(node, ast.Constant):
         if isinstance(node.value, (str, int, float, bool)) or node.value is None:
-            return _literal(node.value)
+            return {"const": node.value}
     if isinstance(node, ast.BinOp) and type(node.op) in BINARY:
-        return f"({_node(name, node.left)} {BINARY[type(node.op)]} {_node(name, node.right)})"
+        return {
+            "binary": BINARY[type(node.op)],
+            "left": _node(name, node.left),
+            "right": _node(name, node.right),
+        }
     if isinstance(node, ast.UnaryOp):
         if isinstance(node.op, ast.USub):
-            return f"(-{_node(name, node.operand)})"
+            return {"unary": "-", "operand": _node(name, node.operand)}
         if isinstance(node.op, ast.Not):
-            return f"(!{_node(name, node.operand)})"
+            return {"unary": "not", "operand": _node(name, node.operand)}
     if isinstance(node, ast.BoolOp) and type(node.op) in BOOLEAN:
-        operator = BOOLEAN[type(node.op)]
-        return "(" + f" {operator} ".join(_node(name, v) for v in node.values) + ")"
+        return {
+            "boolean": BOOLEAN[type(node.op)],
+            "operands": [_node(name, value) for value in node.values],
+        }
     if isinstance(node, ast.Compare):
         if len(node.ops) != 1:
             raise ModelError(
@@ -454,13 +466,38 @@ def _node(name: str, node: ast.AST) -> str:
                 f"compiler supports (DM-36); write it as two comparisons joined by `and`"
             )
         if type(node.ops[0]) in COMPARISON:
-            operator = COMPARISON[type(node.ops[0])]
-            return f"({_node(name, node.left)} {operator} {_node(name, node.comparators[0])})"
+            return {
+                "compare": COMPARISON[type(node.ops[0])],
+                "left": _node(name, node.left),
+                "right": _node(name, node.comparators[0]),
+            }
     raise ModelError(
         f"target slot '{name}': expr uses {type(node).__name__}, which is not arithmetic, "
         f"concatenation or comparison (DM-36). Use value_mappings for an enum, or attach a "
         f"`native: bloblang` block and accept the raised review lane."
     )
+
+
+def _expression(name: str, expr: str) -> str:
+    """The Bloblang of one `expr` derivation, rendered from the tree the IR also carries."""
+    return _bloblang(expression_tree(name, expr))
+
+
+def _bloblang(node: dict[str, Any]) -> str:
+    """One expression node as Bloblang."""
+    if "slot" in node:
+        return f"this.{node['slot']}"
+    if "const" in node:
+        return _literal(node["const"])
+    if "binary" in node:
+        return f"({_bloblang(node['left'])} {node['binary']} {_bloblang(node['right'])})"
+    if "compare" in node:
+        return f"({_bloblang(node['left'])} {node['compare']} {_bloblang(node['right'])})"
+    if "boolean" in node:
+        operator = BLOBLANG_BOOLEAN[node["boolean"]]
+        return "(" + f" {operator} ".join(_bloblang(value) for value in node["operands"]) + ")"
+    operand = _bloblang(node["operand"])
+    return f"(-{operand})" if node["unary"] == "-" else f"(!{operand})"
 
 
 # --- native blocks --------------------------------------------------------------------

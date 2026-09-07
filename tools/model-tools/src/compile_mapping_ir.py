@@ -9,9 +9,10 @@ model and have to reach the source in the source's own names. That is an inverse
 an invertible derivation has one.
 
 So the IR carries the invertible subset of DM-51 with both directions precomputed, and marks
-everything else non-filterable rather than dropping it: an `expr` slot is still served, it
-just cannot appear in a filter, and a `native` block is refused outright because there is
-nothing to invert and replicate mode is where such a mapping belongs.
+everything else non-filterable rather than dropping it: an `expr` slot is still served, from
+the expression tree this document carries, it just cannot appear in a filter; and a `native`
+block is refused outright because there is nothing to invert and replicate mode is where such
+a mapping belongs.
 
 The IR is JSON with its own version, because the gateway reads artifacts a repository
 committed at some earlier version of these tools (DM-52).
@@ -28,6 +29,7 @@ from common import ModelError, load
 from compile_bloblang import (
     CASTS,
     class_derivation,
+    expression_tree,
     linear_conversion,
     refuse_unsupported_slot,
     slot_derivations,
@@ -36,7 +38,7 @@ from compile_bloblang import (
 
 #: Schema version of the IR document. The gateway reads committed artifacts, so it has to be
 #: able to tell an IR it understands from one a newer Model Tools wrote.
-IR_VERSION = 1
+IR_VERSION = 2
 
 
 def compile_mapping_ir(
@@ -84,9 +86,16 @@ def _slot(
         # on it says nothing about which source entities to ask for.
         return {"target": name, "kind": "constant", "value": slot.value, "filterable": False}
     if slot.expr:
-        # DM-51: returned, but not filterable. The gateway serves the computed value and
-        # refuses to translate a filter that names this slot.
-        return {"target": name, "kind": "expr", "filterable": False}
+        # DM-51: returned, but not filterable. The tree is what makes the first half true —
+        # without it the gateway has nothing to compute and the slot is silently absent — and
+        # it is the same tree the Bloblang was rendered from, so the two executors cannot be
+        # given different expressions. Filtering stays refused: an expression has no inverse.
+        return {
+            "target": name,
+            "kind": "expr",
+            "filterable": False,
+            "expression": expression_tree(name, slot.expr),
+        }
 
     source_slot = _source_slot(name, slot, derivation)
     if slot.unit_conversion:

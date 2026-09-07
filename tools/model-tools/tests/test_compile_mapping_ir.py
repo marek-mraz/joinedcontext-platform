@@ -19,7 +19,7 @@ import json
 import pytest
 
 from common import ModelError
-from compile_bloblang import compile_bloblang
+from compile_bloblang import _bloblang, compile_bloblang
 from compile_mapping_ir import IR_VERSION, compile_mapping_ir
 from test_compile_bloblang import derive
 
@@ -116,6 +116,56 @@ def test_an_expression_is_served_and_not_filterable(mapping_source):
     # it, because there is no source slot a filter could be rewritten onto.
     assert label["filterable"] is False
     assert "source" not in label
+    # The other half of DM-51. Without the tree the gateway has nothing to compute and the
+    # slot is absent from the answer, which a consumer cannot tell from an entity that has no
+    # value for it.
+    assert label["expression"] == {
+        "binary": "+", "left": {"slot": "stationName"}, "right": {"const": "!"}
+    }
+
+
+def test_the_expression_tree_covers_every_form_the_compiler_accepts(mapping_source):
+    ir = compile_mapping_ir(
+        derive({"flag": {"expr": "not ({pm2p5} > 10 and -{pm2p5} / 2 < 1) or {ok}"}}),
+        source=mapping_source,
+    )
+    assert slots(ir)["flag"]["expression"] == {
+        "boolean": "or",
+        "operands": [
+            {"unary": "not", "operand": {
+                "boolean": "and",
+                "operands": [
+                    {"compare": ">", "left": {"slot": "pm2p5"}, "right": {"const": 10}},
+                    {"compare": "<",
+                     "left": {"binary": "/",
+                              "left": {"unary": "-", "operand": {"slot": "pm2p5"}},
+                              "right": {"const": 2}},
+                     "right": {"const": 1}},
+                ],
+            }},
+            {"slot": "ok"},
+        ],
+    }
+
+
+@pytest.mark.parametrize("expression", [
+    '{stationName} + " (" + {areaServed} + ")"',
+    "{pm2p5} * 2 - 1",
+    "not ({pm2p5} > 10 and -{pm2p5} / 2 < 1) or {ok}",
+    '{stationName} == "x" or {pm2p5} != 3',
+])
+def test_the_tree_in_the_ir_renders_the_bloblang_bento_runs(expression, mapping_source):
+    """DM-52's guarantee, as far as it can be checked without Bento.
+
+    One specification, two artifacts, and the IR carries the tree the Bloblang was rendered
+    from. If the two ever came from different parses this would be the first thing to fail.
+    """
+    mapping = derive({"label": {"expr": expression}})
+    ir = compile_mapping_ir(mapping, source=mapping_source)
+    rendered = _bloblang(slots(ir)["label"]["expression"])
+    line = next(row["bloblang"] for row in compile_bloblang(mapping, source=mapping_source).report
+                if row["targetSlot"] == "label")
+    assert line == f"root.label = {rendered}"
 
 
 def test_a_constant_is_served_and_not_filterable(mapping_source):

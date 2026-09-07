@@ -32,7 +32,7 @@ const STATION: &str = "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie
 /// The IR Model Tools compiles: the local model on the left, Smart Data Models on the right.
 fn ir() -> Value {
     json!({
-        "version": 1,
+        "version": 2,
         "sourceClass": "MestskySenzor",
         "targetClass": "AirQualityObserved",
         "slots": [
@@ -52,7 +52,22 @@ fn ir() -> Value {
                 "range": "integer", "filterable": true
             },
             { "target": "dataProvider", "kind": "constant", "value": "bb", "filterable": false },
-            { "target": "label", "kind": "expr", "filterable": false }
+            {
+                // `nazov + " (" + spolahlivost + ")"`. A computed slot reads the SOURCE model:
+                // the expression names `spolahlivost`, not the `reliability` the view serves.
+                "target": "label", "kind": "expr", "filterable": false,
+                "expression": {
+                    "binary": "+",
+                    "left": {
+                        "binary": "+",
+                        "left": { "slot": "nazov" }, "right": { "const": " (" }
+                    },
+                    "right": {
+                        "binary": "+",
+                        "left": { "slot": "spolahlivost" }, "right": { "const": ")" }
+                    }
+                }
+            }
         ]
     })
 }
@@ -67,6 +82,7 @@ fn stored() -> Value {
         "id": STATION,
         "type": "MestskySenzor",
         "modifiedAt": "2026-09-07T08:00:00Z",
+        "nazov": { "type": "Property", "value": "Senzor Fončorda" },
         "pm2p5": { "type": "Property", "value": 12.5 },
         "teplota": { "type": "Property", "value": 292.15 },
         "spolahlivost": { "type": "Property", "value": "vysoka" },
@@ -198,6 +214,11 @@ async fn an_answer_comes_back_in_the_target_model() {
     );
     assert_eq!(entity["stationCount"]["value"], json!(4), "a cast");
     assert_eq!(entity["dataProvider"], json!("bb"), "a constant");
+    assert_eq!(
+        entity["label"],
+        json!("Senzor Fončorda (vysoka)"),
+        "a computed slot, evaluated from the source attributes its expression reads (DM-51)"
+    );
 
     assert_eq!(entity["id"], json!(STATION), "still an NGSI-LD entity");
     assert_eq!(
@@ -208,6 +229,11 @@ async fn an_answer_comes_back_in_the_target_model() {
     assert!(
         entity.get("pm2p5").is_none() && entity.get("teplota").is_none(),
         "no source name survives into a view: {entity}"
+    );
+    assert!(
+        entity.get("nazov").is_none(),
+        "an attribute an expression reads is an input, not a member of the target model: \
+         {entity}"
     );
     assert!(
         entity.get("kalibracia").is_none(),
@@ -359,14 +385,14 @@ fn the_two_directions_agree_on_every_derivation() {
 #[test]
 fn an_ir_from_a_newer_model_tools_is_refused_rather_than_half_understood() {
     let mut newer = ir();
-    newer["version"] = json!(2);
-    assert_eq!(ViewMapping::parse(&newer), Err(InvalidIr::Version(2)));
+    newer["version"] = json!(3);
+    assert_eq!(ViewMapping::parse(&newer), Err(InvalidIr::Version(3)));
 }
 
 #[test]
 fn a_slot_kind_this_gateway_does_not_run_is_refused() {
     let refused = ViewMapping::parse(&json!({
-        "version": 1,
+        "version": 2,
         "sourceClass": "A",
         "targetClass": "B",
         "slots": [{ "target": "x", "source": "y", "kind": "join", "filterable": true }]
@@ -382,7 +408,7 @@ fn a_slot_kind_this_gateway_does_not_run_is_refused() {
 #[test]
 fn a_slot_that_does_not_say_it_is_filterable_is_not() {
     let mapping = ViewMapping::parse(&json!({
-        "version": 1,
+        "version": 2,
         "sourceClass": "A",
         "targetClass": "B",
         "slots": [{ "target": "x", "source": "y", "kind": "rename" }]
@@ -391,4 +417,233 @@ fn a_slot_that_does_not_say_it_is_filterable_is_not() {
 
     assert!(mapping.invert_q("x==1").is_err());
     assert_eq!(mapping.source_of("x"), Some("y"), "it is still served");
+}
+
+// --- computed slots (T-0455, DM-51) ---------------------------------------------------
+
+/// DM-51's other half. A computed slot is produced from the attributes its expression reads,
+/// so a caller who asks only for it has to have those attributes fetched on their behalf;
+/// before, the broker was asked for nothing and the attribute could never be built.
+#[tokio::test]
+async fn attrs_asks_the_broker_for_what_a_computed_slot_reads() {
+    let (status, _, hops, _) = through(
+        Method::GET,
+        "/ngsi-ld/v1/entities?type=AirQualityObserved&attrs=label,pm25",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let query = context_gateway::query::decode(&hops.first().expect("asked").query);
+    assert!(
+        query.contains("attrs=nazov,spolahlivost,pm2p5"),
+        "the inputs of the expression, then the renamed slot: {query}"
+    );
+}
+
+/// One IR whose every slot is computed, so the forms can be checked without a broker.
+fn computed(slots: Value) -> ViewMapping {
+    ViewMapping::parse(&json!({
+        "version": 2,
+        "sourceClass": "A",
+        "targetClass": "B",
+        "slots": slots
+    }))
+    .expect("the IR parses")
+}
+
+fn slot_of(target: &str, expression: Value) -> Value {
+    json!({ "target": target, "kind": "expr", "filterable": false, "expression": expression })
+}
+
+#[test]
+fn every_form_of_the_expression_subset_evaluates() {
+    let mapping = computed(json!([
+        slot_of(
+            "sum",
+            json!({ "binary": "+", "left": { "slot": "a" }, "right": { "slot": "b" } })
+        ),
+        slot_of(
+            "half",
+            json!({ "binary": "/", "left": { "slot": "a" }, "right": { "const": 2 } })
+        ),
+        slot_of(
+            "negated",
+            json!({ "unary": "-", "operand": { "slot": "b" } })
+        ),
+        slot_of(
+            "joined",
+            json!({
+                "binary": "+", "left": { "slot": "name" }, "right": { "const": "!" }
+            })
+        ),
+        slot_of(
+            "over",
+            json!({
+                "compare": ">", "left": { "slot": "a" }, "right": { "const": 3 }
+            })
+        ),
+        slot_of(
+            "both",
+            json!({
+                "boolean": "and",
+                "operands": [
+                    { "compare": ">=", "left": { "slot": "a" }, "right": { "const": 4 } },
+                    { "unary": "not", "operand": {
+                        "compare": "==", "left": { "slot": "name" }, "right": { "const": "x" }
+                    } }
+                ]
+            })
+        ),
+        slot_of(
+            "either",
+            json!({
+                "boolean": "or",
+                "operands": [
+                    { "compare": "<", "left": { "slot": "a" }, "right": { "const": 0 } },
+                    { "compare": "!=", "left": { "slot": "b" }, "right": { "const": 3 } }
+                ]
+            })
+        )
+    ]));
+
+    let mut entity = json!({
+        "id": "urn:ngsi-ld:A:x:y:1",
+        "type": "A",
+        "a": { "type": "Property", "value": 4 },
+        "b": { "type": "Property", "value": 3 },
+        "name": { "type": "Property", "value": "sensor" }
+    });
+    mapping.translate_entity(&mut entity);
+
+    // Two whole numbers stay whole; a division answers a fraction, as Python and Bloblang do.
+    assert_eq!(entity["sum"], json!(7));
+    assert_eq!(entity["half"], json!(2.0));
+    assert_eq!(entity["negated"], json!(-3));
+    assert_eq!(entity["joined"], json!("sensor!"));
+    assert_eq!(entity["over"], json!(true));
+    assert_eq!(entity["both"], json!(true));
+    assert_eq!(entity["either"], json!(false));
+}
+
+/// A view must not invent a value. An attribute the broker did not send, and one whose
+/// operands do not combine, are both absent from the answer rather than served as null.
+#[test]
+fn a_computed_slot_with_nothing_to_compute_from_is_left_out() {
+    let mapping = computed(json!([
+        slot_of(
+            "missing",
+            json!({
+                "binary": "+", "left": { "slot": "absent" }, "right": { "const": 1 }
+            })
+        ),
+        slot_of(
+            "mixed",
+            json!({
+                "binary": "+", "left": { "slot": "name" }, "right": { "slot": "a" }
+            })
+        ),
+        slot_of(
+            "incomparable",
+            json!({
+                "compare": "<", "left": { "slot": "name" }, "right": { "slot": "a" }
+            })
+        ),
+        slot_of(
+            "divided",
+            json!({
+                "binary": "/", "left": { "slot": "a" }, "right": { "const": 0 }
+            })
+        ),
+        slot_of(
+            "present",
+            json!({
+                "binary": "*", "left": { "slot": "a" }, "right": { "const": 10 }
+            })
+        )
+    ]));
+
+    let mut entity = json!({
+        "id": "urn:ngsi-ld:A:x:y:1",
+        "type": "A",
+        "a": { "type": "Property", "value": 4 },
+        "name": { "type": "Property", "value": "sensor" }
+    });
+    mapping.translate_entity(&mut entity);
+
+    for absent in ["missing", "mixed", "incomparable", "divided"] {
+        assert!(
+            entity.get(absent).is_none(),
+            "`{absent}` has no value, and null is not one: {entity}"
+        );
+    }
+    assert_eq!(
+        entity["present"],
+        json!(40),
+        "the rest of the view still answers"
+    );
+}
+
+/// The representation is the caller's choice, so an expression reads a normalized attribute
+/// and a key-value one alike (the same rule `map_value` follows for every other derivation).
+#[test]
+fn an_expression_reads_a_key_value_entity_as_readily_as_a_normalized_one() {
+    let mapping = computed(json!([slot_of(
+        "joined",
+        json!({ "binary": "+", "left": { "slot": "name" }, "right": { "const": "!" } })
+    )]));
+
+    let mut entity = json!({ "id": "urn:ngsi-ld:A:x:y:1", "type": "A", "name": "sensor" });
+    mapping.translate_entity(&mut entity);
+    assert_eq!(entity["joined"], json!("sensor!"));
+}
+
+#[test]
+fn a_computed_slot_without_its_expression_is_refused_rather_than_served_empty() {
+    let refused = ViewMapping::parse(&json!({
+        "version": 2,
+        "sourceClass": "A",
+        "targetClass": "B",
+        "slots": [{ "target": "label", "kind": "expr", "filterable": false }]
+    }));
+    assert!(
+        matches!(refused, Err(InvalidIr::Slot { index: 0, ref reason })
+                 if reason.contains("no expression")),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn an_expression_node_this_gateway_does_not_evaluate_is_refused() {
+    for node in [
+        json!({ "call": "upper", "operand": { "slot": "a" } }),
+        json!({ "binary": "**", "left": { "slot": "a" }, "right": { "const": 2 } }),
+        json!({ "binary": "+", "left": { "slot": "a" } }),
+        json!({ "boolean": "xor", "operands": [] }),
+        json!({ "unary": "~", "operand": { "slot": "a" } }),
+        json!("a"),
+    ] {
+        let refused = ViewMapping::parse(&json!({
+            "version": 2,
+            "sourceClass": "A",
+            "targetClass": "B",
+            "slots": [slot_of("label", node.clone())]
+        }));
+        assert!(
+            matches!(refused, Err(InvalidIr::Slot { index: 0, .. })),
+            "{node} was accepted: {refused:?}"
+        );
+    }
+}
+
+/// A computed slot is served and never filtered, which is the pair DM-51 asks for: the
+/// expression has no inverse, so a `q` naming it is a bad request rather than a filter the
+/// broker is given in some other form.
+#[test]
+fn a_computed_slot_is_still_refused_in_a_filter() {
+    let mapping = computed(json!([slot_of(
+        "label",
+        json!({ "binary": "+", "left": { "slot": "name" }, "right": { "const": "!" } })
+    )]));
+    assert!(mapping.invert_q("label==\"x!\"").is_err());
+    assert!(mapping.invert_geo_property("label").is_err());
 }
