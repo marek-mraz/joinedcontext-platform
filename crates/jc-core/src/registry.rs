@@ -84,6 +84,7 @@ catalogue!(
     crate::kinds::DataAgreementSpec,
     crate::kinds::SyncSourceSpec,
     crate::kinds::BundleSpec,
+    crate::kinds::UiSchemaSpec,
 );
 
 /// Looks a kind up by its manifest `kind` name (case-sensitive, as written in the file).

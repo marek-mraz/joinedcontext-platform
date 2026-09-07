@@ -15,6 +15,7 @@ pub mod policy;
 pub mod service_account;
 pub mod space;
 pub mod sync;
+pub mod ui_schema;
 
 pub use app::{
     AppBuild, AppClass, AppLifecycle, AppLimits, AppSource, AppSpec, AppVisibility,
@@ -60,6 +61,7 @@ pub use sync::{
     BundleItem, BundleOrigin, BundleSpec, ConflictPolicy, GitOrigin, PlatformApiOrigin, Schedule,
     SyncMode, SyncOrigin, SyncSourceSpec,
 };
+pub use ui_schema::{UiSchemaField, UiSchemaGroup, UiSchemaSpec};
 
 /// `kind: Organization` as a whole manifest.
 pub type Organization = crate::envelope::ResourceEnvelope<OrganizationSpec>;
@@ -100,6 +102,8 @@ pub type DataSpaceParticipant = crate::envelope::ResourceEnvelope<DataSpaceParti
 pub type DataOffer = crate::envelope::ResourceEnvelope<DataOfferSpec>;
 /// `kind: DataAgreement` as a whole manifest.
 pub type DataAgreement = crate::envelope::ResourceEnvelope<DataAgreementSpec>;
+/// `kind: UiSchema` as a whole manifest.
+pub type UiSchema = crate::envelope::ResourceEnvelope<UiSchemaSpec>;
 
 /// The default mirror interval of DM-49, in seconds: 24 hours.
 pub const MIRROR_INTERVAL_DEFAULT_SECONDS: u64 = 24 * 60 * 60;

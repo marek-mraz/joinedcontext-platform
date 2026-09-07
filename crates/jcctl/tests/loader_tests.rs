@@ -618,3 +618,74 @@ fn a_directory_link_outside_the_root_is_refused() {
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&outside);
 }
+
+/// T-0451: a configuration repository holding a `portal/forms/*.uischema.yaml` loads.
+///
+/// Before `kind: UiSchema` was in the registry this failed with [`LoadError::UnknownKind`] —
+/// and failed the **whole repository**, not the one file, so the first form manifest anybody
+/// committed broke `jcctl validate` for everything beside it (UI-02, MF-06).
+#[test]
+fn a_repository_holding_a_uischema_loads_and_the_manifest_is_at_its_own_path() {
+    let dir = unique_temp_dir("uischema");
+
+    std::fs::write(
+        dir.join("org.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata:
+  name: my-city
+  namespace: org
+spec:
+  domain: banskabystrica.sk
+  locales: ["sk", "en"]
+  defaultLocale: sk
+"#,
+    )
+    .unwrap();
+
+    let forms = dir.join("portal/forms");
+    std::fs::create_dir_all(&forms).unwrap();
+    std::fs::write(
+        forms.join("endpoint.uischema.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: UiSchema
+metadata:
+  name: endpoint
+  namespace: org
+spec:
+  for: Endpoint
+  order: [name, slug]
+  groups:
+    - title: { sk: "Základ", en: "Basics" }
+      fields: [name, slug]
+  fields:
+    slug:
+      widget: text
+      columns: 6
+    commitMessage:
+      advanced: true
+"#,
+    )
+    .unwrap();
+
+    let repo = Repository::load(&dir).expect("a repository with a form manifest loads");
+    let id = ResourceId::new(
+        "joinedcontext.com",
+        "UiSchema",
+        Some("org".into()),
+        "endpoint",
+    );
+    assert!(
+        repo.get(&id).is_some(),
+        "the form manifest is in the index like any other kind"
+    );
+    // The Portal reads `portal/forms/{name}.uischema.yaml`; if the registry disagreed about
+    // the path the file would be reported misplaced and the two ends would drift apart.
+    assert!(
+        repo.misplaced().is_empty(),
+        "the documented path is the registry's path: {:?}",
+        repo.misplaced()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
