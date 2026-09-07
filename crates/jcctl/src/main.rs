@@ -12,7 +12,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -51,6 +51,19 @@ fn main() -> ExitCode {
         },
         ["publish", "ckan", rest @ ..] => match publish_ckan_options(rest) {
             Some(options) => publish_ckan(&options),
+            None => usage(),
+        },
+        ["roles", "render", "--repo-dir", dir] => match jcctl::roles::render(Path::new(dir)) {
+            Ok(written) => {
+                for path in written {
+                    println!("{}", path.display());
+                }
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&err.to_string()),
+        },
+        ["roles", "input", rest @ ..] => match roles_input_options(rest) {
+            Some(options) => roles_input(&options),
             None => usage(),
         },
         ["schema", "export", rest @ ..] => match out_dir(rest) {
@@ -627,6 +640,76 @@ fn export_options(args: &[&str]) -> Option<(String, PathBuf, Option<String>)> {
         return None;
     }
     Some((space?, out?, project))
+}
+
+struct RolesInputOptions {
+    repo_dir: PathBuf,
+    base_dir: PathBuf,
+    changes: PathBuf,
+    author: String,
+    author_email: Option<String>,
+    groups: Vec<String>,
+}
+
+fn roles_input_options(args: &[&str]) -> Option<RolesInputOptions> {
+    let mut repo_dir = None;
+    let mut base_dir = None;
+    let mut changes = None;
+    let mut author = None;
+    let mut author_email = None;
+    let mut groups = Vec::new();
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let value = it.next()?;
+        match *flag {
+            "--repo-dir" => repo_dir = Some(PathBuf::from(value)),
+            "--base-dir" => base_dir = Some(PathBuf::from(value)),
+            "--changes" => changes = Some(PathBuf::from(value)),
+            "--author" => author = Some((*value).to_owned()),
+            "--author-email" => author_email = Some((*value).to_owned()).filter(|e| !e.is_empty()),
+            "--groups" => {
+                groups = value
+                    .split(',')
+                    .filter(|g| !g.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            }
+            _ => return None,
+        }
+    }
+    Some(RolesInputOptions {
+        repo_dir: repo_dir?,
+        base_dir: base_dir?,
+        changes: changes?,
+        author: author?,
+        author_email,
+        groups,
+    })
+}
+
+/// Prints the document `policies/roles.rego` evaluates (PF-52).
+fn roles_input(options: &RolesInputOptions) -> ExitCode {
+    let listing = match std::fs::read_to_string(&options.changes) {
+        Ok(listing) => listing,
+        Err(err) => return fail(&format!("{}: {err}", options.changes.display())),
+    };
+    match jcctl::roles::input(
+        &options.repo_dir,
+        &options.base_dir,
+        &listing,
+        &options.author,
+        options.author_email.as_deref(),
+        &options.groups,
+    ) {
+        Ok(input) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&input).expect("input serializes")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => fail(&err.to_string()),
+    }
 }
 
 fn fail(message: &str) -> ExitCode {

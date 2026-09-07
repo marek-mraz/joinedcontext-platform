@@ -17,6 +17,7 @@ pub mod pipelines;
 pub mod pipelines_derived;
 pub mod platform;
 pub mod publish;
+pub mod roles;
 pub mod secrets;
 pub mod service_accounts;
 pub mod sync;
