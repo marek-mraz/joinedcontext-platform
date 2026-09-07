@@ -9,6 +9,8 @@ repository.workspace = true
 jc-core = { path = "../jc-core", version = "0.1.0", features = ["axum"] }
 jcctl = { path = "../jcctl", version = "0.1.0" }
 arc-swap = "1"
+# base64url for the opaque OGC page cursor (EP-36); already in the tree via jsonwebtoken
+base64 = "0.22"
 argon2 = "0.5"
 axum = "0.8"
 http-body-util = "0.1"
@@ -33,8 +35,6 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 jsonschema = { version = "0.54", default-features = false }
 
 [dev-dependencies]
-# a throwaway signing key per test run, so no private key is ever written into the repo
-base64 = "0.22"
 serde_norway = "0.9"
 # `oneshot`, so the tenancy middleware is tested through a real tower stack.
 tower = { version = "0.5", features = ["util"] }
