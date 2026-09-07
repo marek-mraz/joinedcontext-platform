@@ -48,6 +48,7 @@ spec:
     - entities: [{ type: Vehicle }]
   federation:
     identity: caller
+  operations: [federationOps]
   expiresAt: 2027-01-01T00:00:00Z
 "#;
 
@@ -103,6 +104,15 @@ fn an_external_source_keeps_its_own_url_and_its_expiry() {
         json!("https://context.zvolen.sk/ngsi-ld/v1")
     );
     assert_eq!(body["expiresAt"], json!("2027-01-01T00:00:00Z"));
+    // CIM 009 clause 5.2.9: which operations the source answers for. Passed through as the
+    // manifest wrote it, because the vocabulary is the broker's and not ours.
+    assert_eq!(body["operations"], json!(["federationOps"]));
+    // A registration that names no operation carries none, so the broker applies its own
+    // default rather than being told a list we invented.
+    assert!(registration(&manifest(LOCAL), &endpoints())
+        .expect("builds")
+        .get("operations")
+        .is_none());
     // The default when the manifest is silent, spelled out rather than left off: a broker that
     // defaults differently would federate a different meaning than the file says.
     assert_eq!(body["mode"], json!("inclusive"));
@@ -252,19 +262,25 @@ fn no_identity_and_no_credential_reaches_the_broker() {
             &(|name: &str| Some(format!("https://elsewhere.example/{name}"))),
         )
         .expect("builds");
-        let text = serde_json::to_string(&body).expect("serialises");
-        for member in [
-            "federation",
-            "serviceAccount",
-            "hub-reader",
-            "caller",
-            "identity",
-        ] {
+        // By member, not by substring: `operations: [federationOps]` is a legitimate CIM 009
+        // value that contains the word `federation`, and a text search would call it a leak.
+        let members: Vec<&str> = body
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for forbidden in ["federation", "identity", "serviceAccountRef"] {
             assert!(
-                !text.contains(member),
-                "the payload carries {member}:\n{text}"
+                !members.contains(&forbidden),
+                "the payload carries {forbidden}: {members:?}"
             );
         }
+        let text = serde_json::to_string(&body).expect("serialises");
+        assert!(
+            !text.contains("hub-reader"),
+            "the account this platform forwards as reached the broker:\n{text}"
+        );
     }
 
     let spec = |yaml| {

@@ -107,6 +107,13 @@
           ],
           "default": "inclusive",
           "description": "How the source's answer relates to the broker's own data."
+        },
+        "operations": {
+          "description": "Which operations the source is registered for, as CIM 009 clause 5.2.9 names them: an operation (`retrieveEntity`) or one of its groups (`federationOps`). Left out means the specification's own default, which is why this is not an enum here: the vocabulary is the broker's and a list of ours would go stale the first time CIM 009 adds a member.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [

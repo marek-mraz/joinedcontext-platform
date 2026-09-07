@@ -131,6 +131,9 @@ pub fn registration(manifest: &RawManifest, endpoints: &impl Endpoints) -> Resul
     body.insert("endpoint".into(), json!(endpoint));
     body.insert("information".into(), information(&spec));
     body.insert("mode".into(), json!(mode(spec.mode)));
+    if !spec.operations.is_empty() {
+        body.insert("operations".into(), json!(spec.operations));
+    }
     // One string, because `registrationName` is a string in the specification and a language
     // map is a shape the broker does not define. The manifest keeps every language; the Portal
     // reads the manifest.

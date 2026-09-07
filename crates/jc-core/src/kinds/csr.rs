@@ -85,6 +85,12 @@ pub struct ContextSourceRegistrationSpec {
     /// How the source's answer relates to the broker's own data.
     #[serde(default)]
     pub mode: RegistrationMode,
+    /// Which operations the source is registered for, as CIM 009 clause 5.2.9 names them: an
+    /// operation (`retrieveEntity`) or one of its groups (`federationOps`). Left out means the
+    /// specification's own default, which is why this is not an enum here: the vocabulary is
+    /// the broker's and a list of ours would go stale the first time CIM 009 adds a member.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<String>,
     /// When the registration stops being used, if it is not open-ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
@@ -145,6 +151,16 @@ impl ContextSourceRegistrationSpec {
                     field: "spec.endpoint",
                     value: url.clone(),
                     reason: "an external source is an http or https base URL",
+                });
+            }
+        }
+        for operation in &self.operations {
+            if operation.trim().is_empty() {
+                return Err(Error::Name {
+                    field: "spec.operations",
+                    value: operation.clone(),
+                    reason: "an operation is named, and an empty name would be forwarded to the \
+                             broker as one",
                 });
             }
         }
