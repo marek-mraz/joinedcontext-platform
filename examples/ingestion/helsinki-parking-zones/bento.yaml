@@ -26,15 +26,16 @@ pipeline:
     # whose ring is too short to bound anything is dropped rather than repaired into a guess.
     - mapping: |
         let rings = if this.geometry.get("type") == "MultiPolygon" {
-          this.geometry.coordinates.map_each(polygon -> polygon.map_each(ring ->
-            if ring.index(0) == ring.index(-1) { ring } else { ring.append(ring.index(0)) }))
+          this.geometry.coordinates.map_each(polygon -> polygon.map_each(ring -> (
+            if ring.index(0) == ring.index(-1) { ring } else { ring.append(ring.index(0)) }
+          )))
         } else { [] }
         root = if $rings.length() == 0 {
           deleted()
         } else if $rings.index(0).index(0).length() < 4 {
           deleted()
         } else {
-          this.merge({ "rings": $rings })
+          this.assign({ "rings": $rings })
         }
 
     - mapping: |

@@ -58,19 +58,21 @@ pipeline:
               "coordinates": [ $point.index(1).number(), $point.index(0).number() ]
             }
           },
-          "temperature": if $t2m == "NaN" { null } else {
+          "temperature": if $t2m == null || $t2m == "NaN" { null } else {
             { "type": "Property", "value": $t2m.number(), "unitCode": "CEL", "observedAt": this.time }
           },
-          "relativeHumidity": if $rh == "NaN" { null } else {
+          "relativeHumidity": if $rh == null || $rh == "NaN" { null } else {
             { "type": "Property", "value": $rh.number() / 100, "observedAt": this.time }
           },
-          "atmosphericPressure": if $pressure == "NaN" { null } else {
+          "atmosphericPressure": if $pressure == null || $pressure == "NaN" { null } else {
             { "type": "Property", "value": $pressure.number(), "unitCode": "HPA", "observedAt": this.time }
           },
           "source": { "type": "Property", "value": "https://opendata.fmi.fi/wfs" }
         }
-        # FMI writes `NaN` for a sensor that did not report. NGSI-LD has no null Property, and a
-        # consumer would read one as a measurement, so the attribute is left out instead.
+        # FMI writes `NaN` for a sensor that read nothing, and leaves the parameter out of the
+        # document altogether when the station does not carry it. Both mean the same thing here.
+        # NGSI-LD has no null Property and a consumer would read one as a measurement, so the
+        # attribute is left out instead.
         root = root.filter(entry -> entry.value != null)
 
     - archive:

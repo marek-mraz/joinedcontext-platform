@@ -16,6 +16,8 @@ pipeline:
 
     # `out center` gives a node its own `lat`/`lon` and gives a way or a relation a `center`.
     # An element with neither is not a place and cannot be a charging station on a map.
+    # `assign` and not `merge`: a node already carries its own `lat`, and merging a key that
+    # is already there makes an array of both values rather than replacing one with the other.
     - mapping: |
         let lat = this.lat.or(this.center.lat.or(null))
         let lon = this.lon.or(this.center.lon.or(null))
@@ -24,7 +26,7 @@ pipeline:
         } else if $lon == null {
           deleted()
         } else {
-          this.merge({ "lat": $lat, "lon": $lon })
+          this.assign({ "lat": $lat, "lon": $lon })
         }
 
     - mapping: |
@@ -40,17 +42,17 @@ pipeline:
         # `socket:type2` says a connector is present, `socket:type2:output` says how much it
         # delivers. Mappers write the output as "22 kW", "22kW", "11+22kW" or "22 kW;11 kW", so
         # every number in every output tag is read and the largest is what the station can give.
-        let sockets = $tags
-          .filter(entry -> entry.key.has_prefix("socket:") && !entry.key.has_suffix(":output"))
-          .keys()
-          .map_each(key -> key.slice(7))
-        let outputs = $tags
-          .filter(entry -> entry.key.has_prefix("socket:") && entry.key.has_suffix(":output"))
-          .values()
-          .map_each(value -> value.re_find_all("[0-9]+(?:\\.[0-9]+)?"))
-          .flatten()
-          .map_each(number -> number.number())
-          .sort()
+        let sockets = $tags.
+          filter(entry -> entry.key.has_prefix("socket:") && !entry.key.has_suffix(":output")).
+          keys().
+          map_each(key -> key.slice(7))
+        let outputs = $tags.
+          filter(entry -> entry.key.has_prefix("socket:") && entry.key.has_suffix(":output")).
+          values().
+          map_each(value -> value.re_find_all("[0-9]+(?:\\.[0-9]+)?")).
+          flatten().
+          map_each(number -> number.number()).
+          sort()
         root = {
           "@context": [
             "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
