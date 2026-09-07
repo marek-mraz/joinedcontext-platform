@@ -9,6 +9,7 @@ pub mod blueprints;
 pub mod commands;
 pub mod csr;
 pub mod diff;
+pub mod foreign_models;
 pub mod lanes;
 pub mod loader;
 pub mod model;

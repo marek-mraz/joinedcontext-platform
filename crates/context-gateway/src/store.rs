@@ -10,7 +10,8 @@ use crate::auth::accounts::{accounts_of, ServiceAccounts};
 use crate::federation::{federations_of, Federations};
 use crate::resolver::{Endpoint, Model, Space};
 use jc_core::kinds::{
-    Audience, ContextSpaceSpec, DataModelSpec, EndpointSpec, PolicySpec, Representation,
+    Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, PolicySpec,
+    Representation,
 };
 use jcctl::loader::{RawManifest, Repository};
 use std::collections::{BTreeMap, BTreeSet};
@@ -164,6 +165,12 @@ fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<Policy
 }
 
 /// The data models of every space, with the artifacts the checkout carries (DM-02).
+///
+/// A mirrored foreign model is left out: it is a read-only copy of what a peer publishes, and
+/// an endpoint that served it under its own schema surface would be claiming another
+/// organisation's model as its own, which is exactly what DM-49 forbids. The reconciler
+/// commits such a model beside the reference that fetched it, and the Mappings that read it
+/// are how it reaches local data (DM-48, DM-49).
 fn models_by_space(
     repo: &Repository,
     root: Option<&Path>,
@@ -174,6 +181,9 @@ fn models_by_space(
             continue;
         }
         if let Some(spec) = spec_of::<DataModelSpec>(&resource.manifest) {
+            if spec.lifecycle == DataModelLifecycle::Mirrored {
+                continue;
+            }
             let project = id.namespace.clone().unwrap_or_default();
             let space = spec.context_space_ref.clone();
             models.entry((project, space)).or_default().push(model_of(
