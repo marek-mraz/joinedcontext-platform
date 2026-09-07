@@ -22,7 +22,7 @@ use crate::pdp::{conditional, write_guard};
 use crate::pdp::{geo, projection, temporal, Pdp};
 use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, Model, SlugResolver, Space};
-use crate::translators::{geojson, ogc, tabular, zip_export};
+use crate::translators::{geojson, ogc, sta, tabular, zip_export};
 use crate::{egress, handlers, mcp, middleware::tenancy, operations, query};
 use arc_swap::ArcSwap;
 use axum::body::Body;
@@ -202,6 +202,10 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         // landing page, because a GIS client stores whichever one it was given (EP-29).
         .route("/api/endpoint/{slug}/ogc/features", any(ogc_features))
         .route("/api/endpoint/{slug}/ogc/features/", any(ogc_features))
+        // The SensorThings surface, the same shape: one handler over its own resource tree.
+        .route("/api/endpoint/{slug}/sta/v1.1", any(sensorthings))
+        .route("/api/endpoint/{slug}/sta/v1.1/", any(sensorthings))
+        .route("/api/endpoint/{slug}/sta/v1.1/{*rest}", any(sensorthings))
         .route(
             "/api/endpoint/{slug}/ogc/features/{*rest}",
             any(ogc_features),
@@ -2288,6 +2292,243 @@ fn read_only(status: StatusCode) -> Response<Body> {
         HeaderValue::from_static("GET, HEAD, OPTIONS"),
     );
     response
+}
+
+/// Every SensorThings v1.1 request of one endpoint (T-0160, EP-12, EP-13, TS-08).
+///
+/// The Sensing profile's four linked entity sets are four views of one projected entity page,
+/// so the handler fetches once and translates, rather than treating each set as its own query.
+/// That is what keeps a `Datastream` and the `Thing` it belongs to from disagreeing about what
+/// the caller may see (EP-06, EP-07).
+async fn sensorthings(
+    State(gateway): State<Arc<Gateway>>,
+    Path(params): Path<HashMap<String, String>>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let slug = params.get("slug").cloned().unwrap_or_default();
+    let (endpoint, subject) = match admit(
+        &gateway,
+        &slug,
+        Some(Representation::Sta),
+        request.headers(),
+    ) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+
+    // EP-13: the representation is read-only, so every non-safe method is refused before a
+    // path is parsed and before the broker is touched.
+    let method = request.method().clone();
+    if method == Method::OPTIONS {
+        return read_only(StatusCode::NO_CONTENT);
+    }
+    if ![Method::GET, Method::HEAD].contains(&method) {
+        return read_only(StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    let base = format!("{}{}", gateway.base_url(), endpoint.base_path);
+    let caller = query::parse(request.uri().query().unwrap_or_default());
+    let top = query::first(&caller, "$top")
+        .and_then(|top| top.parse::<usize>().ok())
+        .unwrap_or(sta::DEFAULT_TOP)
+        .clamp(1, PAGE);
+    let skip = query::first(&caller, "$skip")
+        .and_then(|skip| skip.parse::<usize>().ok())
+        .unwrap_or_default();
+    let counted = query::first(&caller, "$count").is_some_and(|value| value == "true");
+    let expand: Vec<&str> = query::first(&caller, "$expand")
+        .map(|raw| raw.split(',').map(str::trim).collect())
+        .unwrap_or_default();
+
+    let segments = sta_segments(params.get("rest").map(String::as_str).unwrap_or_default());
+    let addressed: Vec<(&str, Option<String>)> =
+        segments.iter().map(|segment| sta_set(segment)).collect();
+
+    // The service document is the only answer that needs no data at all.
+    let Some((set, key)) = addressed.first() else {
+        return typed_json_response(&sta::service_document(&base), sta::MEDIA_TYPE);
+    };
+    let child = addressed.get(1).map(|(set, _)| *set);
+    if addressed.len() > 2 || (child.is_some() && key.is_none()) {
+        return ProblemDetails::not_found().into_response();
+    }
+    // EP-13: a set the platform holds nothing for is empty rather than missing, so a
+    // conformance suite can walk it; a set that is not in the profile at all is a 404.
+    if sta::EMPTY_SETS.contains(set) && key.is_none() {
+        return typed_json_response(
+            &sta::collection(Vec::new(), counted.then_some(0), None),
+            sta::MEDIA_TYPE,
+        );
+    }
+    if !sta::SETS.contains(set) {
+        return ProblemDetails::not_found().into_response();
+    }
+
+    let mut upstream = vec![
+        ("limit".to_owned(), top.to_string()),
+        ("offset".to_owned(), skip.to_string()),
+    ];
+    if let Some(key) = key {
+        // Every id in this profile carries the entity URN in front of it, so addressing any
+        // one of them is one entity query. An id that is not shaped that way names nothing.
+        let Some(urn) = sta::urn_of(key) else {
+            return ProblemDetails::not_found().into_response();
+        };
+        upstream.push(("id".to_owned(), urn.to_owned()));
+    }
+    if let Some(filter) = query::first(&caller, "$filter") {
+        match sta::filter_to_q(filter) {
+            Ok(q) => upstream.push(("q".to_owned(), q)),
+            Err(problem) => {
+                return bad_parameter(&ogc::ParamError {
+                    parameter: "$filter",
+                    detail: problem.0,
+                })
+            }
+        }
+    }
+
+    let (entities, restricted) =
+        match query_entities(&gateway, &endpoint, &subject, &upstream, &mut request).await {
+            Ok(answer) => answer,
+            Err(problem) => return *problem,
+        };
+    let page: Vec<&Value> = entities.as_array().into_iter().flatten().collect();
+
+    let answer = match (*set, key.as_deref(), child) {
+        ("Things", None, _) => sta::collection(
+            page.iter()
+                .filter_map(|entity| sta::thing(&base, entity, &expand))
+                .collect(),
+            counted.then_some(page.len()),
+            None,
+        ),
+        ("Things", Some(_), None) => {
+            match page
+                .first()
+                .and_then(|entity| sta::thing(&base, entity, &expand))
+            {
+                Some(thing) => thing,
+                None => return ProblemDetails::not_found().into_response(),
+            }
+        }
+        ("Things", Some(_), Some("Locations")) => {
+            let items = page.first().and_then(|entity| sta::location(&base, entity));
+            sta::collection(items.into_iter().collect(), counted.then_some(0), None)
+        }
+        ("Things", Some(_), Some("Datastreams")) => {
+            let items = page
+                .first()
+                .map(|entity| sta::datastreams(&base, entity))
+                .unwrap_or_default();
+            sta::collection(items.clone(), counted.then_some(items.len()), None)
+        }
+        ("Locations", None, _) => {
+            let items: Vec<Value> = page
+                .iter()
+                .filter_map(|entity| sta::location(&base, entity))
+                .collect();
+            sta::collection(items.clone(), counted.then_some(items.len()), None)
+        }
+        ("Datastreams" | "Observations" | "ObservedProperties", None, _) => {
+            let items: Vec<Value> = page
+                .iter()
+                .flat_map(|entity| sta_items(set, &base, entity))
+                .collect();
+            sta::collection(items.clone(), counted.then_some(items.len()), None)
+        }
+        (set @ ("Datastreams" | "Observations" | "ObservedProperties"), Some(key), None) => {
+            let Some(item) = page
+                .first()
+                .into_iter()
+                .flat_map(|entity| sta_items(set, &base, entity))
+                .find(|item| item["@iot.id"].as_str() == Some(key))
+            else {
+                return ProblemDetails::not_found().into_response();
+            };
+            item
+        }
+        ("Datastreams", Some(key), Some("Observations")) => {
+            // A key that names no attribute names no datastream, so it has no observations
+            // rather than all of them.
+            if sta::split_stream_id(key).is_none() {
+                return ProblemDetails::not_found().into_response();
+            }
+            let prefix = format!("{key}/");
+            let items: Vec<Value> = page
+                .first()
+                .into_iter()
+                .flat_map(|entity| sta::observations(&base, entity))
+                .filter(|observation| {
+                    observation["@iot.id"]
+                        .as_str()
+                        .is_some_and(|id| id == key || id.starts_with(&prefix))
+                })
+                .collect();
+            sta::collection(items.clone(), counted.then_some(items.len()), None)
+        }
+        _ => return ProblemDetails::not_found().into_response(),
+    };
+
+    let mut response = typed_json_response(&answer, sta::MEDIA_TYPE);
+    if restricted {
+        response
+            .headers_mut()
+            .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
+    }
+    response
+}
+
+/// The items of one entity for one derived set.
+fn sta_items(set: &str, base: &str, entity: &Value) -> Vec<Value> {
+    match set {
+        "Datastreams" => sta::datastreams(base, entity),
+        "Observations" => sta::observations(base, entity),
+        _ => sta::observed_properties(base, entity),
+    }
+}
+
+/// The path segments of an STA resource path, without splitting inside a key literal.
+///
+/// A `Datastream` id is `{urn}/{attribute}`, so the slash inside the quotes is part of the
+/// name and not a step down the tree. Splitting naively is how `Datastreams('a/b')/Observations`
+/// becomes three segments that address nothing.
+fn sta_segments(rest: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for character in rest.chars() {
+        match character {
+            '\'' => {
+                quoted = !quoted;
+                current.push(character);
+            }
+            '/' if !quoted => {
+                if !current.is_empty() {
+                    segments.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(character),
+        }
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
+}
+
+/// One segment as the set it names and the key it addresses, if any.
+fn sta_set(segment: &str) -> (&str, Option<String>) {
+    match segment.split_once('(') {
+        Some((set, rest)) => {
+            let key = rest.strip_suffix(')').unwrap_or(rest);
+            let key = key.strip_prefix('\'').unwrap_or(key);
+            let key = key.strip_suffix('\'').unwrap_or(key);
+            (set, Some(key.replace("''", "'")))
+        }
+        None => (segment, None),
+    }
 }
 
 /// A JSON body, serialized once.
