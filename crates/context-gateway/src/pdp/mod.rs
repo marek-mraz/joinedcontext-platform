@@ -50,6 +50,10 @@ impl Pdp for PolicyPdp {
             &endpoint.policies,
             now(),
         );
+        // OPS-16: the one number a dashboard cannot get from the edge. APISIX counts requests
+        // and statuses; only the decision point knows a request was answered because a policy
+        // let it through rather than because nothing looked.
+        crate::telemetry::decided(operation, verdict.is_deny());
 
         // EP-61: the endpoint's own publication narrowing, folded into the one decision
         // every representation reads, so no encoder can forget it and no new

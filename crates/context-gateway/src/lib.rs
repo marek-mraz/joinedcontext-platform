@@ -24,4 +24,5 @@ pub mod proxy;
 pub mod query;
 pub mod resolver;
 pub mod store;
+pub mod telemetry;
 pub mod translators;

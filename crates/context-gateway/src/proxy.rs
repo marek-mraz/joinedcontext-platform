@@ -162,11 +162,10 @@ impl Broker {
             .body(body)
             .map_err(|e| ProxyError::Uri(e.to_string()))?;
 
-        let response = self
-            .client
-            .request(request)
-            .await
-            .map_err(|e| ProxyError::Unreachable(e.to_string()))?;
+        let started = std::time::Instant::now();
+        let response = self.client.request(request).await;
+        crate::telemetry::broker_round_trip(started.elapsed().as_secs_f64(), response.is_ok());
+        let response = response.map_err(|e| ProxyError::Unreachable(e.to_string()))?;
 
         let (parts, body) = response.into_parts();
         let mut answer = Response::builder().status(parts.status);

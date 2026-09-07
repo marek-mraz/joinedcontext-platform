@@ -23,7 +23,7 @@ use crate::pdp::{geo, projection, temporal, Pdp};
 use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, Model, SlugResolver, Space};
 use crate::translators::{geojson, ogc, sta, tabular, view_mapping, zip_export};
-use crate::{egress, handlers, mcp, middleware::tenancy, operations, query};
+use crate::{egress, handlers, mcp, middleware::tenancy, operations, query, telemetry};
 use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
@@ -205,6 +205,10 @@ impl Gateway {
 
 /// The router: two probes and the endpoint surface.
 pub fn router(gateway: Arc<Gateway>) -> Router {
+    // The recorder belongs to the surface rather than to `main`: without it every
+    // `metrics::` call in the process is a no-op, and a test that builds a router would
+    // measure nothing while looking like it measured zero (OPS-16).
+    telemetry::install();
     Router::new()
         // Both spellings, because EP-01 writes the base URL with the trailing slash and
         // every client that stores a base URL drops it.
@@ -257,8 +261,14 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         ))
         .route("/healthz", get(ok))
         .route("/livez", get(ok))
+        // OPS-16: what `components/monitoring` scrapes, on the port it already names. Outside
+        // every guard above, because it is reachable only from inside the cluster and carries
+        // no request of anyone's; and outermost of the two layers, so a request refused by the
+        // rate limiter is still counted.
+        .route("/metrics", get(telemetry::metrics))
         .with_state(gateway)
         .fallback(missing)
+        .layer(axum::middleware::from_fn(telemetry::record))
 }
 
 async fn ok() -> &'static str {

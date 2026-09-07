@@ -34,6 +34,13 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 jsonschema = { version = "0.54", default-features = false }
 
+# The gateway's own Prometheus surface (OPS-16, TS-22). The facade is what the modules speak
+# and the exporter exists only in `telemetry`; no default features, because the exporter's own
+# HTTP listener and push gateway would be a second server on a second port when the surface
+# already has one.
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
+
 # A notification is delivered to a subscriber outside the cluster, so the outbound client
 # speaks TLS (R46). `ring` rather than the default aws-lc-rs: the crate already links ring for
 # the schema surface's ETags, and this adds no second C toolchain to the image build. The
