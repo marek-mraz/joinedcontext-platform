@@ -30,14 +30,21 @@ pub const CRS84: &str = "http://www.opengis.net/def/crs/OGC/1.3/CRS84";
 ///
 /// Claiming a class is a promise to a client that will act on it: QGIS offers a filter box
 /// when a service claims CQL2 and shows the user an error when the service then refuses the
-/// filter. So the list is what the code does and nothing more. The OpenAPI 3.0 and CQL2
-/// classes of EP-30 arrive with `/api` and the filter compiler; until then they are absent
-/// rather than advertised.
-pub const CONFORMANCE: [&str; 3] = [
+/// filter. So the list is what the code does and nothing more. The five are the five EP-30
+/// names, and each is implemented here: `core` and `geojson` by the collection and item
+/// documents, `oas30` by [`api_document`], `crs` by the one system NGSI-LD stores, and
+/// `basic-cql2` by [`crate::translators::cql2`], which compiles the whole subset EP-35 lists
+/// and refuses everything else by name.
+pub const CONFORMANCE: [&str; 5] = [
     "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core",
+    "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/oas30",
     "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/geojson",
     "http://www.opengis.net/spec/ogcapi-features-2/1.0/conf/crs",
+    "http://www.opengis.net/spec/ogcapi-features-3/1.0/conf/basic-cql2",
 ];
+
+/// The media type of the API document, which OGC pins to the version it is written in.
+pub const OPENAPI: &str = "application/vnd.oai.openapi+json;version=3.0";
 
 /// The default and the largest page an items request may ask for (EP-36).
 pub const DEFAULT_LIMIT: usize = 10;
@@ -82,11 +89,137 @@ pub fn landing(endpoint: &str, title: &str, description: &str) -> Value {
         "description": description,
         "links": [
             link("self", JSON, format!("{root}/"), "This document"),
+            link("service-desc", OPENAPI, format!("{root}/api"), "The API description"),
             link("conformance", JSON, format!("{root}/conformance"), "Conformance classes"),
             link("data", JSON, format!("{root}/collections"), "Collections"),
             link("alternate", "application/ld+json", format!("{endpoint}/ngsi-ld/v1/entities"),
                  "The same data as NGSI-LD"),
         ],
+    })
+}
+
+/// The API description of one endpoint, as OpenAPI 3.0.3 (EP-40).
+///
+/// Generated rather than written: an endpoint's collections are the types its grants leave
+/// visible, so two callers of the same service legitimately get two documents, and a static
+/// file would describe collections the reader may not have. The paths are the paths the router
+/// actually serves — anything a client finds here is reachable, and anything reachable is here,
+/// which is what the `oas30` class of EP-30 promises.
+///
+/// The document describes the read surface only, because the representation has no write half
+/// (EP-39): no `requestBody` anywhere in it, and the operations a client may try are exactly
+/// `get`.
+pub fn api_document(endpoint: &str, title: &str, description: &str, types: &[String]) -> Value {
+    let root = root(endpoint);
+    let response = |media_type: &str, what: &str| {
+        json!({
+            "200": {
+                "description": what,
+                "content": { media_type: { "schema": { "type": "object" } } },
+            },
+            "400": { "$ref": "#/components/responses/BadRequest" },
+            "404": { "$ref": "#/components/responses/NotFound" },
+        })
+    };
+    let operation = |id: &str, summary: &str, media_type: &str, parameters: Value| {
+        json!({
+            "get": {
+                "operationId": id,
+                "summary": summary,
+                "tags": ["Features"],
+                "parameters": parameters,
+                "responses": response(media_type, summary),
+            }
+        })
+    };
+    let parameter = |name: &str, place: &str, what: &str, schema: Value| {
+        json!({
+            "name": name,
+            "in": place,
+            "description": what,
+            "required": place == "path",
+            "schema": schema,
+            "style": if place == "path" { "simple" } else { "form" },
+            "explode": false,
+        })
+    };
+    let collection_id = parameter(
+        "collectionId",
+        "path",
+        "The entity type this collection serves",
+        json!({ "type": "string", "enum": types }),
+    );
+    let feature_id = parameter(
+        "featureId",
+        "path",
+        "The NGSI-LD URN of one entity",
+        json!({ "type": "string" }),
+    );
+
+    json!({
+        "openapi": "3.0.3",
+        "info": {
+            "title": title,
+            "description": description,
+            "version": "1.0.0",
+        },
+        "servers": [{ "url": root, "description": "This endpoint" }],
+        "tags": [{ "name": "Features", "description": "OGC API - Features Part 1" }],
+        "paths": {
+            "/": operation("getLandingPage", "The landing page", JSON, json!([])),
+            "/api": operation("getApiDescription", "This document", OPENAPI, json!([])),
+            "/conformance": operation(
+                "getConformanceClasses", "The conformance classes claimed", JSON, json!([])),
+            "/collections": operation(
+                "getCollections", "The collections this endpoint serves", JSON, json!([])),
+            "/collections/{collectionId}": json!({
+                "parameters": [collection_id],
+                "get": operation("getCollection", "One collection", JSON, json!([]))["get"],
+            }),
+            "/collections/{collectionId}/items": json!({
+                "parameters": [collection_id],
+                "get": operation("getFeatures", "One page of features", GEOJSON, json!([
+                    parameter("bbox", "query", "A bounding box in CRS84, as four or six numbers",
+                              json!({ "type": "array", "minItems": 4, "maxItems": 6,
+                                      "items": { "type": "number" } })),
+                    parameter("datetime", "query",
+                              "An RFC 3339 instant or interval, open at either end",
+                              json!({ "type": "string" })),
+                    parameter("filter", "query",
+                              "A CQL2 expression over the collection's properties",
+                              json!({ "type": "string" })),
+                    parameter("filter-lang", "query", "The language `filter` is written in",
+                              json!({ "type": "string",
+                                      "enum": [crate::translators::cql2::LANG],
+                                      "default": crate::translators::cql2::LANG })),
+                    parameter("crs", "query", "The coordinate reference system of the answer",
+                              json!({ "type": "string", "enum": [CRS84], "default": CRS84 })),
+                    parameter("limit", "query", "How many features one page carries",
+                              json!({ "type": "integer", "minimum": 1,
+                                      "default": DEFAULT_LIMIT })),
+                    parameter("next", "query", "The opaque cursor of the `next` link",
+                              json!({ "type": "string" })),
+                ]))["get"],
+            }),
+            "/collections/{collectionId}/items/{featureId}": json!({
+                "parameters": [collection_id, feature_id],
+                "get": operation("getFeature", "One feature", GEOJSON, json!([]))["get"],
+            }),
+        },
+        "components": {
+            "responses": {
+                "BadRequest": {
+                    "description": "A parameter this endpoint cannot honour, named in the body",
+                    "content": { "application/problem+json": {
+                        "schema": { "type": "object" } } },
+                },
+                "NotFound": {
+                    "description": "No such collection or feature, or none this caller may read",
+                    "content": { "application/problem+json": {
+                        "schema": { "type": "object" } } },
+                },
+            },
+        },
     })
 }
 

@@ -47,7 +47,7 @@ fn endpoint(hidden: &[&str]) -> Endpoint {
             r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk
 assignee: { kind: role, id: public }
-operations: [queryEntity, retrieveEntity]
+operations: [queryEntity, retrieveEntity, retrieveTemporal]
 "#,
         )
         .expect("the policy spec parses")],
@@ -497,4 +497,315 @@ async fn an_endpoint_without_the_representation_answers_404() {
     without.representations = vec![Representation::NgsiLd];
     let (status, _) = get(gateway(&broker.url, without), &sta("/Things")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The page an STA request gets when it asks for none, which is the ceiling the peek is one
+/// more than.
+fn sta_default_top() -> usize {
+    100
+}
+
+/// One station's history: `pm10` as the broker's temporal representation returns it, three
+/// instances of one attribute rather than one value.
+fn history() -> Value {
+    json!({
+        "id": URN,
+        "type": "AirQualityObserved",
+        "pm10": [
+            { "type": "Property", "value": 30.0, "observedAt": "2026-09-01T08:00:00Z",
+              "instanceId": "urn:ngsi-ld:Instance:1" },
+            { "type": "Property", "value": 34.2, "observedAt": "2026-09-01T09:00:00Z",
+              "instanceId": "urn:ngsi-ld:Instance:2" },
+            { "type": "Property", "value": 41.7, "observedAt": "2026-09-01T10:00:00Z",
+              "instanceId": "urn:ngsi-ld:Instance:3" }
+        ],
+        "operatorPhone": [
+            { "type": "Property", "value": "+421 900 000 000",
+              "observedAt": "2026-09-01T08:00:00Z" }
+        ]
+    })
+}
+
+/// EP-12: a `Datastream`'s `Observations` are the history the broker holds, not the one point
+/// the current state carries. The hop is the assertion that matters — a client charting a week
+/// is charting what the temporal tree answered.
+#[tokio::test]
+async fn a_datastreams_observations_are_the_series_the_broker_holds() {
+    let broker = BrokerStub::start(vec![history()]).await;
+    let (status, collection, _) = call(
+        gateway(&broker.url, endpoint(&[])),
+        Method::GET,
+        &sta(&format!("/Datastreams('{URN}/pm10')/Observations")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let hop = broker
+        .hops()
+        .into_iter()
+        .find(|hop| hop.path.starts_with("/ngsi-ld/v1/temporal/entities/"))
+        .expect("the temporal tree, not the entity page");
+    // The URN rides as one percent-encoded path segment, so its colons cannot be read as
+    // path structure by anything between here and the broker.
+    assert!(
+        hop.path.ends_with(&URN.replace(':', "%3A")),
+        "one entity's history: {}",
+        hop.path
+    );
+    assert!(hop.query.contains("attrs=pm10"), "{}", hop.query);
+    // Bounded before it is buffered: the broker returns at most the page that was asked for.
+    // One more than the page needs, so a full page can tell there is another one.
+    assert!(
+        hop.query
+            .contains(&format!("lastN={}", sta_default_top() + 1)),
+        "{}",
+        hop.query
+    );
+    assert_eq!(hop.tenant, "ovzdusie", "the tenant is pinned");
+
+    let series = collection["value"].as_array().expect("a series");
+    assert_eq!(series.len(), 3, "three instants, not one");
+    assert_eq!(series[0]["result"], json!(30.0));
+    assert_eq!(series[0]["phenomenonTime"], json!("2026-09-01T08:00:00Z"));
+    assert_eq!(
+        series[2]["@iot.id"],
+        json!(format!("{URN}/pm10/2026-09-01T10:00:00Z")),
+        "an observation is addressable by the instant it was made"
+    );
+    assert_eq!(
+        series[0]["Datastream@iot.navigationLink"],
+        json!(format!(
+            "{HOST}/api/endpoint/{SLUG}/sta/v1.1/Datastreams('{URN}/pm10')"
+        ))
+    );
+}
+
+/// A datastream is one attribute, so its `Observations` are that attribute's instants and not
+/// its siblings' — even when the same answer carried both.
+#[tokio::test]
+async fn a_series_carries_only_the_attribute_its_datastream_names() {
+    let broker = BrokerStub::start(vec![history()]).await;
+    let (status, collection, _) = call(
+        gateway(&broker.url, endpoint(&[])),
+        Method::GET,
+        &sta(&format!("/Datastreams('{URN}/pm10')/Observations")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for observation in collection["value"].as_array().expect("a series") {
+        assert!(
+            observation["@iot.id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with(&format!("{URN}/pm10/"))),
+            "{observation} belongs to another datastream"
+        );
+    }
+}
+
+/// EP-07, R9: the history is a second upstream path, so the projection that withholds an
+/// attribute on the instant answer withholds it here too, on every instance.
+#[tokio::test]
+async fn a_hidden_attribute_has_no_series_either() {
+    let broker = BrokerStub::start(vec![history()]).await;
+    let (status, collection, _) = call(
+        gateway(&broker.url, endpoint(&["operatorPhone"])),
+        Method::GET,
+        &sta(&format!("/Datastreams('{URN}/operatorPhone')/Observations")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        collection["value"],
+        json!([]),
+        "a hidden attribute has no observations"
+    );
+}
+
+/// EP-12: `$top` and `$skip` page over the series, and a page that is not the last one says so.
+#[tokio::test]
+async fn top_and_skip_page_over_the_series() {
+    let broker = BrokerStub::start(vec![history()]).await;
+    let (status, first, _) = call(
+        gateway(&broker.url, endpoint(&[])),
+        Method::GET,
+        &sta(&format!(
+            "/Datastreams('{URN}/pm10')/Observations?$top=2&$count=true"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["value"].as_array().map(Vec::len), Some(2));
+    assert!(
+        first["@iot.nextLink"]
+            .as_str()
+            .is_some_and(|link| link.contains("$skip=2")),
+        "a page that is not the last offers the next: {first}"
+    );
+    // The series hit the ceiling that bounds it, so how many instants there really are is not
+    // known here and is not claimed: a count that is really the ceiling is a wrong number.
+    assert_eq!(first["@iot.count"], Value::Null);
+
+    let broker = BrokerStub::start(vec![history()]).await;
+    let (_, last, _) = call(
+        gateway(&broker.url, endpoint(&[])),
+        Method::GET,
+        &sta(&format!(
+            "/Datastreams('{URN}/pm10')/Observations?$top=2&$skip=2"
+        )),
+    )
+    .await;
+    assert_eq!(last["value"].as_array().map(Vec::len), Some(1));
+    assert_eq!(last["@iot.nextLink"], Value::Null, "the last page ends");
+
+    // A page that did not hit the ceiling has seen the whole series, so the count is exact.
+    let broker = BrokerStub::start(vec![history()]).await;
+    let (_, whole, _) = call(
+        gateway(&broker.url, endpoint(&[])),
+        Method::GET,
+        &sta(&format!(
+            "/Datastreams('{URN}/pm10')/Observations?$top=10&$count=true"
+        )),
+    )
+    .await;
+    assert_eq!(whole["@iot.count"], json!(3));
+    assert_eq!(whole["@iot.nextLink"], Value::Null);
+}
+
+/// T-0438: `$filter` over `phenomenonTime` is the window of the request, not a `q` over an
+/// attribute the entity does not have.
+#[tokio::test]
+async fn a_filter_on_phenomenon_time_becomes_the_temporal_window() {
+    for (filter, expected) in [
+        (
+            "phenomenonTime gt 2026-09-01T09:00:00Z",
+            vec!["timerel=after"],
+        ),
+        (
+            "phenomenonTime lt 2026-09-01T09:00:00Z",
+            vec!["timerel=before"],
+        ),
+        (
+            "phenomenonTime gt 2026-09-01T08:00:00Z and phenomenonTime lt 2026-09-01T10:00:00Z",
+            vec!["timerel=between", "endTimeAt="],
+        ),
+    ] {
+        let broker = BrokerStub::start(vec![history()]).await;
+        let (status, _, _) = call(
+            gateway(&broker.url, endpoint(&[])),
+            Method::GET,
+            &sta(&format!(
+                "/Datastreams('{URN}/pm10')/Observations?$filter={}",
+                filter.replace(' ', "%20").replace(':', "%3A"),
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "for {filter}");
+        let hop = broker
+            .hops()
+            .into_iter()
+            .find(|hop| hop.path.starts_with("/ngsi-ld/v1/temporal/entities/"))
+            .unwrap_or_else(|| panic!("no temporal hop for {filter}"));
+        for wanted in expected {
+            assert!(hop.query.contains(wanted), "{filter} sent {}", hop.query);
+        }
+    }
+}
+
+/// T-0438: `phenomenonTime` decides the window of the whole request, so one inside an `or`
+/// cannot be honoured and is refused rather than applied to both branches.
+#[tokio::test]
+async fn a_phenomenon_time_predicate_inside_an_or_is_refused() {
+    let broker = BrokerStub::start(vec![history()]).await;
+    let (status, _, headers) = call(
+        gateway(&broker.url, endpoint(&[])),
+        Method::GET,
+        &sta(&format!(
+            "/Datastreams('{URN}/pm10')/Observations?$filter=(phenomenonTime%20gt%202026-09-01T09%3A00%3A00Z%20or%20pm10%20gt%2040)",
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        headers
+            .get("x-parameter")
+            .and_then(|value| value.to_str().ok()),
+        Some("$filter"),
+    );
+}
+
+/// T-0438: the one ordering a chart asks for, applied to the page the broker returned.
+#[tokio::test]
+async fn orderby_phenomenon_time_desc_puts_the_newest_first() {
+    let broker = BrokerStub::start(vec![history()]).await;
+    let (status, collection, _) = call(
+        gateway(&broker.url, endpoint(&[])),
+        Method::GET,
+        &sta(&format!(
+            "/Datastreams('{URN}/pm10')/Observations?$orderby=phenomenonTime%20desc"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let times: Vec<&str> = collection["value"]
+        .as_array()
+        .expect("a series")
+        .iter()
+        .filter_map(|observation| observation["phenomenonTime"].as_str())
+        .collect();
+    assert_eq!(
+        times,
+        vec![
+            "2026-09-01T10:00:00Z",
+            "2026-09-01T09:00:00Z",
+            "2026-09-01T08:00:00Z"
+        ],
+    );
+}
+
+/// EP-07: the history is its own operation. An endpoint whose policy grants the instant read
+/// and not the temporal one serves no series, because serving it would make this
+/// representation softer than the NGSI-LD surface it is a view of.
+#[tokio::test]
+async fn an_endpoint_without_the_temporal_grant_serves_no_history() {
+    let broker = BrokerStub::start(vec![history()]).await;
+    let mut instant_only = endpoint(&[]);
+    instant_only.policies = vec![serde_norway::from_str(
+        r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+operations: [queryEntity, retrieveEntity]
+"#,
+    )
+    .expect("the policy spec parses")];
+
+    let (status, _, _) = call(
+        gateway(&broker.url, instant_only),
+        Method::GET,
+        &sta(&format!("/Datastreams('{URN}/pm10')/Observations")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        broker
+            .hops()
+            .iter()
+            .all(|hop| !hop.path.starts_with("/ngsi-ld/v1/temporal/")),
+        "the refusal happened before the broker was asked"
+    );
+}
+
+/// A key that is not `{urn}/{attribute}` names no datastream, so it has no observations rather
+/// than every entity's.
+#[tokio::test]
+async fn observations_of_a_key_that_is_no_datastream_answer_404() {
+    for key in ["not-a-urn", URN, "urn:ngsi-ld:X/a/b"] {
+        let broker = BrokerStub::start(vec![history()]).await;
+        let (status, _, _) = call(
+            gateway(&broker.url, endpoint(&[])),
+            Method::GET,
+            &sta(&format!("/Datastreams('{key}')/Observations")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "for {key}");
+    }
 }

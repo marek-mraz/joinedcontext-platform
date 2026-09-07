@@ -22,7 +22,7 @@ use crate::pdp::{conditional, write_guard};
 use crate::pdp::{geo, projection, temporal, Pdp};
 use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, Model, SlugResolver, Space};
-use crate::translators::{geojson, ogc, sta, tabular, view_mapping, zip_export};
+use crate::translators::{cql2, geojson, ogc, sta, tabular, view_mapping, zip_export};
 use crate::{egress, handlers, mcp, middleware::tenancy, operations, query, telemetry};
 use arc_swap::ArcSwap;
 use axum::body::Body;
@@ -1629,6 +1629,88 @@ async fn query_entities(
     Ok((entities, constraints.restricted))
 }
 
+/// The history of one entity, decided and projected exactly as its current state is (T-0438).
+///
+/// The temporal tree is a second upstream path, so it goes through the same four steps the
+/// entity path goes through and in the same order: the PDP decides, the tenant is pinned, the
+/// grants' own window and attribute set are what is forwarded, and what comes back is filtered
+/// by the id patterns and the geo grants and then projected. Skipping any of them would make
+/// the history a way around the projection the instant answer applies (EP-07, R9).
+///
+/// Two differences from [`query_entities`], both of them the temporal representation's own.
+/// The answer is one entity whose attributes are arrays of instances rather than a list of
+/// entities, so a caller who may not read it gets `404` rather than an empty page. And the
+/// grants' windows are applied to the instances after the projection, because the window the
+/// broker was given is the hull of several grants and what falls in the gaps between them was
+/// never granted (GW26).
+async fn query_temporal(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    urn: &str,
+    params: &[(String, String)],
+    request: &mut Request,
+) -> Result<(Value, bool), Box<Response<Body>>> {
+    let verdict = gateway.pdp.decide(
+        subject,
+        Operation::RetrieveTemporal,
+        &query::requested(params),
+        endpoint,
+    );
+    let Verdict::Rewrite(constraints) = verdict else {
+        return Err(Box::new(ProblemDetails::forbidden().into_response()));
+    };
+    // A window no grant reaches is genuinely no history, and it is answered here rather than
+    // asked of the broker without one (GW26).
+    if constraints.empty {
+        return Ok((Value::Null, true));
+    }
+    tenancy::pin_tenant(request, &endpoint.space)
+        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
+
+    let target = format!(
+        "/ngsi-ld/v1/temporal/entities/{}?{}",
+        query::encode(urn),
+        query::upstream(params, &constraints, &[])
+    );
+    let answer = gateway
+        .broker
+        .send(
+            axum::http::Method::GET,
+            &target,
+            request.headers().clone(),
+            Body::empty(),
+        )
+        .await
+        .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
+
+    let (parts, body) = answer.into_parts();
+    // An entity with no history and one the broker refuses both mean "no observations here",
+    // and the caller learns nothing from the difference (R20).
+    if !parts.status.is_success() {
+        return Ok((Value::Null, constraints.restricted));
+    }
+    let bytes = axum::body::to_bytes(body, MAX_BODY)
+        .await
+        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
+    let mut entity: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
+    // The temporal query form answers a list even when it holds one entity.
+    if let Some(first) = entity.as_array().and_then(|list| list.first()).cloned() {
+        entity = first;
+    }
+
+    let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
+    if !projection::permitted(&entity, &constraints.id_patterns)
+        || !areas.as_ref().is_none_or(|areas| areas.admits(&entity))
+    {
+        return Ok((Value::Null, constraints.restricted));
+    }
+    projection::project(&mut entity, &constraints.attrs, &constraints.hidden);
+    temporal::keep_windows(&mut entity, &constraints.temporal_windows);
+    Ok((entity, constraints.restricted))
+}
+
 /// Resolving a space name and establishing the caller (SP-06, SP-11).
 ///
 /// A space the caller may not reach and a space that does not exist answer the same 404,
@@ -2158,6 +2240,22 @@ async fn ogc_features(
             typed_json_response(&ogc::landing(&base, &title, &description), ogc::JSON)
         }
         ["conformance"] => typed_json_response(&ogc::conformance(), ogc::JSON),
+        // EP-40: the description is generated from what this caller may actually see, so the
+        // collections it lists are the collections the rest of the document leads to.
+        ["api"] => {
+            let space = gateway.resolver.resolve_space(&endpoint.space);
+            let (title, description) = ogc_titles(space.as_deref(), &endpoint, request.headers());
+            match ogc_sample(&gateway, &endpoint, &subject, &mut request, &[]).await {
+                Ok(sampled) => {
+                    let types: Vec<String> = sampled.keys().cloned().collect();
+                    typed_json_response(
+                        &ogc::api_document(&base, &title, &description, &types),
+                        ogc::OPENAPI,
+                    )
+                }
+                Err(problem) => *problem,
+            }
+        }
         ["collections"] => {
             let space = gateway.resolver.resolve_space(&endpoint.space);
             let (_, description) = ogc_titles(space.as_deref(), &endpoint, request.headers());
@@ -2249,6 +2347,45 @@ async fn ogc_items(
                 Ok(translated) => upstream.extend(translated),
                 Err(problem) => return bad_parameter(&problem),
             }
+        }
+    }
+
+    // EP-35: the CQL2 filter, compiled into the same three NGSI-LD parameters. A predicate the
+    // subset does not cover is a `400` naming the operator, never a filter half applied.
+    if let Some(raw) = query::first(&caller, "filter") {
+        if let Some(lang) = query::first(&caller, "filter-lang") {
+            if lang != cql2::LANG {
+                return bad_parameter(&ogc::ParamError {
+                    parameter: "filter-lang",
+                    detail: format!("this endpoint reads {} only", cql2::LANG),
+                });
+            }
+        }
+        let compiled = match cql2::compile(raw) {
+            Ok(compiled) => compiled,
+            Err(problem) => return bad_parameter(&problem),
+        };
+        // NGSI-LD carries one `geoQ` and one `temporalQ`, so a filter that brings its own
+        // cannot be combined with the parameter that means the same thing. Applying both
+        // would drop one of them, and dropping one returns more than the caller asked for.
+        for (from_filter, parameter) in [
+            (!compiled.geo.is_empty(), "bbox"),
+            (!compiled.temporal.is_empty(), "datetime"),
+        ] {
+            if from_filter && query::first(&caller, parameter).is_some() {
+                return bad_parameter(&ogc::ParamError {
+                    parameter: "filter",
+                    detail: format!(
+                        "{parameter} and a filter predicate of the same kind cannot both be \
+                         applied; write the whole condition in one of them"
+                    ),
+                });
+            }
+        }
+        upstream.extend(compiled.geo);
+        upstream.extend(compiled.temporal);
+        if let Some(q) = compiled.q {
+            upstream.push(("q".to_owned(), q));
         }
     }
 
@@ -2449,14 +2586,7 @@ async fn sensorthings(
 
     let base = format!("{}{}", gateway.base_url(), endpoint.base_path);
     let caller = query::parse(request.uri().query().unwrap_or_default());
-    let top = query::first(&caller, "$top")
-        .and_then(|top| top.parse::<usize>().ok())
-        .unwrap_or(sta::DEFAULT_TOP)
-        .clamp(1, PAGE);
-    let skip = query::first(&caller, "$skip")
-        .and_then(|skip| skip.parse::<usize>().ok())
-        .unwrap_or_default();
-    let counted = query::first(&caller, "$count").is_some_and(|value| value == "true");
+    let (top, skip, counted) = sta_paging(&caller);
     let expand: Vec<&str> = query::first(&caller, "$expand")
         .map(|raw| raw.split(',').map(str::trim).collect())
         .unwrap_or_default();
@@ -2483,6 +2613,26 @@ async fn sensorthings(
     }
     if !sta::SETS.contains(set) {
         return ProblemDetails::not_found().into_response();
+    }
+
+    // The one set that is a series rather than an instant, and so the one that comes from the
+    // temporal tree instead of the entity page (T-0438, EP-12). Answered before the entity
+    // query below, because a client charting a week must not be handed the single point the
+    // current state carries, and because the entity query would be a second broker call for
+    // an answer it cannot give.
+    if let (Some("Datastreams"), Some(key), Some("Observations")) =
+        (Some(*set), key.as_deref(), child)
+    {
+        return sta_series(
+            &gateway,
+            &endpoint,
+            &subject,
+            &mut request,
+            &caller,
+            &base,
+            key,
+        )
+        .await;
     }
 
     let mut upstream = vec![
@@ -2569,25 +2719,6 @@ async fn sensorthings(
             };
             item
         }
-        ("Datastreams", Some(key), Some("Observations")) => {
-            // A key that names no attribute names no datastream, so it has no observations
-            // rather than all of them.
-            if sta::split_stream_id(key).is_none() {
-                return ProblemDetails::not_found().into_response();
-            }
-            let prefix = format!("{key}/");
-            let items: Vec<Value> = page
-                .first()
-                .into_iter()
-                .flat_map(|entity| sta::observations(&base, entity))
-                .filter(|observation| {
-                    observation["@iot.id"]
-                        .as_str()
-                        .is_some_and(|id| id == key || id.starts_with(&prefix))
-                })
-                .collect();
-            sta::collection(items.clone(), counted.then_some(items.len()), None)
-        }
         _ => return ProblemDetails::not_found().into_response(),
     };
 
@@ -2598,6 +2729,107 @@ async fn sensorthings(
             .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
     }
     response
+}
+
+/// The `Observations` of one `Datastream`: the history of one attribute (T-0438, EP-12).
+///
+/// The series is bounded before it is buffered, not after. `lastN` is what the broker is asked
+/// for and it is the page the caller asked for plus what they skipped, so a datastream holding
+/// a year of minutes costs one page either way; the same ceiling the rest of the
+/// representation uses (`$top`, clamped to the gateway's own) is what bounds it.
+async fn sta_series(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    request: &mut Request,
+    caller: &[(String, String)],
+    base: &str,
+    key: &str,
+) -> Response<Body> {
+    // A key that is not `{urn}/{attribute}` names no datastream, so it has no observations
+    // rather than every entity's.
+    let Some((urn, attribute)) = sta::split_stream_id(key) else {
+        return ProblemDetails::not_found().into_response();
+    };
+    let (top, skip, counted) = sta_paging(caller);
+
+    // One more instance than the page needs, so a full page can tell that there is another
+    // one without a second query. Without the peek a `$top` request could never offer
+    // `@iot.nextLink`, because the ceiling and the answer would always be the same size.
+    let ceiling = top.saturating_add(skip);
+    let mut upstream = vec![
+        ("attrs".to_owned(), attribute.to_owned()),
+        ("lastN".to_owned(), ceiling.saturating_add(1).to_string()),
+    ];
+    if let Some(filter) = query::first(caller, "$filter") {
+        match sta::series_filter(filter) {
+            Ok(series) => {
+                upstream.extend(series.window);
+                if let Some(q) = series.q {
+                    upstream.push(("q".to_owned(), q));
+                }
+            }
+            Err(problem) => {
+                return bad_parameter(&ogc::ParamError {
+                    parameter: "$filter",
+                    detail: problem.0,
+                })
+            }
+        }
+    }
+
+    let (entity, restricted) =
+        match query_temporal(gateway, endpoint, subject, urn, &upstream, request).await {
+            Ok(answer) => answer,
+            Err(problem) => return *problem,
+        };
+
+    let mut items = sta::temporal_observations(base, &entity, attribute);
+    if sta::newest_first(query::first(caller, "$orderby")) {
+        // The broker's order is its own; `$orderby` is the client's, applied to the page it
+        // is given rather than asked of a parameter NGSI-LD does not have.
+        items.sort_by(|left, right| {
+            right["phenomenonTime"]
+                .as_str()
+                .cmp(&left["phenomenonTime"].as_str())
+        });
+    }
+    let total = items.len();
+    let page: Vec<Value> = items.into_iter().skip(skip).take(top).collect();
+    let next = (total > skip + page.len()).then(|| {
+        format!(
+            "{}/Observations?$top={top}&$skip={}",
+            sta::datastream_link(base, key),
+            skip + top
+        )
+    });
+
+    // `@iot.count` is the total, and the total is only known when the broker returned less
+    // than the ceiling: a series that hit it may hold more instants than were asked for, and
+    // a count that is really the ceiling is a wrong number on somebody's chart.
+    let count = counted.then_some(total).filter(|total| *total <= ceiling);
+    let answer = sta::collection(page, count, next);
+    let mut response = typed_json_response(&answer, sta::MEDIA_TYPE);
+    if restricted {
+        response
+            .headers_mut()
+            .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
+    }
+    response
+}
+
+/// `$top`, `$skip` and `$count`: the page an STA request asked for, bounded by the gateway's
+/// own ceiling. One place, because the entity page and the temporal series have to agree on it.
+fn sta_paging(caller: &[(String, String)]) -> (usize, usize, bool) {
+    let top = query::first(caller, "$top")
+        .and_then(|top| top.parse::<usize>().ok())
+        .unwrap_or(sta::DEFAULT_TOP)
+        .clamp(1, PAGE);
+    let skip = query::first(caller, "$skip")
+        .and_then(|skip| skip.parse::<usize>().ok())
+        .unwrap_or_default();
+    let counted = query::first(caller, "$count").is_some_and(|value| value == "true");
+    (top, skip, counted)
 }
 
 /// The items of one entity for one derived set.

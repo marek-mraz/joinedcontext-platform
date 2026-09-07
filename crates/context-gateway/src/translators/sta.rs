@@ -187,39 +187,85 @@ pub fn datastreams(endpoint: &str, entity: &Value) -> Vec<Value> {
 /// One `Observation` per measured attribute: the instant of it this entity holds (EP-12).
 ///
 /// An NGSI-LD entity is the current state, so one attribute is one observation here. The
-/// history of it is the temporal API, which is a datastream's `Observations` over time and a
-/// separate hop the client makes by following the navigation link.
+/// history of it is [`temporal_observations`], which the `Observations` of one datastream come
+/// from; this is what the sets that page over entities can offer without a second hop each.
 pub fn observations(endpoint: &str, entity: &Value) -> Vec<Value> {
     let urn = entity["id"].as_str().unwrap_or_default();
+    let fallback = entity.get("observedAt").and_then(Value::as_str);
     measurements(entity)
         .into_iter()
-        .map(|(name, attribute)| {
-            let phenomenon = attribute
-                .get("observedAt")
-                .and_then(Value::as_str)
-                .or_else(|| entity.get("observedAt").and_then(Value::as_str));
-            let stream = format!("{urn}/{name}");
-            let id = phenomenon.map_or_else(|| stream.clone(), |at| format!("{stream}/{at}"));
-            let mut observation = Map::new();
-            observation.insert("@iot.id".to_owned(), json!(id));
-            observation.insert(
-                "@iot.selfLink".to_owned(),
-                json!(self_link(endpoint, "Observations", &id)),
-            );
-            observation.insert("result".to_owned(), attribute["value"].clone());
-            if let Some(at) = phenomenon {
-                observation.insert("phenomenonTime".to_owned(), json!(at));
-            }
-            if let Some(at) = attribute.get("modifiedAt").and_then(Value::as_str) {
-                observation.insert("resultTime".to_owned(), json!(at));
-            }
-            observation.insert(
-                "Datastream@iot.navigationLink".to_owned(),
-                json!(self_link(endpoint, "Datastreams", &stream)),
-            );
-            Value::Object(observation)
-        })
+        .map(|(name, attribute)| observation(endpoint, urn, name, attribute, fallback))
         .collect()
+}
+
+/// The `Observations` of one datastream: the history the broker holds for that attribute
+/// (T-0438, EP-12).
+///
+/// The temporal representation carries every attribute as an array of instances rather than
+/// one value, so one attribute is a series here where it is a single point on the current
+/// state. An entity that carries the attribute as a single instance is still a series of one:
+/// a broker that answers the current state to a temporal request is not a reason to answer
+/// nothing.
+///
+/// Only the named attribute is read. The rest of the entity is the caller's too — the
+/// projection already ran — but a datastream is one attribute, and returning its siblings
+/// under its own id would put observations in a series they do not belong to.
+pub fn temporal_observations(endpoint: &str, entity: &Value, attribute: &str) -> Vec<Value> {
+    let urn = entity.get("id").and_then(Value::as_str).unwrap_or_default();
+    let fallback = entity.get("observedAt").and_then(Value::as_str);
+    let Some(instances) = entity.get(attribute) else {
+        return Vec::new();
+    };
+    match instances {
+        Value::Array(series) => series
+            .iter()
+            .filter(|instance| instance.get("value").is_some())
+            .map(|instance| observation(endpoint, urn, attribute, instance, fallback))
+            .collect(),
+        single if single.get("value").is_some() => {
+            vec![observation(endpoint, urn, attribute, single, fallback)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// One instance of one attribute as an `Observation`.
+///
+/// `phenomenonTime` is the instance's own `observedAt` and falls back to the entity's, because
+/// an observation without a time is not one a client can chart. The id is
+/// `{urn}/{attribute}/{observedAt}`, which is the identity the docs promise and stays
+/// resolvable across a restart.
+fn observation(
+    endpoint: &str,
+    urn: &str,
+    name: &str,
+    attribute: &Value,
+    fallback: Option<&str>,
+) -> Value {
+    let phenomenon = attribute
+        .get("observedAt")
+        .and_then(Value::as_str)
+        .or(fallback);
+    let stream = format!("{urn}/{name}");
+    let id = phenomenon.map_or_else(|| stream.clone(), |at| format!("{stream}/{at}"));
+    let mut observation = Map::new();
+    observation.insert("@iot.id".to_owned(), json!(id));
+    observation.insert(
+        "@iot.selfLink".to_owned(),
+        json!(self_link(endpoint, "Observations", &id)),
+    );
+    observation.insert("result".to_owned(), attribute["value"].clone());
+    if let Some(at) = phenomenon {
+        observation.insert("phenomenonTime".to_owned(), json!(at));
+    }
+    if let Some(at) = attribute.get("modifiedAt").and_then(Value::as_str) {
+        observation.insert("resultTime".to_owned(), json!(at));
+    }
+    observation.insert(
+        "Datastream@iot.navigationLink".to_owned(),
+        json!(self_link(endpoint, "Datastreams", &stream)),
+    );
+    Value::Object(observation)
 }
 
 /// One `ObservedProperty` per measured attribute (EP-12).
@@ -294,6 +340,11 @@ fn text<'a>(entity: &'a Value, name: &str) -> Option<&'a str> {
         .filter(|text| !text.is_empty())
 }
 
+/// The self link of one `Datastream`, which its `Observations` hang off.
+pub fn datastream_link(endpoint: &str, id: &str) -> String {
+    self_link(endpoint, "Datastreams", id)
+}
+
 /// The entity URN and the attribute of a `Datastream` id, which is `{urn}/{attribute}`.
 ///
 /// A URN has no slash, so the split is the first one. An id that is not shaped this way names
@@ -312,6 +363,149 @@ pub fn urn_of(id: &str) -> Option<&str> {
         return None;
     }
     Some(id.split_once('/').map_or(id, |(urn, _)| urn))
+}
+
+/// A `$filter` on a series, split into the part NGSI-LD carries as a window and the rest
+/// (T-0438).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Series {
+    /// `timerel`, `timeAt` and possibly `endTimeAt`, from the `phenomenonTime` predicates.
+    pub window: Vec<(String, String)>,
+    /// Everything else, as the NGSI-LD `q`.
+    pub q: Option<String>,
+}
+
+/// The `$filter` of an `Observations` request (T-0438).
+///
+/// `phenomenonTime` is not an attribute of the entity: it is the instant of an instance, and
+/// NGSI-LD selects on it with a temporal window rather than with `q`. So the predicates naming
+/// it are pulled out and become that window, and the rest compiles as any other filter does.
+///
+/// A `phenomenonTime` predicate is only expressible on the top-level `and` spine, because the
+/// window applies to the whole request. One inside a parenthesis or an `or` is refused by name
+/// rather than applied to both branches of a disjunction it was never in.
+pub fn series_filter(filter: &str) -> Result<Series, FilterError> {
+    const TIME: &str = "phenomenontime";
+    let mut window: Vec<(String, String)> = Vec::new();
+    let mut start: Option<String> = None;
+    let mut end: Option<String> = None;
+    let mut rest: Vec<&str> = Vec::new();
+
+    for term in conjuncts(filter) {
+        let lowered = term.to_ascii_lowercase();
+        if !lowered.contains(TIME) {
+            rest.push(term);
+            continue;
+        }
+        if !lowered.trim_start().starts_with(TIME) {
+            return Err(FilterError(
+                "phenomenonTime selects the window of the whole request, so it cannot sit \
+                 inside a parenthesis or an or"
+                    .to_owned(),
+            ));
+        }
+        let mut parts = term.split_whitespace();
+        let (Some(_), Some(operator), Some(value)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(FilterError(
+                "a phenomenonTime predicate is `phenomenonTime <op> <instant>`".to_owned(),
+            ));
+        };
+        if parts.next().is_some() {
+            return Err(FilterError(
+                "a phenomenonTime predicate takes one instant".to_owned(),
+            ));
+        }
+        let instant = instant_of(value)?;
+        match operator.to_ascii_lowercase().as_str() {
+            "gt" | "ge" => start = Some(instant),
+            "lt" | "le" => end = Some(instant),
+            "eq" => {
+                start = Some(instant.clone());
+                end = Some(instant);
+            }
+            other => {
+                return Err(FilterError(format!(
+                    "{other} is not supported on phenomenonTime"
+                )))
+            }
+        }
+    }
+
+    match (start, end) {
+        (Some(start), Some(end)) if start > end => {
+            return Err(FilterError("the window ends before it starts".to_owned()))
+        }
+        (Some(start), Some(end)) => {
+            window.push(("timerel".to_owned(), "between".to_owned()));
+            window.push(("timeAt".to_owned(), start));
+            window.push(("endTimeAt".to_owned(), end));
+        }
+        (Some(start), None) => {
+            window.push(("timerel".to_owned(), "after".to_owned()));
+            window.push(("timeAt".to_owned(), start));
+        }
+        (None, Some(end)) => {
+            window.push(("timerel".to_owned(), "before".to_owned()));
+            window.push(("timeAt".to_owned(), end));
+        }
+        (None, None) => {}
+    }
+
+    let q = match rest.is_empty() {
+        true => None,
+        false => Some(filter_to_q(&rest.join(" and "))?),
+    };
+    Ok(Series { window, q })
+}
+
+/// The top-level `and` terms of a filter, with everything inside parentheses left whole.
+fn conjuncts(filter: &str) -> Vec<&str> {
+    let mut terms = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let bytes = filter.as_bytes();
+    let mut at = 0usize;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => {
+                // ` and ` with its spaces, so an attribute named `brand` is not a connective.
+                let tail = &filter[at..];
+                if tail.len() >= 5 && tail[..5].eq_ignore_ascii_case(" and ") {
+                    terms.push(filter[start..at].trim());
+                    at += 5;
+                    start = at;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    terms.push(filter[start..].trim());
+    terms.into_iter().filter(|term| !term.is_empty()).collect()
+}
+
+/// One instant of an OData filter, quoted or bare, as RFC 3339.
+fn instant_of(value: &str) -> Result<String, FilterError> {
+    let text = value.trim().trim_matches('\'');
+    chrono::DateTime::parse_from_rfc3339(text)
+        .map(|_| text.to_owned())
+        .map_err(|_| FilterError(format!("{text} is not an RFC 3339 instant")))
+}
+
+/// Whether `$orderby` asks for the newest observation first.
+///
+/// The one ordering a chart asks for. Any other `$orderby` leaves the series in the order the
+/// broker returned it rather than being refused, because an ordering is a presentation detail
+/// and refusing one would break a client over something that changes no row.
+pub fn newest_first(order_by: Option<&str>) -> bool {
+    order_by.is_some_and(|raw| {
+        let lowered = raw.to_ascii_lowercase();
+        lowered.contains("phenomenontime") && lowered.contains("desc")
+    })
 }
 
 /// `$filter` compiled to the NGSI-LD `q` the other representations already use.

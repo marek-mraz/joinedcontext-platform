@@ -206,15 +206,17 @@ async fn the_conformance_list_claims_only_what_is_implemented() {
         .iter()
         .filter_map(Value::as_str)
         .collect();
-    assert!(claimed.contains(&"http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core"));
-    assert!(claimed.contains(&"http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/geojson"));
-    assert!(
-        !claimed.iter().any(|class| class.contains("cql2")),
-        "CQL2 is not implemented and must not be advertised: {claimed:?}"
-    );
-    assert!(
-        !claimed.iter().any(|class| class.contains("oas30")),
-        "there is no /api document yet: {claimed:?}"
+    // EP-30 names five and the endpoint claims those five; the tests below are what makes
+    // each claim true, and this one only holds the list to the requirement.
+    assert_eq!(
+        claimed,
+        vec![
+            "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core",
+            "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/oas30",
+            "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/geojson",
+            "http://www.opengis.net/spec/ogcapi-features-2/1.0/conf/crs",
+            "http://www.opengis.net/spec/ogcapi-features-3/1.0/conf/basic-cql2",
+        ],
     );
 }
 
@@ -525,11 +527,7 @@ async fn an_endpoint_without_the_representation_answers_404() {
 #[tokio::test]
 async fn an_unmapped_path_answers_404() {
     let broker = BrokerStub::start(vec![json!([])]).await;
-    for path in [
-        "/collections/X/items/y/z",
-        "/api",
-        "/collections/X/queryables",
-    ] {
+    for path in ["/collections/X/items/y/z", "/collections/X/queryables"] {
         let (status, _) = get(gateway(&broker.url, endpoint(&[])), &ogc(path)).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "for {path}");
     }
@@ -540,4 +538,327 @@ async fn an_unmapped_path_answers_404() {
 #[test]
 fn the_fixture_hides_nothing_by_default() {
     assert_eq!(endpoint(&[]).hidden_attributes, BTreeSet::new());
+}
+
+/// EP-40: the API description is generated from the endpoint, so what it lists is what this
+/// caller can actually reach. Held to the shape a client parses — the version, the servers, a
+/// `get` on every served path and no write half anywhere — rather than to prose.
+#[tokio::test]
+async fn the_api_document_describes_every_path_this_endpoint_serves() {
+    let broker =
+        BrokerStub::start(vec![json!([station("st-1", 34.2, "2026-09-01T10:00:00Z")])]).await;
+    let (status, body, headers) = call(
+        gateway(&broker.url, endpoint(&[])),
+        Method::GET,
+        &ogc("/api"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("application/vnd.oai.openapi+json;version=3.0"),
+    );
+
+    let document: Value = serde_json::from_slice(&body).expect("the document is JSON");
+    assert_eq!(document["openapi"], json!("3.0.3"));
+    assert_eq!(
+        document["servers"][0]["url"],
+        json!(format!("{HOST}/api/endpoint/{SLUG}/ogc/features")),
+    );
+
+    let paths = document["paths"].as_object().expect("a path map");
+    for served in [
+        "/",
+        "/api",
+        "/conformance",
+        "/collections",
+        "/collections/{collectionId}",
+        "/collections/{collectionId}/items",
+        "/collections/{collectionId}/items/{featureId}",
+    ] {
+        let path = paths.get(served).unwrap_or_else(|| panic!("{served}"));
+        assert!(path.get("get").is_some(), "{served} has no get operation");
+        assert!(
+            path["get"]["responses"]["200"].is_object(),
+            "{served} describes no answer"
+        );
+    }
+    // EP-39: there is no write half, so a client reading this document finds none to try.
+    for verb in ["put", "post", "patch", "delete"] {
+        assert!(
+            !body
+                .windows(verb.len() + 3)
+                .any(|w| w == format!("\"{verb}\":").as_bytes()),
+            "the document offers {verb}"
+        );
+    }
+    // The collections a caller may not see are not in the enum they would have to guess from.
+    assert_eq!(
+        paths["/collections/{collectionId}"]["parameters"][0]["schema"]["enum"],
+        json!(["AirQualityObserved"]),
+    );
+}
+
+/// EP-40: the landing page is the only URL a client is given, so the description has to be
+/// reachable from it under the relation OGC defines for it.
+#[tokio::test]
+async fn the_landing_page_points_at_the_api_document() {
+    let broker = BrokerStub::start(vec![json!([])]).await;
+    let (status, document) = get(gateway(&broker.url, endpoint(&[])), &ogc("/")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        hrefs(&document, "service-desc"),
+        vec![format!("{HOST}/api/endpoint/{SLUG}/ogc/features/api")],
+    );
+}
+
+/// EP-35: every operator of the subset reaches the broker as the NGSI-LD parameter it means.
+///
+/// The whole point of the class: a filter box in QGIS produces these, and each one has to
+/// narrow the upstream query rather than be dropped on the way. Asserted on the hop, because
+/// what matters is what the broker was asked, not what the gateway answered.
+#[tokio::test]
+async fn every_supported_cql2_operator_reaches_the_broker() {
+    // The caller's filter arrives as one parenthesized term, which is how the PDP conjoins it
+    // with the grants' own: no expression can pair a caller's operator with a grant's operand.
+    for (filter, expected) in [
+        ("pm10 > 50", "q=(pm10>50)"),
+        // The spacing a client actually sends, which the scanner separates on its own.
+        ("pm10>50", "q=(pm10>50)"),
+        ("pm10 = 50", "q=(pm10==50)"),
+        ("pm10 <> 50", "q=(pm10!=50)"),
+        ("pm10 BETWEEN 10 AND 20", "q=(pm10==10..20)"),
+        ("pm10 IN (10,20)", "q=(pm10==10,20)"),
+        ("pm10 IS NULL", "q=(!pm10)"),
+        ("pm10 IS NOT NULL", "q=(pm10)"),
+        ("name LIKE 'Kal%'", "q=(name~=\"^Kal.*$\")"),
+        ("pm10 > 50 AND pm25 < 20", "q=(pm10>50;pm25<20)"),
+        ("pm10 > 50 OR pm25 < 20", "q=((pm10>50|pm25<20))"),
+        ("NOT pm10 > 50", "q=(pm10<=50)"),
+        (
+            "T_AFTER(observedAt, TIMESTAMP('2026-09-01T00:00:00Z'))",
+            "timerel=after",
+        ),
+        (
+            "T_BEFORE(observedAt, TIMESTAMP('2026-09-01T00:00:00Z'))",
+            "timerel=before",
+        ),
+        (
+            "T_DURING(observedAt, INTERVAL('2026-09-01T00:00:00Z','2026-09-02T00:00:00Z'))",
+            "timerel=between",
+        ),
+        (
+            "S_INTERSECTS(location, POLYGON((19.1 48.7, 19.2 48.7, 19.2 48.8, 19.1 48.7)))",
+            "georel=intersects",
+        ),
+        (
+            "S_WITHIN(location, BBOX(19.1,48.7,19.2,48.8))",
+            "georel=within",
+        ),
+        (
+            "NOT S_INTERSECTS(location, POINT(19.1 48.7))",
+            "georel=disjoint",
+        ),
+    ] {
+        let broker = BrokerStub::start(vec![json!([])]).await;
+        let (status, _) = get(
+            gateway(&broker.url, endpoint(&[])),
+            &ogc(&format!(
+                "/collections/AirQualityObserved/items?filter={}&filter-lang=cql2-text",
+                urlencode(filter),
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "for {filter}");
+        let hop = broker
+            .hops()
+            .into_iter()
+            .find(|hop| hop.path == "/ngsi-ld/v1/entities")
+            .unwrap_or_else(|| panic!("no entity query for {filter}"));
+        let sent = percent_decode(&hop.query);
+        assert!(
+            sent.contains(expected),
+            "{filter} sent {sent}, expected {expected}"
+        );
+    }
+}
+
+/// EP-35: what the subset does not cover is refused with the operator named, never applied
+/// half way. A filter that is silently dropped returns rows the caller asked not to see.
+#[tokio::test]
+async fn an_unsupported_cql2_construct_is_refused_with_its_name() {
+    for (filter, named) in [
+        ("ACCENTI(name) = 'Kallio'", "ACCENTI"),
+        ("CASEI(name) = 'kallio'", "CASEI"),
+        ("NOT name LIKE 'Kal%'", "NOT LIKE"),
+        (
+            "NOT S_WITHIN(location, BBOX(19.1,48.7,19.2,48.8))",
+            "NOT S_WITHIN",
+        ),
+        (
+            "pm10 > 50 OR S_WITHIN(location, BBOX(19.1,48.7,19.2,48.8))",
+            "whole query",
+        ),
+        ("pm10 >", "expected a value"),
+        ("   ", "empty"),
+    ] {
+        let broker = BrokerStub::start(vec![json!([])]).await;
+        let (status, body, headers) = call(
+            gateway(&broker.url, endpoint(&[])),
+            Method::GET,
+            &ogc(&format!(
+                "/collections/AirQualityObserved/items?filter={}&filter-lang=cql2-text",
+                urlencode(filter),
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "for {filter:?}");
+        assert_eq!(
+            headers
+                .get("x-parameter")
+                .and_then(|value| value.to_str().ok()),
+            Some("filter"),
+            "for {filter:?}"
+        );
+        let detail = String::from_utf8_lossy(&body).to_string();
+        assert!(
+            detail.contains(named),
+            "{filter:?} was refused as {detail}, which does not name {named}"
+        );
+        assert!(
+            broker
+                .hops()
+                .iter()
+                .all(|hop| hop.path != "/ngsi-ld/v1/entities"),
+            "{filter:?} reached the broker anyway"
+        );
+    }
+}
+
+/// EP-35: a filter language this endpoint does not read is refused rather than guessed at.
+#[tokio::test]
+async fn a_filter_in_another_language_is_refused() {
+    let broker = BrokerStub::start(vec![json!([])]).await;
+    let (status, _, headers) = call(
+        gateway(&broker.url, endpoint(&[])),
+        Method::GET,
+        &ogc("/collections/AirQualityObserved/items?filter=pm10%3E50&filter-lang=cql2-json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        headers
+            .get("x-parameter")
+            .and_then(|value| value.to_str().ok()),
+        Some("filter-lang"),
+    );
+}
+
+/// NGSI-LD carries one `geoQ` and one `temporalQ`, so `bbox` and a spatial filter cannot both
+/// be applied. Refused rather than half applied: dropping one of them widens the answer.
+#[tokio::test]
+async fn a_filter_and_the_parameter_that_means_the_same_thing_cannot_both_be_sent() {
+    for query in [
+        "bbox=19.1,48.7,19.2,48.8&filter=S_WITHIN(location,BBOX(19.1,48.7,19.2,48.8))",
+        "datetime=2026-09-01T00:00:00Z/..&filter=T_AFTER(observedAt,TIMESTAMP('2026-09-01T00:00:00Z'))",
+    ] {
+        let broker = BrokerStub::start(vec![json!([])]).await;
+        let (status, _, headers) = call(
+            gateway(&broker.url, endpoint(&[])),
+            Method::GET,
+            &ogc(&format!("/collections/AirQualityObserved/items?{}", urlencode_query(query))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "for {query}");
+        assert_eq!(
+            headers
+                .get("x-parameter")
+                .and_then(|value| value.to_str().ok()),
+            Some("filter"),
+            "for {query}"
+        );
+    }
+}
+
+/// GW10: a filter is caller input compiled into an upstream query, so the grants still apply
+/// to it. The endpoint's own policy carries a `q`, and both survive into the one sent.
+#[tokio::test]
+async fn a_filter_is_intersected_with_the_grants_and_never_replaces_them() {
+    let broker = BrokerStub::start(vec![json!([])]).await;
+    let mut restricted = endpoint(&[]);
+    restricted.policies = vec![serde_norway::from_str(
+        r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+operations: [queryEntity, retrieveEntity]
+q: "pm10>=0"
+"#,
+    )
+    .expect("the policy spec parses")];
+
+    let (status, _) = get(
+        gateway(&broker.url, restricted),
+        &ogc("/collections/AirQualityObserved/items?filter=pm10%20%3E%2050"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let hop = broker
+        .hops()
+        .into_iter()
+        .find(|hop| hop.path == "/ngsi-ld/v1/entities")
+        .expect("one entity query");
+    let sent = percent_decode(&hop.query);
+    assert!(
+        sent.contains("pm10>50"),
+        "the caller's filter is gone: {sent}"
+    );
+    assert!(
+        sent.contains("pm10>=0"),
+        "the grant's own filter is gone: {sent}"
+    );
+}
+
+/// Minimal percent-encoding for the query strings these tests build.
+fn urlencode(raw: &str) -> String {
+    raw.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+/// The same, but leaving the `&` and `=` that separate the parameters alone.
+fn urlencode_query(raw: &str) -> String {
+    raw.split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((name, value)) => format!("{name}={}", urlencode(value)),
+            None => urlencode(pair),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Enough percent-decoding to read back a query the gateway built.
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' && at + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&raw[at + 1..at + 3], 16) {
+                out.push(byte);
+                at += 3;
+                continue;
+            }
+        }
+        out.push(bytes[at]);
+        at += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
 }
