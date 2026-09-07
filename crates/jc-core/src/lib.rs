@@ -36,11 +36,11 @@ pub use kinds::{
     Output, OutputMode, Owner, Pipeline, PipelineClass, PipelineQuotas, PipelineSource,
     PipelineSpec, PlatformApiOrigin, Policy, PolicyEffect, PolicySpec, Principal, PrincipalKind,
     Project, ProjectSpec, Projection, Quotas, RateLimits, RegistrationInfo, RemoteSource,
-    Representation, RoleBinding, RoleScope, Schedule, ScopeDefinition, ScopeDefinitionSpec, SemVer,
-    ServiceAccount, ServiceAccountLimits, ServiceAccountSpec, SharedSpaceReference,
-    SharedSpaceReferenceSpec, SourceQuery, SubscriptionTrigger, SyncMode, SyncOrigin, SyncSource,
-    SyncSourceSpec, TemporalConstraint, TemporalWindow, Trigger, Validity, VocabularyAlignment,
-    Workload,
+    Representation, Role, RoleBinding, RoleBindingSpec, RoleScope, RoleSpec, Schedule,
+    ScopeDefinition, ScopeDefinitionSpec, SemVer, ServiceAccount, ServiceAccountLimits,
+    ServiceAccountSpec, SharedSpaceReference, SharedSpaceReferenceSpec, SourceQuery,
+    SubscriptionTrigger, SyncMode, SyncOrigin, SyncSource, SyncSourceSpec, TemporalConstraint,
+    TemporalWindow, Trigger, Validity, VocabularyAlignment, Workload,
 };
 pub use registry::{by_kind, by_plural, KindInfo, KINDS};
 pub use urn::Urn;

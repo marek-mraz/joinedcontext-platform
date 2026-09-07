@@ -53,6 +53,28 @@ spec:
   operations: [retrieveOps]
 "#;
 
+const ROLE: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Role
+metadata:
+  name: pipeline-developer
+  namespace: org
+spec:
+  rules:
+    - kinds: [Pipeline]
+      verbs: [propose]
+"#;
+
+const ROLE_BINDING: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: RoleBinding
+metadata:
+  name: ovzdusie-developers
+  namespace: org
+spec:
+  subjects: [{ group: air-quality-team }]
+  role: pipeline-developer
+  scope: { project: ovzdusie }
+"#;
+
 fn change(action: Action, body: &str) -> ResourceChange {
     let declared: RawManifest = serde_norway::from_str(body).expect("fixture parses");
     ResourceChange {
@@ -144,6 +166,12 @@ fn a_managed_space_and_a_new_pipeline_are_yellow() {
 fn identity_access_and_lane_policy_are_red_even_when_they_only_add() {
     assert_eq!(lane_of(&change(Action::Create, POLICY)).lane, Lane::Red);
     assert_eq!(lane_of(&change(Action::Update, ORG)).lane, Lane::Red);
+    // PF-52: who may change configuration is itself red, even when a binding only adds a subject.
+    assert_eq!(lane_of(&change(Action::Create, ROLE)).lane, Lane::Red);
+    assert_eq!(
+        lane_of(&change(Action::Update, ROLE_BINDING)).lane,
+        Lane::Red
+    );
 }
 
 #[test]

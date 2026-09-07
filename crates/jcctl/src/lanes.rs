@@ -50,6 +50,8 @@ const ALWAYS_RED: &[&str] = &[
     "DataAgreement",
     "DataSpaceParticipant",
     "ContextSourceRegistration",
+    "Role",
+    "RoleBinding",
 ];
 
 /// Why a change is in its lane, in one clause, for the proposal body and the audit trail.

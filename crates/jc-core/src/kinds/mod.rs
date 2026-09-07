@@ -12,6 +12,7 @@ pub mod mapping;
 pub mod organization;
 pub mod pipeline;
 pub mod policy;
+pub mod role;
 pub mod service_account;
 pub mod space;
 pub mod sync;
@@ -52,6 +53,7 @@ pub use policy::{
     EntitySelector, Operation, OperationGroup, OperationRef, PolicyEffect, PolicySpec, Principal,
     PrincipalKind, RegistrationInfo, ScopeDefinitionSpec, Validity,
 };
+pub use role::{BindingValidity, Constraint, RoleBindingSpec, RoleSpec, Rule, Subject, Verb};
 pub use service_account::{
     Credential, CredentialKind, KubernetesBinding, Owner, RoleBinding, RoleScope,
     ServiceAccountLimits, ServiceAccountSpec, Workload,
@@ -102,6 +104,9 @@ pub type DataSpaceParticipant = crate::envelope::ResourceEnvelope<DataSpaceParti
 pub type DataOffer = crate::envelope::ResourceEnvelope<DataOfferSpec>;
 /// `kind: DataAgreement` as a whole manifest.
 pub type DataAgreement = crate::envelope::ResourceEnvelope<DataAgreementSpec>;
+/// `kind: Role` as a whole manifest. (`kind: RoleBinding` has no alias: `RoleBinding` is the
+/// grant inside a ServiceAccount; use `ResourceEnvelope<RoleBindingSpec>`.)
+pub type Role = crate::envelope::ResourceEnvelope<RoleSpec>;
 /// `kind: UiSchema` as a whole manifest.
 pub type UiSchema = crate::envelope::ResourceEnvelope<UiSchemaSpec>;
 

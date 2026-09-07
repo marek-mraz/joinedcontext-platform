@@ -68,6 +68,32 @@ pub struct RoleScope {
     pub organization: Option<String>,
 }
 
+impl RoleScope {
+    /// Exactly one target, and it is a well-formed name of its level (shared with `RoleBinding`, PF-49).
+    pub fn validate(&self, field: &'static str) -> Result<()> {
+        let count = usize::from(self.context_space.is_some())
+            + usize::from(self.project.is_some())
+            + usize::from(self.organization.is_some());
+        if count != 1 {
+            return Err(Error::Name {
+                field,
+                value: format!("{count} scopes defined"),
+                reason: "role scope must specify exactly one of `contextSpace`, `project`, or `organization`",
+            });
+        }
+        if let Some(space) = &self.context_space {
+            names::validate_space_name(space)?;
+        }
+        if let Some(project) = &self.project {
+            names::validate_namespace(project)?;
+        }
+        if let Some(org) = &self.organization {
+            names::validate_dns1123_label(org)?;
+        }
+        Ok(())
+    }
+}
+
 /// Declared credential for a service account (PF-36, PF-37).
 ///
 /// **Security note**: The security property of this kind is the complete absence of secret fields.
@@ -183,27 +209,7 @@ impl ServiceAccountSpec {
         for role_binding in &self.roles {
             names::validate_dns1123_label(&role_binding.role)?;
 
-            let scope = &role_binding.scope;
-            let count = scope.context_space.is_some() as usize
-                + scope.project.is_some() as usize
-                + scope.organization.is_some() as usize;
-            if count != 1 {
-                return Err(Error::Name {
-                    field: "spec.roles.scope",
-                    value: format!("{count} scopes defined"),
-                    reason: "role scope must specify exactly one of `contextSpace`, `project`, or `organization`",
-                });
-            }
-
-            if let Some(ref space) = scope.context_space {
-                names::validate_space_name(space)?;
-            }
-            if let Some(ref proj) = scope.project {
-                names::validate_namespace(proj)?;
-            }
-            if let Some(ref org) = scope.organization {
-                names::validate_dns1123_label(org)?;
-            }
+            role_binding.scope.validate("spec.roles.scope")?;
 
             for t in &role_binding.types {
                 names::validate_entity_type(t)?;

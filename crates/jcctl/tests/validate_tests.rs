@@ -65,7 +65,64 @@ spec:
 "#,
     );
     write(&dir, ENDPOINT_PATH, ENDPOINT);
+    write(&dir, "users/roles/pipeline-developer.yaml", ROLE);
+    write(&dir, ROLE_BINDING_PATH, ROLE_BINDING);
     dir
+}
+
+const ROLE: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Role
+metadata:
+  name: pipeline-developer
+  namespace: org
+spec:
+  rules:
+    - kinds: [Pipeline, DataSource, Mapping]
+      verbs: [propose]
+    - kinds: [Endpoint]
+      verbs: [propose]
+      constraints:
+        - { field: spec.audience, notIn: [public] }
+"#;
+
+const ROLE_BINDING_PATH: &str = "users/assignments/ovzdusie-developers.yaml";
+
+const ROLE_BINDING: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: RoleBinding
+metadata:
+  name: ovzdusie-developers
+  namespace: org
+spec:
+  subjects: [{ group: air-quality-team }, { user: jana.kovacova@banskabystrica.sk }]
+  role: pipeline-developer
+  scope: { project: ovzdusie }
+  validity: { notAfter: "2026-12-31T23:59:59Z" }
+"#;
+
+/// PF-49: `users/` is validated like everything else; a binding with two scopes is refused
+/// with the file that carries it.
+#[test]
+fn a_binding_with_two_scopes_is_refused_from_users() {
+    let dir = valid_repo("two-scopes");
+    write(
+        &dir,
+        ROLE_BINDING_PATH,
+        &ROLE_BINDING.replace(
+            "scope: { project: ovzdusie }",
+            "scope: { project: ovzdusie, organization: banskabystrica }",
+        ),
+    );
+
+    let report = validate::run(&dir);
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    assert_eq!(report.findings[0].path, Path::new(ROLE_BINDING_PATH));
+    assert!(
+        report.findings[0].message.contains("exactly one"),
+        "{}",
+        report.findings[0].message
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 const ENDPOINT_PATH: &str = "projects/ovzdusie/spaces/ovzdusie/endpoints/public-air.yaml";
@@ -88,7 +145,7 @@ fn a_valid_repository_has_no_findings() {
 
     let report = validate::run(&dir);
     assert_eq!(report.findings, vec![]);
-    assert_eq!(report.checked, 4);
+    assert_eq!(report.checked, 6);
     assert!(report.is_valid());
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -109,7 +166,7 @@ fn a_cross_field_invariant_is_reported_with_the_file_that_broke_it() {
     );
 
     let report = validate::run(&dir);
-    assert_eq!(report.checked, 3);
+    assert_eq!(report.checked, 5);
     assert_eq!(report.findings.len(), 1);
 
     let finding = &report.findings[0];
@@ -139,7 +196,7 @@ fn a_field_that_is_not_in_the_kind_is_refused() {
     );
 
     let report = validate::run(&dir);
-    assert_eq!(report.checked, 3);
+    assert_eq!(report.checked, 5);
     assert_eq!(report.findings.len(), 1);
     assert!(
         report.findings[0].message.contains("token"),
@@ -159,7 +216,7 @@ fn a_manifest_at_the_wrong_path_is_reported() {
     write(&dir, "projects/ovzdusie/public-air.yaml", ENDPOINT);
 
     let report = validate::run(&dir);
-    assert_eq!(report.checked, 4);
+    assert_eq!(report.checked, 6);
     assert_eq!(report.findings.len(), 1);
     assert!(
         report.findings[0].message.contains(ENDPOINT_PATH),
