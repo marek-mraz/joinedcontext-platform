@@ -36,6 +36,8 @@ import yaml
 
 from common import as_path, generator_version
 from gen_context import compile_context
+from gen_docs import compile_docs
+from gen_example import compile_example
 from gen_json_schema import compile_schema
 from gen_rdf_artifacts import compile_owl, compile_shacl
 from import_sdm import RAW_BASE, ImportError_, _get, convert, fetch, split_identifier
@@ -59,9 +61,13 @@ CATALOGUE_TTL_SECONDS = 24 * 60 * 60
 
 #: The artifact renderers, keyed by the field the Portal deserialises them into (API/01 §11).
 #: Renaming a key here is a silent empty preview in the editor, which `test_service.py` guards.
+#: The first four are the set DM-02 commits beside the source, in that order; SHACL and OWL
+#: are DM-44's artifact-store set and are rendered in the same run so they cannot disagree.
 RENDERERS: tuple[tuple[str, Callable[[str], Any]], ...] = (
     ("jsonSchema", compile_schema),
     ("context", compile_context),
+    ("docs", compile_docs),
+    ("example", compile_example),
     ("shacl", compile_shacl),
     ("owl", compile_owl),
 )
@@ -90,6 +96,10 @@ def artifacts(
     # them. Share one SchemaView across them if the preview ever has to be faster.
     with as_path(source) as path:
         for field, render in RENDERERS:
+            if field in rendered:
+                # An import carries the catalogue's own example down with it, and real data
+                # beats a value derived from a range, so the generated one does not replace it.
+                continue
             try:
                 rendered[field] = render(path)
             except Exception as err:  # noqa: BLE001 - a generator crash is a message, not a 500

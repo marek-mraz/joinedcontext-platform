@@ -12,10 +12,11 @@ spec:
   version: 1.0.0
   lifecycle: draft
   classes: ["AirQualityObserved"]
-  # DM-02 commits four artifacts beside the source. Model Tools renders these two today; the
-  # documentation and the validated example are declared here when its `gen-doc` and example
-  # renderers land (T-0415), because a declared artifact the service does not render fails the
-  # run rather than being committed empty.
+  # The four artifacts DM-02 commits beside the source. `jcctl model generate` writes them and
+  # CI fails on any difference; a declared artifact Model Tools does not render fails the run
+  # rather than being committed empty.
   artifacts:
     jsonSchema: json-schema/air-quality-observed.v1.json
     context: context/air-quality-observed.v1.jsonld
+    docs: docs/air-quality-observed.md
+    example: examples/air-quality-observed.example.jsonld

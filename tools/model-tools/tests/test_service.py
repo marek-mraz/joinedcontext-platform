@@ -28,12 +28,17 @@ ARTIFACT_FIELDS = {
     "linkml",
     "jsonSchema",
     "context",
+    "docs",
+    "example",
     "shacl",
     "owl",
-    "example",
     "generatorVersion",
     "errors",
 }
+
+#: The four DM-02 commits beside the source. `jcctl model generate` writes exactly these, so a
+#: version that stops rendering one of them stops a repository from regenerating its artifacts.
+COMMITTED_FIELDS = ("jsonSchema", "context", "docs", "example")
 
 #: One subject of the catalogue index, shaped as the Smart Data Models organisation publishes
 #: it. The details document is the one that carries URLs, so it also proves the index drops
@@ -97,6 +102,15 @@ def empty_cache(monkeypatch):
     monkeypatch.setattr(service, "CATALOGUE", Catalogue())
 
 
+def test_the_shipped_models_are_found_by_an_absolute_path():
+    """`MODEL_TOOLS_MODELS` is handed to LinkML's loader, which resolves a relative entry
+    against the schema being read; the image sets it, and CI may set a relative one."""
+    from common import SHIPPED_MODELS
+
+    assert SHIPPED_MODELS.is_absolute()
+    assert (SHIPPED_MODELS / "ngsi-ld-core.linkml.yaml").exists()
+
+
 def test_a_model_that_compiles_answers_every_artifact(senzor):
     status, body = call("POST", "/generate", {"source": Path(senzor).read_text()})
 
@@ -107,6 +121,16 @@ def test_a_model_that_compiles_answers_every_artifact(senzor):
     assert "http://www.w3.org/ns/shacl#" in body["shacl"]
     assert "owl:Ontology" in body["owl"] or "owl#Ontology" in body["owl"]
     assert body["generatorVersion"].startswith("linkml-")
+
+
+def test_the_four_artifacts_the_repository_commits_all_come_back(senzor):
+    """DM-02, DM-32: `jcctl model generate` writes exactly these four beside the source, so a
+    version that stops rendering one of them stops a repository from regenerating at all."""
+    _, body = call("POST", "/generate", {"source": Path(senzor).read_text()})
+
+    assert [field for field in COMMITTED_FIELDS if field not in body] == []
+    assert body["docs"].startswith("# "), "one Markdown page, not a directory"
+    assert body["example"]["type"] == "AirQualityObserved"
 
 
 def test_a_model_that_does_not_compile_is_two_hundred_with_one_reason():
@@ -175,6 +199,7 @@ def test_an_import_answers_the_linkml_it_produced(
     assert status == 200
     assert body["errors"] == []
     assert f"spec.source.commit: {sdm_provenance['commit']}" in body["linkml"]
+    # The catalogue's own example, not one derived from the ranges: real data wins.
     assert body["example"] == example
     assert body["jsonSchema"] and body["context"] and body["shacl"] and body["owl"]
 

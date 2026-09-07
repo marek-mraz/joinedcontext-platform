@@ -27,7 +27,16 @@ test = ["pytest==9.1.1"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-py-modules = ["common", "gen_json_schema", "gen_context", "gen_rdf_artifacts", "import_sdm", "service"]
+py-modules = [
+  "common",
+  "gen_json_schema",
+  "gen_context",
+  "gen_docs",
+  "gen_example",
+  "gen_rdf_artifacts",
+  "import_sdm",
+  "service",
+]
 
 # `models/` sits beside `src/` and is not part of a package, so it is copied into the image
 # rather than installed; `MODEL_TOOLS_MODELS` tells `common.py` where it landed (DM-09, DM-18).

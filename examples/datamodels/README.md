@@ -17,10 +17,14 @@ jcctl model diff     --repo-dir examples/datamodels --url http://127.0.0.1:8080 
 jcctl model generate --repo-dir examples/datamodels --url http://127.0.0.1:8080   # writes them
 ```
 
-`spec.artifacts` declares the two artifacts Model Tools renders today. DM-02 commits four; the
-documentation and the validated example arrive with the `gen-doc` and example renderers
-(T-0415), and this manifest declares them in the same commit — a declared artifact the service
-does not render fails the run rather than being written empty.
+`spec.artifacts` declares the four artifacts DM-02 commits: the JSON Schema, the `@context`,
+one Markdown page and one example entity that validates against both (DM-21). A declared
+artifact Model Tools does not render fails the run rather than being written empty.
+
+The example carries `stationName` as a plain string and `location` as a geometry inside one,
+which is not the NGSI-LD simplified form of a LanguageProperty or a GeoProperty. It is what the
+generated JSON Schema currently demands, and DM-21 says the example validates against it; both
+are corrected together in T-0416.
 
 The names are the demo story's (`DEMO.md`): organization `hel.fi`, project `helsinki`, space
 `air-quality`. It is a demonstration built on the city's open data and is not affiliated with

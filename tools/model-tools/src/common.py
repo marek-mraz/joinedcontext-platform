@@ -63,9 +63,12 @@ JSONLD_KEYWORD_ANNOTATION = "jsonld_keyword"
 #: generation working with no network at all (DM-18). The folder sits beside `src/` in the
 #: repository and is copied to its own path in the image, which is what `MODEL_TOOLS_MODELS`
 #: names: an installed module has no repository around it to walk up into.
+# Absolute on purpose: the import map is handed to LinkML's loader, which resolves a relative
+# entry against the *schema's* directory and not the working directory, so a relative
+# MODEL_TOOLS_MODELS would look for the shipped models beside every model it is asked to read.
 SHIPPED_MODELS = Path(
     os.environ.get("MODEL_TOOLS_MODELS") or Path(__file__).resolve().parent.parent / "models"
-)
+).resolve()
 # The loader appends `.yaml` to whatever an import maps to, so the entry stops at the stem.
 IMPORT_MAP = {"ngsi-ld-core": str(SHIPPED_MODELS / "ngsi-ld-core.linkml")}
 

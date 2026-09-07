@@ -319,9 +319,8 @@ fn a_repository_with_no_pin_cannot_be_generated_into() {
 
 #[test]
 fn a_declared_artifact_the_service_does_not_render_fails_the_run() {
-    // Model Tools renders `jsonSchema`, `context`, `shacl` and `owl` today; DM-43 also asks for
-    // the documentation and the validated example, and until it renders them a model declaring
-    // them must fail rather than commit an empty file (T-0415).
+    // A Model Tools older than the four DM-02 artifacts, or one whose renderer for an artifact
+    // failed: the declared file must fail the run by name rather than be committed empty.
     let dir = repo("model-missing", PIN);
     let url = spawn(vec![
         ("/healthz", json!({"generatorVersion": PIN}).to_string()),
