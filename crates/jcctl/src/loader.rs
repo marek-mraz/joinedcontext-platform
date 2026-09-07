@@ -291,10 +291,13 @@ impl Repository {
                 continue;
             }
 
-            // An encrypted secrets file is YAML but not a manifest, and its values are
-            // decrypted by the secret store, not read here (CC-06).
+            // YAML the repository holds that is not a manifest: the authoring source of a
+            // data model, a Bento stream, the instance settings (Architecture/06 section 1),
+            // and an encrypted secrets file, whose values the secret store decrypts and this
+            // walk never reads (CC-06).
             if file_name.ends_with(".linkml.yaml")
                 || file_name == "bento.yaml"
+                || file_name == crate::model::SETTINGS_FILE
                 || crate::secrets::sops::is_encrypted_file(file_name)
             {
                 continue;

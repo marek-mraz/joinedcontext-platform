@@ -11,6 +11,7 @@ pub mod csr;
 pub mod diff;
 pub mod lanes;
 pub mod loader;
+pub mod model;
 pub mod pipelines;
 pub mod platform;
 pub mod publish;

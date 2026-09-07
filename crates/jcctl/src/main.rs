@@ -7,11 +7,12 @@
 
 use jcctl::commands;
 use jcctl::loader::Repository;
+use jcctl::model;
 use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl schema export [--out <dir>]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl schema export [--out <dir>]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -31,6 +32,14 @@ fn main() -> ExitCode {
         ["export", rest @ ..] => match export_options(rest) {
             Some((space, out, project)) => export(&space, &out, project.as_deref()),
             None => usage(),
+        },
+        ["model", "import", id, rest @ ..] => match import_options(rest) {
+            Some((out, url)) => model_import(id, &out, url),
+            None => usage(),
+        },
+        ["model", verb, rest @ ..] => match (model_mode(verb), model_options(rest)) {
+            (Some(mode), Some((dir, url))) => model(&dir, url, mode),
+            _ => usage(),
         },
         ["schema", "export", rest @ ..] => match out_dir(rest) {
             Some(out) => match export_schemas(&out) {
@@ -140,6 +149,114 @@ fn apply(dir: &Path, options: commands::apply::Options) -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// Renders every DataModel through Model Tools (API/03 section 4, DM-02, DM-19, DM-32).
+///
+/// `diff` exits 2 the way `plan` does: a committed artifact that no longer matches a fresh
+/// rendering is a pending change, and CI reads the code rather than the log.
+fn model(dir: &Path, url: Option<String>, mode: model::Mode) -> ExitCode {
+    let url = match url.or_else(|| std::env::var(model::URL_ENV).ok()) {
+        Some(url) => url,
+        None => {
+            return fail(&format!(
+                "no Model Tools URL: pass --url or set {} (API/03 section 4)",
+                model::URL_ENV
+            ))
+        }
+    };
+    let tools = model::ModelTools::new(url);
+    let report = match model::run(dir, &tools, mode) {
+        Ok(report) => report,
+        Err(err) => return fail(&err.to_string()),
+    };
+
+    println!("{}", json(&report.to_json()));
+    if report.failed() > 0 {
+        ExitCode::FAILURE
+    } else if report.stale() > 0 {
+        ExitCode::from(2)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Imports one Smart Data Models model as LinkML (DM-07..DM-11).
+fn model_import(id: &str, out: &Path, url: Option<String>) -> ExitCode {
+    let url = match url.or_else(|| std::env::var(model::URL_ENV).ok()) {
+        Some(url) => url,
+        None => {
+            return fail(&format!(
+                "no Model Tools URL: pass --url or set {} (API/03 section 4)",
+                model::URL_ENV
+            ))
+        }
+    };
+    let result = match model::import(&model::ModelTools::new(url), id, out) {
+        Ok(result) => result,
+        Err(err) => return fail(&err.to_string()),
+    };
+
+    let failed = result["errors"].as_array().is_some_and(|e| !e.is_empty());
+    println!("{}", json(&result));
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// The verb after `model`, or `None` for anything else.
+fn model_mode(verb: &str) -> Option<model::Mode> {
+    match verb {
+        "generate" => Some(model::Mode::Generate),
+        "diff" => Some(model::Mode::Diff),
+        "validate" => Some(model::Mode::Validate),
+        _ => None,
+    }
+}
+
+/// Parses `--repo-dir` and the optional `--url`, in any order.
+fn model_options(args: &[&str]) -> Option<(PathBuf, Option<String>)> {
+    let (mut dir, mut url) = (None, None);
+    let mut rest = args;
+    while let [flag, value, tail @ ..] = rest {
+        match *flag {
+            "--repo-dir" => dir = Some(PathBuf::from(value)),
+            "--url" => url = Some((*value).to_owned()),
+            _ => return None,
+        }
+        rest = tail;
+    }
+    if rest.is_empty() {
+        dir.map(|dir| (dir, url))
+    } else {
+        None
+    }
+}
+
+/// Parses `--out` and the optional `--url`, in any order.
+fn import_options(args: &[&str]) -> Option<(PathBuf, Option<String>)> {
+    let (mut out, mut url) = (None, None);
+    let mut rest = args;
+    while let [flag, value, tail @ ..] = rest {
+        match *flag {
+            "--out" => out = Some(PathBuf::from(value)),
+            "--url" => url = Some((*value).to_owned()),
+            _ => return None,
+        }
+        rest = tail;
+    }
+    if rest.is_empty() {
+        out.map(|out| (out, url))
+    } else {
+        None
+    }
+}
+
+/// One JSON document per run, so a CI step reads the result instead of the log.
+fn json(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 
 /// Parses the two deletion flags, in either order; `None` on anything else (CC-19).

@@ -21,7 +21,7 @@ jobs:
     # The one non-Rust component (Architecture/11 §6.5). It runs beside the Rust job rather
     # than after it, so the fast lane stays as long as its slowest job and no longer.
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 10
     defaults: { run: { working-directory: tools/model-tools } }
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +29,26 @@ jobs:
         with: { python-version: "3.11", cache: "pip", cache-dependency-path: tools/model-tools/pyproject.toml }
       - run: pip install .[test]
       - run: pytest -q
+      # DM-02: a committed artifact must equal what this generator renders now, or the schema a
+      # partner reads is not the schema the source says. The check lives in this job because
+      # the Model Tools it needs is already installed here, and it runs `jcctl model diff` —
+      # the same code path the Portal preview and an agent use, which is the point of DM-32.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Every DataModel's artifacts are the ones this generator renders
+        working-directory: ${{ github.workspace }}
+        env:
+          MODEL_TOOLS_MODELS: tools/model-tools/models
+        run: |
+          python3 -m service --host 127.0.0.1 --port 8080 &
+          for _ in $(seq 30); do
+            curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/healthz
+          # Exit 2 means a committed artifact is stale: regenerate with `jcctl model generate`
+          # and commit the result beside the source (DM-01, DM-02).
+          cargo run -q -p jcctl -- model diff --repo-dir examples/datamodels --url http://127.0.0.1:8080
   pipelines:
     # PL-22: the shipped ingestion examples are linted and run against their golden fixtures.
     # Bento is pinned by version and verified by checksum, the way an image is pinned by digest.
