@@ -114,6 +114,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "schedule": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Schedule"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How often the source's schema surface is mirrored; 24 hours when absent (DM-49)."
         }
       },
       "required": [
@@ -388,6 +399,27 @@
           "type": "string"
         }
       ]
+    },
+    "Schedule": {
+      "additionalProperties": false,
+      "description": "How often a [`SyncSourceSpec`] runs (MF-28): `{ interval: 30m }` or `{ webhook: true }`.\n\nExactly one of the two members is set, for the same reason as [`SyncOrigin`].",
+      "properties": {
+        "interval": {
+          "description": "Fixed interval such as `30m`, `6h` or `1d` (suffixes `s`, `m`, `h`, `d`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "webhook": {
+          "description": "Driven by a webhook from the source instead of a timer; only `true` is a schedule.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "Status": {
       "additionalProperties": false,

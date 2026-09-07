@@ -156,6 +156,27 @@
         }
       ]
     },
+    "Schedule": {
+      "additionalProperties": false,
+      "description": "How often a [`SyncSourceSpec`] runs (MF-28): `{ interval: 30m }` or `{ webhook: true }`.\n\nExactly one of the two members is set, for the same reason as [`SyncOrigin`].",
+      "properties": {
+        "interval": {
+          "description": "Fixed interval such as `30m`, `6h` or `1d` (suffixes `s`, `m`, `h`, `d`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "webhook": {
+          "description": "Driven by a webhook from the source instead of a timer; only `true` is a schedule.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "SecretRef": {
       "additionalProperties": false,
       "description": "Reference to a credential stored in SOPS or OpenBao (PF-36).\n\n`deny_unknown_fields` is a security control: it rejects inline `value:` or `password:` fields at parse time, enforcing that secrets never appear in Git or manifest files.",
@@ -210,6 +231,17 @@
             }
           ],
           "description": "Opaque slug of the target endpoint."
+        },
+        "schedule": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Schedule"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How often the peer's schema surface is mirrored; 24 hours when absent (DM-49)."
         }
       },
       "required": [

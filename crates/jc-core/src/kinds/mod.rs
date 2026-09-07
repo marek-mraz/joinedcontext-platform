@@ -100,3 +100,38 @@ pub type DataSpaceParticipant = crate::envelope::ResourceEnvelope<DataSpaceParti
 pub type DataOffer = crate::envelope::ResourceEnvelope<DataOfferSpec>;
 /// `kind: DataAgreement` as a whole manifest.
 pub type DataAgreement = crate::envelope::ResourceEnvelope<DataAgreementSpec>;
+
+/// The default mirror interval of DM-49, in seconds: 24 hours.
+pub const MIRROR_INTERVAL_DEFAULT_SECONDS: u64 = 24 * 60 * 60;
+
+/// Checks the schedule a reference kind mirrors a peer's schema surface on (DM-49).
+///
+/// Absent is the 24-hour default, so absence is valid. A webhook schedule is not: a peer in
+/// another organisation has no reason to call us, and a schedule that can never fire would
+/// stop mirroring silently rather than say so. An interval this crate cannot parse is refused
+/// for the same reason — it would fall back to the default and look deliberate.
+pub fn validate_mirror_schedule(schedule: Option<&Schedule>) -> crate::error::Result<()> {
+    let Some(schedule) = schedule else {
+        return Ok(());
+    };
+    if schedule.webhook == Some(true) {
+        return Err(crate::error::Error::Name {
+            field: "spec.schedule.webhook",
+            value: "true".to_owned(),
+            reason: "a mirrored peer sends no webhook; give spec.schedule.interval instead",
+        });
+    }
+    match schedule.interval.as_deref() {
+        None => Err(crate::error::Error::Name {
+            field: "spec.schedule",
+            value: String::new(),
+            reason: "a schedule with no interval never fires; leave it out for the 24h default",
+        }),
+        Some(interval) if schedule.interval_seconds().is_none() => Err(crate::error::Error::Name {
+            field: "spec.schedule.interval",
+            value: interval.to_owned(),
+            reason: "an interval is a number and one of the suffixes s, m, h, d",
+        }),
+        Some(_) => Ok(()),
+    }
+}

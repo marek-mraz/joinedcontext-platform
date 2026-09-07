@@ -524,3 +524,178 @@ fn mappings_reading(repo: &Repository, project: &str, name: &str, major: u64) ->
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+/// Where a reference's schema surface is, or why it has none (DM-48).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Surface {
+    /// The base URL `mirror` fetches `schema/…` under.
+    At(String),
+    /// Nothing to fetch, and the sentence a plan prints saying why.
+    ///
+    /// This is not an error. DM-48 is explicit that a peer without a schema surface "MAY still
+    /// be referenced without a model", so the reference applies and the reviewer is told.
+    None(String),
+}
+
+/// The peer's schema surface for one reference, derived and never written by hand.
+///
+/// Three cases, and they resolve differently (Architecture/11 section 7.5):
+///
+/// - a `SharedSpaceReference` names an Endpoint *this* instance serves, so the surface is
+///   built from `publicUrl` and the reference's own slug;
+/// - a `ContextSourceRegistration` with `endpointRef` resolves that Endpoint in the repository
+///   and uses its slug the same way;
+/// - a `ContextSourceRegistration` with `endpoint` points at a broker elsewhere, which may be
+///   any NGSI-LD implementation and need not be one of ours. Its surface is the NGSI-LD base
+///   with the trailing `/ngsi-ld/v1` removed.
+///
+/// `public_url` is the instance's own base and is checked like a peer's: a plaintext instance
+/// URL would make every local mirror an unauthenticated fetch over the wire.
+pub fn surface_of(
+    reference: &RawManifest,
+    public_url: &str,
+    repo: &Repository,
+) -> Result<Surface, MirrorError> {
+    match reference.kind.as_str() {
+        "SharedSpaceReference" => {
+            let spec: jc_core::kinds::SharedSpaceReferenceSpec =
+                serde_json::from_value(reference.spec.clone())
+                    .map_err(|err| MirrorError::Spec(err.to_string()))?;
+            spec.validate()
+                .map_err(|err| MirrorError::Spec(err.to_string()))?;
+            Ok(Surface::At(local_surface(
+                public_url,
+                spec.endpoint_slug.as_str(),
+            )?))
+        }
+        "ContextSourceRegistration" => {
+            let spec: jc_core::kinds::ContextSourceRegistrationSpec =
+                serde_json::from_value(reference.spec.clone())
+                    .map_err(|err| MirrorError::Spec(err.to_string()))?;
+            spec.validate()
+                .map_err(|err| MirrorError::Spec(err.to_string()))?;
+
+            if let Some(reference_to_endpoint) = &spec.endpoint_ref {
+                let project = reference.metadata.namespace.as_deref();
+                return match endpoint_slug(repo, project, reference_to_endpoint.name()) {
+                    Some(slug) => Ok(Surface::At(local_surface(public_url, &slug)?)),
+                    None => Ok(Surface::None(format!(
+                        "endpointRef names `{}`, which is not an Endpoint in this repository, so \
+                         no schema surface is derived and no model is mirrored (DM-48)",
+                        reference_to_endpoint.name()
+                    ))),
+                };
+            }
+
+            Ok(remote_surface(&spec.endpoint.unwrap_or_default()))
+        }
+        _ => Err(MirrorError::NotAReference),
+    }
+}
+
+/// The schema surface of a broker elsewhere, from the NGSI-LD base a registration names.
+///
+/// `endpoint` is validated as http *or* https by jc-core, because a member broker on the same
+/// cluster is reached over the mesh and a certificate for a Service name would be a
+/// certificate nothing outside the cluster can check. A mirror is a different matter: it
+/// crosses an organisation boundary, so the plaintext case is declined here rather than
+/// fetched.
+fn remote_surface(url: &str) -> Surface {
+    let url = url.trim_end_matches('/');
+    if !url.starts_with("https://") {
+        return Surface::None(format!(
+            "{url} is not https, and a mirror is not fetched in the clear, so no model is \
+             mirrored (DM-48)"
+        ));
+    }
+    match url.strip_suffix("/ngsi-ld/v1") {
+        // Already https and non-empty, so `secure_base` cannot refuse it; the call is what
+        // trims the trailing slash and keeps one definition of "a base we will fetch".
+        Some(base) => match secure_base(base) {
+            Ok(base) => Surface::At(base),
+            Err(err) => Surface::None(err.to_string()),
+        },
+        None => Surface::None(format!(
+            "{url} does not end in /ngsi-ld/v1, so it is a broker whose schema surface cannot \
+             be derived and no model is mirrored (DM-48)"
+        )),
+    }
+}
+
+/// What a plan can say about the mirrors in a repository without fetching anything and
+/// without knowing this instance's own public URL (DM-48).
+///
+/// A `SharedSpaceReference` and a registration with a resolvable `endpointRef` name an Endpoint
+/// this instance serves, so their surface always exists and there is nothing to warn about
+/// before the fetch. Everything else is a peer we may not be able to read, and a reviewer
+/// should see that in `jcctl plan` rather than in the reconciler's log afterwards.
+pub fn plan_flags(repo: &Repository) -> Vec<String> {
+    let mut flags = Vec::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "ContextSourceRegistration" {
+            continue;
+        }
+        let Ok(spec) = serde_json::from_value::<jc_core::kinds::ContextSourceRegistrationSpec>(
+            resource.manifest.spec.clone(),
+        ) else {
+            // A spec that does not parse is `jcctl validate`'s finding, not a mirror flag.
+            continue;
+        };
+        let surface = match (&spec.endpoint_ref, &spec.endpoint) {
+            (Some(reference), _) => {
+                match endpoint_slug(repo, id.namespace.as_deref(), reference.name()) {
+                    Some(_) => continue,
+                    None => Surface::None(format!(
+                        "endpointRef names `{}`, which is not an Endpoint in this repository, so \
+                         no schema surface is derived and no model is mirrored (DM-48)",
+                        reference.name()
+                    )),
+                }
+            }
+            (None, Some(url)) => remote_surface(url),
+            (None, None) => continue,
+        };
+        if let Surface::None(reason) = surface {
+            flags.push(format!("{id}: {reason}"));
+        }
+    }
+    flags
+}
+
+/// `{public_url}/api/endpoint/{slug}` for an endpoint this instance serves.
+fn local_surface(public_url: &str, slug: &str) -> Result<String, MirrorError> {
+    let base = secure_base(public_url)?;
+    Ok(format!("{base}/api/endpoint/{slug}"))
+}
+
+/// The slug of the Endpoint a registration names, if the repository holds it.
+fn endpoint_slug(repo: &Repository, project: Option<&str>, name: &str) -> Option<String> {
+    repo.iter()
+        .find(|(id, _)| {
+            id.kind == "Endpoint" && id.name == name && id.namespace.as_deref() == project
+        })
+        .and_then(|(_, resource)| {
+            resource
+                .manifest
+                .spec
+                .get("slug")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+}
+
+/// Whether the mirror is due, in the same epoch-second shape [`crate::sync::due`] uses (DM-49).
+///
+/// No schedule is the 24-hour default, and a model never fetched is always due. The schedule
+/// is validated where it is declared, so an interval this cannot parse has already been
+/// refused by `jcctl validate`; falling back to the default here rather than never running is
+/// the safer of the two ways to be wrong about a peer's schema.
+pub fn due(schedule: Option<&jc_core::kinds::Schedule>, last_fetch: Option<u64>, now: u64) -> bool {
+    let interval = schedule
+        .and_then(jc_core::kinds::Schedule::interval_seconds)
+        .unwrap_or(jc_core::kinds::MIRROR_INTERVAL_DEFAULT_SECONDS);
+    match last_fetch {
+        None => true,
+        Some(last) => now.saturating_sub(last) >= interval,
+    }
+}

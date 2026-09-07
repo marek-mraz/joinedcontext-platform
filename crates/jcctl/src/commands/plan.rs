@@ -61,6 +61,11 @@ pub struct ResourceChange {
 pub struct ChangeSet {
     /// Non-empty waves in ascending order, each with its changes in convergence order.
     pub waves: Vec<(u8, Vec<ResourceChange>)>,
+    /// What the plan noticed and will not act on, one sentence each (API/03 section 3).
+    ///
+    /// Advisory only: a flag never changes the exit code, because a peer that publishes no
+    /// schema is a fact about the peer and not a fault in the repository (DM-48).
+    pub flags: Vec<String>,
 }
 
 impl ChangeSet {
@@ -101,6 +106,7 @@ impl ChangeSet {
                 "to_delete": self.count(Action::Delete),
             },
             "changes": changes,
+            "flags": self.flags,
         })
     }
 
@@ -131,6 +137,9 @@ impl ChangeSet {
             self.count(Action::Update),
             self.count(Action::Delete),
         ));
+        for flag in &self.flags {
+            out.push_str(&format!("note: {flag}\n"));
+        }
         out
     }
 }
@@ -196,6 +205,7 @@ pub fn compute(repo: &Repository, platform: &dyn Platform) -> Result<ChangeSet, 
 
     Ok(ChangeSet {
         waves: by_wave.into_iter().collect(),
+        flags: crate::foreign_models::plan_flags(repo),
     })
 }
 

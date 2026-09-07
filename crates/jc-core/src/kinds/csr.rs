@@ -94,6 +94,9 @@ pub struct ContextSourceRegistrationSpec {
     /// When the registration stops being used, if it is not open-ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    /// How often the source's schema surface is mirrored; 24 hours when absent (DM-49).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<crate::kinds::Schedule>,
 }
 
 impl Kind for ContextSourceRegistrationSpec {
@@ -182,6 +185,7 @@ impl ContextSourceRegistrationSpec {
                 });
             }
         }
+        crate::kinds::validate_mirror_schedule(self.schedule.as_ref())?;
         self.federation.validate()
     }
 }

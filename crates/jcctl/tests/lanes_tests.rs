@@ -80,6 +80,7 @@ fn change(action: Action, body: &str) -> ResourceChange {
 fn set(changes: Vec<ResourceChange>) -> ChangeSet {
     ChangeSet {
         waves: vec![(0, changes)],
+        ..ChangeSet::default()
     }
 }
 

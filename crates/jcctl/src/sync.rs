@@ -544,5 +544,6 @@ fn changeset_of(changes: Vec<ResourceChange>) -> ChangeSet {
     }
     ChangeSet {
         waves: waves.into_iter().collect(),
+        ..ChangeSet::default()
     }
 }

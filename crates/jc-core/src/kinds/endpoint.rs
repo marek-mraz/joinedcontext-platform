@@ -503,6 +503,9 @@ pub struct SharedSpaceReferenceSpec {
     pub endpoint_slug: EndpointSlug,
     /// Local alias name for the remote context space.
     pub alias: String,
+    /// How often the peer's schema surface is mirrored; 24 hours when absent (DM-49).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<crate::kinds::Schedule>,
     /// Optional reference to cached access token in secret store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_token_secret_ref: Option<SecretRef>,
@@ -530,6 +533,7 @@ impl SharedSpaceReferenceSpec {
                 reason,
             },
             other => other,
-        })
+        })?;
+        crate::kinds::validate_mirror_schedule(self.schedule.as_ref())
     }
 }
