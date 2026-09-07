@@ -87,6 +87,7 @@ fn endpoint(slug: &str, assignee: &str) -> Endpoint {
         hidden_attributes: Default::default(),
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
+        view_mapping: None,
         policies: vec![policy(assignee)],
     }
 }

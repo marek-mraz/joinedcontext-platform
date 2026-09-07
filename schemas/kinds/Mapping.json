@@ -69,10 +69,40 @@
       ],
       "type": "object"
     },
+    "MappingArtifacts": {
+      "additionalProperties": false,
+      "description": "The two compiled forms of one transformation specification (DM-52).\n\nBoth are committed beside the manifest and both are reviewed, named rather than derived for the same reason DM-02 names a DataModel's artifacts: what runs is what a reviewer approved, not what a compiler would produce now. A Mapping used only in replicate mode may carry the Bloblang alone; live translation and a view Endpoint need the IR.",
+      "properties": {
+        "bloblang": {
+          "description": "The Bloblang mapping Bento runs, relative to the manifest (DM-35, DM-52).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gatewayIr": {
+          "description": "The gateway mapping IR the Context Gateway interprets, relative to the manifest (DM-51, DM-52, EP-54).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "MappingSpec": {
       "additionalProperties": false,
       "description": "Desired specification of a [`Mapping`][crate::kinds::Mapping] resource (DM-33..DM-42).",
       "properties": {
+        "artifacts": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MappingArtifacts"
+            }
+          ],
+          "default": {},
+          "description": "The compiled artifacts committed beside this specification (DM-52)."
+        },
         "contextSpaceRef": {
           "description": "Context Space name to which this mapping belongs (PF-09, DM-33).",
           "type": "string"

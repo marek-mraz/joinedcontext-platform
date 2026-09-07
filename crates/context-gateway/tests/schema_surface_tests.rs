@@ -88,6 +88,7 @@ fn endpoint(models: Vec<Model>) -> Endpoint {
         rate_limit: None,
         file_limits: None,
         hidden_attributes: Default::default(),
+        view_mapping: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models,
         policies: vec![policy(

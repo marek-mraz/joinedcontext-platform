@@ -22,12 +22,12 @@ use crate::pdp::{conditional, write_guard};
 use crate::pdp::{geo, projection, temporal, Pdp};
 use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, Model, SlugResolver, Space};
-use crate::translators::{geojson, ogc, sta, tabular, zip_export};
+use crate::translators::{geojson, ogc, sta, tabular, view_mapping, zip_export};
 use crate::{egress, handlers, mcp, middleware::tenancy, operations, query};
 use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, IF_MATCH};
+use axum::http::header::{ALLOW, AUTHORIZATION, CONTENT_LENGTH, IF_MATCH};
 use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{any, get, post};
@@ -48,6 +48,9 @@ const MAX_BODY: usize = 8 * 1024 * 1024;
 
 /// The header that tells a caller their answer was narrowed by policy (R22).
 const RESULTS_RESTRICTED: &str = "ngsild-results-restricted";
+
+/// The methods a view endpoint answers at all (RFC 9110 section 9.2.1).
+const SAFE: &[Method] = &[Method::GET, Method::HEAD, Method::OPTIONS];
 
 /// How many entities a file representation asks the broker for at a time (EP-44).
 ///
@@ -429,6 +432,17 @@ async fn serve_ngsi_ld(
     let params = query::parse(uri.query().unwrap_or_default());
     let details = query::first(&params, "details") == Some("true");
 
+    // EP-54: a view endpoint is read only, and it says so before the request is decided.
+    // A write in the target model has no source entity to reconstruct, so refusing it is
+    // the whole answer rather than the first half of one.
+    if endpoint.view_mapping.is_some() && !SAFE.contains(&method) {
+        let mut refusal = view_mapping::read_only().into_response();
+        refusal
+            .headers_mut()
+            .insert(ALLOW, HeaderValue::from_static("GET, HEAD, OPTIONS"));
+        return refusal;
+    }
+
     let Some(operation) = operations::operation_of(&method, &path, details) else {
         return ProblemDetails::not_found().into_response();
     };
@@ -571,6 +585,14 @@ async fn serve_ngsi_ld(
     } else {
         query::upstream(&params, &constraints, &[])
     };
+    // The caller writes in the target model; the broker knows only the source (DM-51).
+    let sent_query = match &endpoint.view_mapping {
+        None => sent_query,
+        Some(mapping) => match invert_query(mapping, &sent_query) {
+            Ok(inverted) => inverted,
+            Err(problem) => return problem.into_response(),
+        },
+    };
     let target = format!("/ngsi-ld/v1{path}?{sent_query}");
     let answer = match gateway
         .broker
@@ -581,7 +603,72 @@ async fn serve_ngsi_ld(
         Err(error) => return ProblemDetails::from(error).into_response(),
     };
 
-    project_answer(answer, operation, &constraints).await
+    let projected = project_answer(answer, operation, &constraints).await;
+    match &endpoint.view_mapping {
+        None => projected,
+        Some(mapping) => translated(projected, mapping).await,
+    }
+}
+
+/// Rewrites the parameters of a query that name attributes of the model (DM-51).
+///
+/// `type` is not translated per value: the entity type is the mapping's own class pair, so
+/// the target class the caller asked for is replaced by the source class wholesale.
+fn invert_query(
+    mapping: &view_mapping::ViewMapping,
+    query: &str,
+) -> Result<String, Box<ProblemDetails>> {
+    let mut out: Vec<String> = Vec::new();
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let Some((name, value)) = pair.split_once('=') else {
+            out.push(pair.to_owned());
+            continue;
+        };
+        let decoded = query::decode(value);
+        let inverted = match name {
+            "attrs" => mapping.invert_attrs(&decoded)?,
+            "q" => mapping.invert_q(&decoded)?,
+            "geoproperty" => mapping.invert_geo_property(&decoded)?,
+            "type" => mapping.source_class.clone(),
+            _ => {
+                out.push(pair.to_owned());
+                continue;
+            }
+        };
+        // An empty `attrs` asks the broker for everything rather than for nothing, so a
+        // projection made entirely of locally produced slots drops out instead.
+        if inverted.is_empty() && name == "attrs" {
+            continue;
+        }
+        out.push(format!("{name}={}", query::encode(&inverted)));
+    }
+    Ok(out.join("&"))
+}
+
+/// Rebuilds a projected answer in the target model (EP-54).
+///
+/// After the projection, never before: the grants and the geo and temporal filters are
+/// written in the source model's names, which is the only model the repository declares.
+async fn translated(answer: Response<Body>, mapping: &view_mapping::ViewMapping) -> Response<Body> {
+    let (parts, body) = answer.into_parts();
+    if !parts.status.is_success() {
+        return Response::from_parts(parts, body);
+    }
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
+        tracing::error!("the broker's answer is larger than the gateway can translate");
+        return ProblemDetails::internal().into_response();
+    };
+    let Ok(mut payload) = serde_json::from_slice::<Value>(&bytes) else {
+        return proxy::with_body(parts, bytes.to_vec());
+    };
+    mapping.translate(&mut payload);
+    match serde_json::to_vec(&payload) {
+        Ok(bytes) => proxy::with_body(parts, bytes),
+        Err(error) => {
+            tracing::error!(%error, "the translated answer does not serialize");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 /// The request payload media types the NGSI-LD surface accepts (CIM 009 clause 6.3.5).

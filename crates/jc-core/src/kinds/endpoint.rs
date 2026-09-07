@@ -1,6 +1,6 @@
 //! Manifest kinds for Endpoints and cross-project sharing references (T-0113, EP-01..EP-28).
 
-use crate::envelope::{Kind, ObjectMeta, Ref, Scope, SecretRef};
+use crate::envelope::{Kind, ObjectMeta, Ref, Scope, SecretRef, TypedRef};
 use crate::error::{Error, Result};
 use crate::names;
 use crate::urn::Urn;
@@ -273,6 +273,15 @@ pub struct EndpointSpec {
     /// far (EP-62).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish: Option<crate::kinds::ckan::Publication>,
+    /// A `Mapping` whose target model this Endpoint serves instead of the space's own
+    /// (EP-54, DM-51).
+    ///
+    /// The gateway translates every entity through the Mapping's compiled IR and rewrites
+    /// `attrs`, `q` and `geoQ` back through its inverse. An Endpoint that carries one is
+    /// read only: a mapping is invertible per slot, not per entity, so a write in the target
+    /// model has no source entity to reconstruct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_mapping_ref: Option<TypedRef>,
 }
 
 impl Kind for EndpointSpec {
@@ -327,6 +336,23 @@ impl EndpointSpec {
                     });
                 }
             }
+        }
+
+        if let Some(view) = &self.view_mapping_ref {
+            if view.kind != "Mapping" {
+                return Err(Error::Kind {
+                    expected: "Mapping",
+                    got: view.kind.clone(),
+                });
+            }
+            names::validate_dns1123_label(&view.name).map_err(|e| match e {
+                Error::Name { reason, .. } => Error::Name {
+                    field: "spec.viewMappingRef.name",
+                    value: view.name.clone(),
+                    reason,
+                },
+                other => other,
+            })?;
         }
 
         if self.enabled_representations.is_empty() {

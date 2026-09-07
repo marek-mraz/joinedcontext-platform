@@ -168,6 +168,37 @@ pub struct VocabularyAlignment {
     pub sssom_ref: TypedRef,
 }
 
+/// The two compiled forms of one transformation specification (DM-52).
+///
+/// Both are committed beside the manifest and both are reviewed, named rather than derived
+/// for the same reason DM-02 names a DataModel's artifacts: what runs is what a reviewer
+/// approved, not what a compiler would produce now. A Mapping used only in replicate mode may
+/// carry the Bloblang alone; live translation and a view Endpoint need the IR.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct MappingArtifacts {
+    /// The Bloblang mapping Bento runs, relative to the manifest (DM-35, DM-52).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bloblang: Option<String>,
+    /// The gateway mapping IR the Context Gateway interprets, relative to the manifest
+    /// (DM-51, DM-52, EP-54).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_ir: Option<String>,
+}
+
+impl MappingArtifacts {
+    /// Validates that each named artifact is a relative path (DM-52).
+    pub fn validate(&self) -> Result<()> {
+        if let Some(path) = &self.bloblang {
+            validate_relative_path("spec.artifacts.bloblang", path)?;
+        }
+        if let Some(path) = &self.gateway_ir {
+            validate_relative_path("spec.artifacts.gatewayIr", path)?;
+        }
+        Ok(())
+    }
+}
+
 /// Desired specification of a [`Mapping`][crate::kinds::Mapping] resource (DM-33..DM-42).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -186,6 +217,9 @@ pub struct MappingSpec {
     /// Optional SSSOM alignment set used for editor pre-fill and documentation (DM-42).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vocabulary_alignment: Option<VocabularyAlignment>,
+    /// The compiled artifacts committed beside this specification (DM-52).
+    #[serde(default)]
+    pub artifacts: MappingArtifacts,
     /// Golden test cases asserting input entity produces expected output entity (DM-39).
     pub tests: Vec<MappingTest>,
 }
@@ -223,6 +257,7 @@ impl MappingSpec {
             transformation,
             native: Vec::new(),
             vocabulary_alignment: None,
+            artifacts: MappingArtifacts::default(),
             tests,
         }
     }
@@ -240,6 +275,7 @@ impl MappingSpec {
 
         self.source.validate("spec.source.name")?;
         self.target.validate("spec.target.name")?;
+        self.artifacts.validate()?;
 
         if self.source.name == self.target.name && self.source.version == self.target.version {
             return Err(Error::Name {

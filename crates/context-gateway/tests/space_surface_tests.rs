@@ -75,6 +75,7 @@ fn space(name: &str, policies: Vec<PolicySpec>) -> Space {
             hidden_attributes: Default::default(),
             base_path: format!("/cs/{name}"),
             models: Vec::new(),
+            view_mapping: None,
             policies,
         }),
         title,

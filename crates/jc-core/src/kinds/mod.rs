@@ -39,7 +39,8 @@ pub use endpoint::{
     Representation, SharedSpaceReferenceSpec,
 };
 pub use mapping::{
-    DataModelRef, MappingSpec, MappingTest, NativeBlock, NativeLanguage, VocabularyAlignment,
+    DataModelRef, MappingArtifacts, MappingSpec, MappingTest, NativeBlock, NativeLanguage,
+    VocabularyAlignment,
 };
 pub use organization::{Contact, ContactRole, OrganizationSpec};
 pub use pipeline::{

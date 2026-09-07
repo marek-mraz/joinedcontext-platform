@@ -37,6 +37,7 @@ fn endpoint(limits: Option<FileLimits>, hidden: &[&str]) -> Endpoint {
         file_limits: limits,
         hidden_attributes: hidden.iter().map(|name| (*name).to_owned()).collect(),
         base_path: format!("/api/endpoint/{SLUG}"),
+        view_mapping: None,
         models: vec![Model {
             name: "air-quality".to_owned(),
             version: "1.2.0".to_owned(),

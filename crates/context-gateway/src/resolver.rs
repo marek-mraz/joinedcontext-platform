@@ -44,6 +44,13 @@ pub struct Endpoint {
     /// The data models of the space, with whatever artifacts the repository carries
     /// beside them (EP-46, DM-02).
     pub models: Vec<Model>,
+    /// The Mapping this endpoint serves its space through, when it serves a view of another
+    /// model rather than the space's own (EP-54, DM-51).
+    ///
+    /// Present only when the manifest names one *and* the compiled IR beside it could be
+    /// read: an endpoint that is meant to be a view and has no IR would otherwise serve the
+    /// source model under the target model's name, which is worse than not serving at all.
+    pub view_mapping: Option<std::sync::Arc<crate::translators::view_mapping::ViewMapping>>,
 }
 
 /// One version of one data model, as the schema surface publishes it (EP-46, DM-22).

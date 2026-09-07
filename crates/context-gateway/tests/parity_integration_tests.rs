@@ -88,6 +88,7 @@ fn endpoint(
         hidden_attributes: hidden.iter().map(|name| (*name).to_owned()).collect(),
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
+        view_mapping: None,
         policies: vec![policy(&format!(
             r#"contextSpaceRef: {space}
 assigner: did:web:banskabystrica.sk

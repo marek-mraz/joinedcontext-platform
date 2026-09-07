@@ -147,6 +147,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         file_limits: None,
         hidden_attributes: Default::default(),
         models: Vec::new(),
+        view_mapping: None,
         policies: vec![public_grant()],
     }
 }
@@ -488,6 +489,7 @@ async fn a_service_account_writes_only_what_its_own_manifest_grants() {
         file_limits: None,
         hidden_attributes: Default::default(),
         models: Vec::new(),
+        view_mapping: None,
         policies: vec![serde_norway::from_str(
             r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk

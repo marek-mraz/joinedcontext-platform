@@ -48,6 +48,7 @@ fn unrestricted_endpoint() -> Endpoint {
         hidden_attributes: BTreeSet::new(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
+        view_mapping: None,
         policies: vec![serde_norway::from_str(
             r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk

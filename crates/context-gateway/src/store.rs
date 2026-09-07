@@ -10,9 +10,10 @@ use crate::auth::accounts::{accounts_of, ServiceAccounts};
 use crate::auth::dataspace_token::{agreements_of, Agreements};
 use crate::federation::{federations_of, Federations};
 use crate::resolver::{Endpoint, Model, Space};
+use crate::translators::view_mapping::ViewMapping;
 use jc_core::kinds::{
-    Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, PolicySpec,
-    Representation,
+    Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
+    PolicySpec, Representation,
 };
 use jcctl::loader::{RawManifest, Repository};
 use std::collections::{BTreeMap, BTreeSet};
@@ -60,6 +61,7 @@ pub fn endpoints_of(repo: &Repository) -> Vec<Endpoint> {
 pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endpoint> {
     let policies = policies_by_space(repo);
     let models = models_by_space(repo, root);
+    let views = view_mappings(repo, root);
 
     let mut endpoints = Vec::new();
     for (id, resource) in repo.iter() {
@@ -88,9 +90,66 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
                 .map(|projection| projection.hidden_attributes.into_iter().collect())
                 .unwrap_or_default(),
             base_path: format!("/api/endpoint/{}", spec.slug),
+            view_mapping: spec.view_mapping_ref.and_then(|view| {
+                let named = (
+                    view.namespace
+                        .clone()
+                        .unwrap_or_else(|| id.namespace.clone().unwrap_or_default()),
+                    view.name.clone(),
+                );
+                match views.get(&named) {
+                    Some(mapping) => Some(Arc::clone(mapping)),
+                    None => {
+                        // Serving the source model under the target model's name is worse
+                        // than not serving a view: the endpoint stays, as the space's own.
+                        tracing::warn!(
+                            endpoint = %id.name,
+                            mapping = %view.name,
+                            "the view mapping names no Mapping with a readable gateway IR"
+                        );
+                        None
+                    }
+                }
+            }),
         });
     }
     endpoints
+}
+
+/// The compiled mapping IR of every Mapping that carries one, by project and name (DM-52).
+///
+/// A Mapping without `spec.artifacts.gatewayIr`, or one whose IR this build cannot
+/// interpret, is left out: an endpoint that names it then serves the space's own model and
+/// says so in the log, rather than serving source data under target names.
+fn view_mappings(
+    repo: &Repository,
+    root: Option<&Path>,
+) -> BTreeMap<(String, String), Arc<ViewMapping>> {
+    let mut mappings = BTreeMap::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "Mapping" {
+            continue;
+        }
+        let Some(spec) = spec_of::<MappingSpec>(&resource.manifest) else {
+            continue;
+        };
+        let Some(document) = beside(root, &resource.path, &spec.artifacts.gateway_ir, &id.name)
+        else {
+            continue;
+        };
+        match ViewMapping::parse(&document) {
+            Ok(mapping) => {
+                mappings.insert(
+                    (id.namespace.clone().unwrap_or_default(), id.name.clone()),
+                    Arc::new(mapping),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(mapping = %id.name, %error, "the gateway mapping IR is not usable")
+            }
+        }
+    }
+    mappings
 }
 
 /// The space table a loaded repository describes (SP-01, SP-10).
@@ -129,6 +188,9 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
                 hidden_attributes: BTreeSet::new(),
                 policies: policies.get(&key).cloned().unwrap_or_default(),
                 models: models.get(&key).cloned().unwrap_or_default(),
+                // A space's canonical surface serves the space's own model; a view is a
+                // decision of a published endpoint (SP-01, EP-54).
+                view_mapping: None,
                 base_path: format!("/cs/{}", id.name),
             }),
             title: language_map(&resource.manifest.metadata.rest, "title"),
@@ -234,25 +296,34 @@ fn spec_of<T: serde::de::DeserializeOwned>(manifest: &RawManifest) -> Option<T> 
 /// An artifact that is missing or unreadable is simply absent: the schema surface falls
 /// back to deriving the document from the endpoint's grants, which is a narrower answer
 /// but never a wrong one.
+/// One JSON artifact committed beside its manifest (DM-02, DM-52).
+///
+/// The artifacts live beside their manifest; a path that climbs out of the repository is a
+/// manifest bug and reads nothing.
+fn beside(
+    root: Option<&Path>,
+    manifest_path: &Path,
+    relative: &Option<String>,
+    owner: &str,
+) -> Option<serde_json::Value> {
+    let (root, relative) = (root?, relative.as_deref()?);
+    let directory = manifest_path.parent().unwrap_or(Path::new(""));
+    let path = normalize(&root.join(directory).join(relative))?;
+    if !path.starts_with(root) {
+        tracing::warn!(owner, "artifact path leaves the repository");
+        return None;
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).ok(),
+        Err(error) => {
+            tracing::warn!(owner, path = %path.display(), %error, "artifact not read");
+            None
+        }
+    }
+}
+
 fn model_of(name: &str, spec: &DataModelSpec, root: Option<&Path>, manifest_path: &Path) -> Model {
-    let beside = |relative: &Option<String>| -> Option<serde_json::Value> {
-        let (root, relative) = (root?, relative.as_deref()?);
-        let directory = manifest_path.parent().unwrap_or(Path::new(""));
-        let path = normalize(&root.join(directory).join(relative))?;
-        // The artifacts live beside their manifest; a path that climbs out of the
-        // repository is a manifest bug and reads nothing.
-        if !path.starts_with(root) {
-            tracing::warn!(model = %name, "artifact path leaves the repository");
-            return None;
-        }
-        match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).ok(),
-            Err(error) => {
-                tracing::warn!(model = %name, path = %path.display(), %error, "artifact not read");
-                None
-            }
-        }
-    };
+    let beside = |relative: &Option<String>| beside(root, manifest_path, relative, name);
 
     Model {
         name: name.to_owned(),

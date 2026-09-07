@@ -286,6 +286,17 @@
             }
           ],
           "description": "Unguessable opaque slug with >= 128 bits of entropy (EP-02)."
+        },
+        "viewMappingRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TypedRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A `Mapping` whose target model this Endpoint serves instead of the space's own (EP-54, DM-51).\n\nThe gateway translates every entity through the Mapping's compiled IR and rewrites `attrs`, `q` and `geoQ` back through its inverse. An Endpoint that carries one is read only: a mapping is invertible per slot, not per entity, so a write in the target model has no source entity to reconstruct."
         }
       },
       "required": [

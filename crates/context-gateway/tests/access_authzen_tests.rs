@@ -32,6 +32,7 @@ fn endpoint() -> Endpoint {
         hidden_attributes: Default::default(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
+        view_mapping: None,
         policies: vec![
             policy(
                 r#"contextSpaceRef: ovzdusie
