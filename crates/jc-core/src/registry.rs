@@ -87,6 +87,8 @@ catalogue!(
     crate::kinds::UiSchemaSpec,
     crate::kinds::RoleSpec,
     crate::kinds::RoleBindingSpec,
+    crate::kinds::DashboardSpec,
+    crate::kinds::LayerSpec,
 );
 
 /// Looks a kind up by its manifest `kind` name (case-sensitive, as written in the file).

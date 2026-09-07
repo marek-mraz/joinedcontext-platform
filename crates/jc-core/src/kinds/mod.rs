@@ -4,6 +4,7 @@ pub mod app;
 pub mod blueprint;
 pub mod ckan;
 pub mod csr;
+pub mod dashboard;
 pub mod data_model;
 pub mod data_source;
 pub mod dataspace;
@@ -25,6 +26,10 @@ pub use app::{
 pub use blueprint::{BlueprintSpec, BlueprintTemplate, RiskClass};
 pub use ckan::{CkanInstanceSpec, CkanPublication, DataStore, DataStoreRefresh, Publication};
 pub use csr::{ContextSourceRegistrationSpec, Federation, FederationIdentity, RegistrationMode};
+pub use dashboard::{
+    ColorBy, DashboardSpec, DashboardVisibility, LayerFilter, LayerSpec, LayerStyle, Page, SizeBy,
+    Widget,
+};
 pub use data_model::{
     DataModelLifecycle, DataModelSource, DataModelSpec, GeneratedArtifacts, RemoteSource, SemVer,
 };
@@ -107,6 +112,10 @@ pub type DataAgreement = crate::envelope::ResourceEnvelope<DataAgreementSpec>;
 /// `kind: Role` as a whole manifest. (`kind: RoleBinding` has no alias: `RoleBinding` is the
 /// grant inside a ServiceAccount; use `ResourceEnvelope<RoleBindingSpec>`.)
 pub type Role = crate::envelope::ResourceEnvelope<RoleSpec>;
+/// `kind: Dashboard` as a whole manifest.
+pub type Dashboard = crate::envelope::ResourceEnvelope<DashboardSpec>;
+/// `kind: Layer` as a whole manifest.
+pub type Layer = crate::envelope::ResourceEnvelope<LayerSpec>;
 /// `kind: UiSchema` as a whole manifest.
 pub type UiSchema = crate::envelope::ResourceEnvelope<UiSchemaSpec>;
 

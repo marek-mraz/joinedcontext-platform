@@ -51,6 +51,8 @@ const ORDER: &[(u8, &str)] = &[
     (WAVE_RUNTIME, "Pipeline"),
     (WAVE_RUNTIME, "App"),
     (WAVE_RUNTIME, "SyncSource"),
+    (WAVE_RUNTIME, "Dashboard"),
+    (WAVE_RUNTIME, "Layer"),
 ];
 
 /// Position of a kind in the convergence order, `None` if it is not reconciled.
