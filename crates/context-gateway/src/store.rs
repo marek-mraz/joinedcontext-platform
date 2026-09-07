@@ -2,7 +2,8 @@
 //!
 //! The repository is the configuration, so the gateway's table is a projection of it and
 //! nothing else: an `Endpoint` manifest, plus every `Policy` of the same project that
-//! names the same context space. A manifest the gateway cannot make sense of is left out
+//! names the same context space — or the one Policy its `spec.policyRef` names, when several
+//! endpoints publish different slices of one space. A manifest the gateway cannot make sense of is left out
 //! rather than half-applied — an endpoint that is not in the table answers 404, which is
 //! the same thing an endpoint that does not exist answers (EP-03).
 
@@ -15,6 +16,7 @@ use jc_core::kinds::{
     Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
     PolicySpec, Representation,
 };
+use jc_core::Urn;
 use jcctl::loader::{RawManifest, Repository};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -74,9 +76,14 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
         let project = id.namespace.clone().unwrap_or_default();
         let space = spec.context_space_ref.name().to_owned();
         let key = (project.clone(), space.clone());
+        let named = policies.get(&key).map(Vec::as_slice).unwrap_or_default();
+        let bound = match &spec.policy_ref {
+            Some(policy_ref) => bound_policy(&id.name, policy_ref, &space, named),
+            None => named.iter().map(|(_, spec)| spec.clone()).collect(),
+        };
         endpoints.push(Endpoint {
             slug: spec.slug.to_string(),
-            policies: policies.get(&key).cloned().unwrap_or_default(),
+            policies: bound,
             models: models.get(&key).cloned().unwrap_or_default(),
             space,
             project,
@@ -186,7 +193,10 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
                 // A space is the whole space: narrowing is a decision of a published
                 // endpoint, and the canonical surface publishes nothing of its own.
                 hidden_attributes: BTreeSet::new(),
-                policies: policies.get(&key).cloned().unwrap_or_default(),
+                policies: policies
+                    .get(&key)
+                    .map(|named| named.iter().map(|(_, spec)| spec.clone()).collect())
+                    .unwrap_or_default(),
                 models: models.get(&key).cloned().unwrap_or_default(),
                 // A space's canonical surface serves the space's own model; a view is a
                 // decision of a published endpoint (SP-01, EP-54).
@@ -223,8 +233,11 @@ fn language_map(
 }
 
 /// The policies of every space, keyed by the project and space they name (GW8).
-fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<PolicySpec>> {
-    let mut policies: BTreeMap<(String, String), Vec<PolicySpec>> = BTreeMap::new();
+/// Every Policy of every space, by project and space, with the manifest name it is bound
+/// to by `spec.policyRef` (`urn:ngsi-ld:Policy:{org}:{space}:{name}`).
+#[allow(clippy::type_complexity)]
+fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<(String, PolicySpec)>> {
+    let mut policies: BTreeMap<(String, String), Vec<(String, PolicySpec)>> = BTreeMap::new();
     for (id, resource) in repo.iter() {
         if id.kind != "Policy" {
             continue;
@@ -232,10 +245,41 @@ fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<Policy
         if let Some(spec) = spec_of::<PolicySpec>(&resource.manifest) {
             let project = id.namespace.clone().unwrap_or_default();
             let space = spec.context_space_ref.name().to_owned();
-            policies.entry((project, space)).or_default().push(spec);
+            policies
+                .entry((project, space))
+                .or_default()
+                .push((id.name.clone(), spec));
         }
     }
     policies
+}
+
+/// The one Policy an endpoint with `spec.policyRef` evaluates (EP-14, GW8).
+///
+/// Without a reference an endpoint evaluates every Policy of its space; with one it evaluates
+/// that Policy alone, which is how several endpoints over one space each publish a different
+/// slice of it. A reference to a Policy of another space, or to none the repository has, binds
+/// nothing and says so: an endpoint that widened to the whole space instead would publish
+/// exactly what its author narrowed away.
+fn bound_policy(
+    endpoint: &str,
+    policy_ref: &Urn,
+    space: &str,
+    named: &[(String, PolicySpec)],
+) -> Vec<PolicySpec> {
+    let bound: Vec<PolicySpec> = named
+        .iter()
+        .filter(|(name, _)| policy_ref.space() == space && name == policy_ref.local_id())
+        .map(|(_, spec)| spec.clone())
+        .collect();
+    if bound.is_empty() {
+        tracing::warn!(
+            endpoint,
+            policy = %policy_ref,
+            "policyRef names no Policy of the endpoint's space; the endpoint grants nothing"
+        );
+    }
+    bound
 }
 
 /// The data models of every space, with the artifacts the checkout carries (DM-02).
