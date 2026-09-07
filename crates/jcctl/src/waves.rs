@@ -27,6 +27,9 @@ pub const WAVE_RUNTIME: u8 = 5;
 /// A kind missing here is not reconciled: `Bundle` is an export artifact (CC-22).
 const ORDER: &[(u8, &str)] = &[
     (WAVE_ROOTS, "Organization"),
+    // Who may change configuration converges before anything they may change (PF-49).
+    (WAVE_ROOTS, "Role"),
+    (WAVE_ROOTS, "RoleBinding"),
     (WAVE_ROOTS, "Project"),
     (WAVE_ROOTS, "DataSpaceParticipant"),
     (WAVE_SPACES, "ContextSpace"),
