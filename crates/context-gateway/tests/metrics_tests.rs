@@ -160,3 +160,29 @@ async fn the_scrape_does_not_count_as_traffic() {
     );
     assert!(!body.contains("route=\"/healthz\""), "{body}");
 }
+
+/// A duration has to arrive as a histogram, not as a summary: the dashboard reads latency as
+/// `histogram_quantile` over these buckets, and a quantile computed inside one replica cannot
+/// be combined with another replica's once the HPA has scaled the gateway (docs Deployment/05
+/// §1, T-0464).
+#[tokio::test]
+async fn a_duration_is_exported_as_buckets_a_dashboard_can_sum() {
+    call(&format!("/api/endpoint/{SLUG}")).await;
+
+    let (_, _, body) = call("/metrics").await;
+    assert!(
+        body.contains("# TYPE jc_gateway_request_duration_seconds histogram"),
+        "the duration is not a histogram:\n{body}"
+    );
+    assert!(
+        body.lines().any(
+            |line| line.starts_with("jc_gateway_request_duration_seconds_bucket{")
+                && line.contains("le=\"0.005\"")
+        ),
+        "no bucket in the range the SLO is written in:\n{body}"
+    );
+    assert!(
+        !body.contains("quantile=\""),
+        "a summary quantile is exported and cannot be aggregated:\n{body}"
+    );
+}

@@ -38,10 +38,25 @@ const BROKER_SECONDS: &str = "jc_gateway_broker_request_duration_seconds";
 /// request would make the rate a function of the scrape interval.
 const UNCOUNTED: &[&str] = &["/metrics", "/healthz", "/livez"];
 
+/// The bucket edges every duration here is counted into, in seconds.
+///
+/// Without them the exporter renders a duration as a *summary*: a quantile computed inside one
+/// replica, which cannot be combined with another replica's. The gateway runs behind an HPA, so
+/// the p95 a dashboard draws would be the p95 of whichever pod Prometheus happened to label —
+/// buckets can be summed, and the answer stays right however many pods are running.
+///
+/// The edges are placed for the budget the platform is held to: p95 ≤ 3ms and p99 ≤ 8ms of
+/// gateway overhead (docs Deployment/05 §2), so the resolution is where the answer is decided.
+const SECONDS: &[f64] = &[
+    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
+
 fn handle() -> &'static PrometheusHandle {
     static HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
     HANDLE.get_or_init(|| {
         let handle = PrometheusBuilder::new()
+            .set_buckets(SECONDS)
+            .expect("the bucket list is not empty")
             .install_recorder()
             .expect("this process installs the one recorder");
         describe();
