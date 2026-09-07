@@ -165,9 +165,13 @@ fn enabled_defaults_to_true_and_round_trips_only_when_false() {
     let running = Pipeline::from_yaml(GOLDEN_MQTT).expect("golden");
     assert!(running.spec.enabled);
     let yaml = serde_norway::to_string(&running).expect("serializes");
-    assert!(!yaml.contains("enabled"), "true is the default and stays implicit:\n{yaml}");
+    assert!(
+        !yaml.contains("enabled"),
+        "true is the default and stays implicit:\n{yaml}"
+    );
 
-    let paused_yaml = GOLDEN_MQTT.replace("  class: resident", "  class: resident\n  enabled: false");
+    let paused_yaml =
+        GOLDEN_MQTT.replace("  class: resident", "  class: resident\n  enabled: false");
     let paused = Pipeline::from_yaml(&paused_yaml).expect("a paused manifest parses");
     paused.validate().expect("a paused manifest validates");
     assert!(!paused.spec.enabled);
@@ -187,14 +191,23 @@ fn inline_bloblang_is_for_bloblang_steps_only_and_never_empty() {
     );
     let p = Pipeline::from_yaml(&inline).expect("inline bloblang parses");
     p.validate().expect("inline bloblang validates");
-    let mapping = p.spec.compute.as_ref().unwrap().bloblang.as_deref().unwrap();
+    let mapping = p
+        .spec
+        .compute
+        .as_ref()
+        .unwrap()
+        .bloblang
+        .as_deref()
+        .unwrap();
     assert!(mapping.starts_with("root = this\n"), "{mapping:?}");
     let yaml = serde_norway::to_string(&p).expect("serializes");
     assert_eq!(Pipeline::from_yaml(&yaml).expect("round trip").spec, p.spec);
 
     let mut wrong_kind = Pipeline::from_yaml(GOLDEN_DERIVED).expect("golden");
     wrong_kind.spec.compute.as_mut().unwrap().bloblang = Some("root = this".to_string());
-    let err = wrong_kind.validate().expect_err("bloblang on a wasm step must fail");
+    let err = wrong_kind
+        .validate()
+        .expect_err("bloblang on a wasm step must fail");
     assert!(err.to_string().contains("bloblang"), "{err}");
 
     let mut empty = p.clone();

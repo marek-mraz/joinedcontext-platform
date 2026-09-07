@@ -6,6 +6,13 @@
       "additionalProperties": false,
       "description": "Compute execution specification (PL-33).",
       "properties": {
+        "bloblang": {
+          "description": "The inline mapping of a `bloblang` step (PL-41): the reconciler renders it as the last `mapping` processor of the generated `bento.yaml`. Absent means the author keeps the mapping in `bento.yaml`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "function": {
           "description": "Entry point function name (for wasm).",
           "type": [
@@ -397,6 +404,10 @@
             }
           ],
           "description": "Optional compute execution specification (PL-33)."
+        },
+        "enabled": {
+          "description": "Whether the pipeline runs (PL-40). `false` pauses it: the reconciler leaves a resident stream out of the runner and suspends a scheduled CronJob, the manifest stays, and a Resume is the flag flipped back. Absent means `true`, and `true` is not written back.",
+          "type": "boolean"
         },
         "output": {
           "anyOf": [
