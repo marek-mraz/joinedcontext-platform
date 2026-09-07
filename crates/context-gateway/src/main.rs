@@ -13,7 +13,7 @@ use std::sync::Arc;
 /// The one outbound client: the broker hop and every notification delivery (R46).
 fn broker_of(config: &Config) -> Result<Broker, String> {
     let Some(path) = config.egress_ca_bundle.as_ref() else {
-        return Ok(Broker::new(config.broker_url.clone()));
+        return Broker::verified(config.broker_url.clone()).map_err(|error| error.to_string());
     };
     let bundle = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
     Broker::trusting(config.broker_url.clone(), &bundle)

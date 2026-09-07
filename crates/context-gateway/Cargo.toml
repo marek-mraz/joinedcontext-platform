@@ -36,12 +36,14 @@ jsonschema = { version = "0.54", default-features = false }
 
 # A notification is delivered to a subscriber outside the cluster, so the outbound client
 # speaks TLS (R46). `ring` rather than the default aws-lc-rs: the crate already links ring for
-# the schema surface's ETags, and this adds no second C toolchain to the image build. The roots
-# are compiled in, so the image needs no CA bundle of its own.
+# the schema surface's ETags, and this adds no second C toolchain to the image build. The
+# public roots are read from the image at start-up (`/etc/ssl/certs/ca-certificates.crt`, which
+# the distroless base ships), so a withdrawn root arrives with the next base image rather than
+# with a crate release. `rustls-pki-types` is here for its PEM reader and comes with rustls
+# anyway.
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
-webpki-roots = "1"
-rustls-pemfile = "2"
+rustls-pki-types = "1"
 
 [dev-dependencies]
 serde_norway = "0.9"

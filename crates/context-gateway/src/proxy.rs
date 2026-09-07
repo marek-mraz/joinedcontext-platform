@@ -20,6 +20,8 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use jc_core::ProblemDetails;
 use rustls::RootCertStore;
+use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::CertificateDer;
 
 /// Headers that belong to one connection and must not be relayed to the next (RFC 9110
 /// section 7.6.1).
@@ -47,9 +49,10 @@ pub enum ProxyError {
     /// The gateway could not build a legal upstream URI from the matched route.
     #[error("cannot address the broker: {0}")]
     Uri(String),
-    /// The extra trust anchors the deployment named cannot be used. Never an answer to a
-    /// request: the gateway refuses to start rather than deliver to an unverified peer.
-    #[error("the egress CA bundle holds no usable certificate: {0}")]
+    /// Trust anchors the deployment depends on cannot be used, whether the image's own or
+    /// the bundle it named. Never an answer to a request: the gateway refuses to start rather
+    /// than deliver to an unverified peer.
+    #[error("no usable trust anchor: {0}")]
     Trust(String),
     /// The broker did not answer.
     #[error("the broker did not answer: {0}")]
@@ -66,12 +69,23 @@ impl From<ProxyError> for ProblemDetails {
 }
 
 impl Broker {
-    /// A client for the broker at `base`, which is scheme and authority only.
+    /// A client for the broker at `base`, which is scheme and authority only, with no trust
+    /// anchors.
     ///
-    /// TLS is verified against the public roots compiled into the binary, so the image needs
-    /// no CA bundle of its own.
+    /// The broker hop is in-cluster and plain `http://`, where Linkerd carries the mTLS, so
+    /// this client needs none. A delivery over TLS goes through [`Broker::verified`] or
+    /// [`Broker::trusting`]; an `https://` request made through this one fails to verify,
+    /// which is the right way for a missing anchor to end (R46).
     pub fn new(base: impl Into<String>) -> Self {
-        Self::with(base, public_roots())
+        Self::with(base, RootCertStore::empty())
+    }
+
+    /// The same, trusting the public roots the image carries.
+    ///
+    /// This is what the binary builds: the anchors are read from the image rather than
+    /// compiled in, so a root that is withdrawn or added arrives with the next base image.
+    pub fn verified(base: impl Into<String>) -> Result<Self, ProxyError> {
+        Ok(Self::with(base, system_roots()?))
     }
 
     /// The same, trusting the certificates in `bundle` (PEM) on top of the public roots.
@@ -81,16 +95,8 @@ impl Broker {
     /// the public roots, because a delivery that lost a trust anchor is a delivery to
     /// somebody else (R46).
     pub fn trusting(base: impl Into<String>, bundle: &[u8]) -> Result<Self, ProxyError> {
-        let mut roots = public_roots();
-        let mut added = 0usize;
-        for certificate in rustls_pemfile::certs(&mut std::io::BufReader::new(bundle)) {
-            let certificate = certificate.map_err(|e| ProxyError::Trust(e.to_string()))?;
-            roots
-                .add(certificate)
-                .map_err(|e| ProxyError::Trust(e.to_string()))?;
-            added += 1;
-        }
-        match added {
+        let mut roots = system_roots()?;
+        match add_pem(&mut roots, bundle)? {
             0 => Err(ProxyError::Trust(
                 "no CERTIFICATE block in the bundle".to_owned(),
             )),
@@ -172,11 +178,43 @@ impl Broker {
     }
 }
 
-/// The public trust anchors, compiled in rather than read from the image (R46).
-fn public_roots() -> RootCertStore {
-    RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+/// Where a Debian-derived image keeps its trust anchors. The gateway's own image is
+/// `gcr.io/distroless/cc-debian12`, which ships `ca-certificates`.
+const SYSTEM_ROOTS: &str = "/etc/ssl/certs/ca-certificates.crt";
+
+/// The public trust anchors the image carries, read at start-up rather than compiled in (R46).
+///
+/// `SSL_CERT_FILE` is the conventional override and is what a host keeping its roots
+/// elsewhere sets. A file that cannot be read, or that holds no certificate, is an error and
+/// never an empty store: a dispatcher that trusts nothing fails every delivery, and one that
+/// silently trusts less than it was configured to delivers to somebody else.
+fn system_roots() -> Result<RootCertStore, ProxyError> {
+    roots_from_file(&std::env::var("SSL_CERT_FILE").unwrap_or_else(|_| SYSTEM_ROOTS.to_owned()))
+}
+
+/// The anchors in one PEM file, or why there are none.
+fn roots_from_file(path: &str) -> Result<RootCertStore, ProxyError> {
+    let bundle = std::fs::read(path).map_err(|e| ProxyError::Trust(format!("{path}: {e}")))?;
+    let mut roots = RootCertStore::empty();
+    match add_pem(&mut roots, &bundle)? {
+        0 => Err(ProxyError::Trust(format!(
+            "{path}: no CERTIFICATE block in the trust store"
+        ))),
+        _ => Ok(roots),
     }
+}
+
+/// Adds every CERTIFICATE block of a PEM bundle to `roots` and says how many there were.
+fn add_pem(roots: &mut RootCertStore, bundle: &[u8]) -> Result<usize, ProxyError> {
+    let mut added = 0usize;
+    for certificate in CertificateDer::pem_slice_iter(bundle) {
+        let certificate = certificate.map_err(|e| ProxyError::Trust(e.to_string()))?;
+        roots
+            .add(certificate)
+            .map_err(|e| ProxyError::Trust(e.to_string()))?;
+        added += 1;
+    }
+    Ok(added)
 }
 
 /// Copies every header that describes the message rather than the connection.
@@ -242,5 +280,60 @@ mod tests {
         for dropped in ["connection", "keep-alive", "x-secret-hop"] {
             assert!(!to.contains_key(dropped), "{dropped} crossed the gateway");
         }
+    }
+
+    /// A PEM file holding one self-signed CA, in a path of this test's own.
+    fn bundle(name: &str, contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("jc-{name}-{}.pem", std::process::id()));
+        std::fs::write(&path, contents).expect("the fixture is writable");
+        path
+    }
+
+    fn authority() -> String {
+        let key = rcgen::KeyPair::generate().expect("a CA key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.self_signed(&key).expect("a CA").pem()
+    }
+
+    #[test]
+    fn the_anchors_of_a_pem_file_are_read() {
+        let path = bundle("roots", &authority());
+        let roots = roots_from_file(path.to_str().expect("a utf-8 path")).expect("one anchor");
+        assert_eq!(roots.len(), 1);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// R46: the gateway stops instead of dispatching with a trust store it could not read.
+    #[test]
+    fn a_trust_store_that_is_not_there_is_an_error() {
+        let missing = std::env::temp_dir().join("jc-no-such-trust-store.pem");
+        let error = roots_from_file(missing.to_str().expect("a utf-8 path"))
+            .expect_err("a missing trust store cannot be trusted");
+        assert!(matches!(error, ProxyError::Trust(_)), "{error}");
+    }
+
+    /// The shape that would otherwise pass silently: a file that reads fine and holds nothing.
+    #[test]
+    fn a_trust_store_with_no_certificate_is_an_error() {
+        let path = bundle("empty-roots", "# the operator emptied this file\n");
+        let error = roots_from_file(path.to_str().expect("a utf-8 path"))
+            .expect_err("an empty trust store cannot be trusted");
+        assert!(matches!(error, ProxyError::Trust(_)), "{error}");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_bundle_adds_its_anchors_to_the_ones_already_there() {
+        let mut roots = RootCertStore::empty();
+        assert_eq!(
+            add_pem(&mut roots, authority().as_bytes()).expect("one block"),
+            1
+        );
+        assert_eq!(
+            add_pem(&mut roots, authority().as_bytes()).expect("one block"),
+            1
+        );
+        assert_eq!(roots.len(), 2);
     }
 }
