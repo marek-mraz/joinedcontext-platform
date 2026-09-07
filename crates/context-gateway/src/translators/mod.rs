@@ -2,3 +2,4 @@
 
 pub mod geojson;
 pub mod tabular;
+pub mod zip_export;

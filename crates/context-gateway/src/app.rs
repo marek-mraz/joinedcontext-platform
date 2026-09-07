@@ -21,7 +21,7 @@ use crate::pdp::write_guard;
 use crate::pdp::{geo, projection, temporal, Pdp};
 use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, Model, SlugResolver, Space};
-use crate::translators::{geojson, tabular};
+use crate::translators::{geojson, tabular, zip_export};
 use crate::{handlers, mcp, middleware::tenancy, operations, query};
 use arc_swap::ArcSwap;
 use axum::body::Body;
@@ -177,6 +177,7 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/file.geojson", get(file_geojson))
         .route("/api/endpoint/{slug}/file.csv", get(file_csv))
         .route("/api/endpoint/{slug}/file.xlsx", get(file_xlsx))
+        .route("/api/endpoint/{slug}/file.zip", get(file_zip))
         .route("/cs", get(space_catalog))
         .route("/cs/{space}", get(space_record))
         .route("/cs/{space}/ngsi-ld/v1/{*rest}", any(space_ngsi_ld))
@@ -1522,6 +1523,129 @@ async fn tabular_download(
         headers.insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
     }
     response
+}
+
+/// `file.zip`: one query in every shape, with the schemas and the catalogue record (T-0161,
+/// EP-41, EP-43, EP-44, EP-51).
+///
+/// The bundle is assembled from the same projected answer the other file representations use, so
+/// it can only ever carry what the caller was already allowed to download one format at a time.
+/// Its schema directory is rendered by the code that serves `schema/`, and its catalogue record
+/// is the endpoint's own, so a bundle cannot describe the data differently from the endpoint it
+/// came out of.
+async fn file_zip(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, subject) = match admit(
+        &gateway,
+        &slug,
+        Some(Representation::Zip),
+        request.headers(),
+    ) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+
+    let params = query::parse(request.uri().query().unwrap_or_default());
+    let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
+    let (entities, restricted) = match paged_entities(
+        &gateway,
+        &endpoint,
+        &subject,
+        &params,
+        &mut request,
+        &limits,
+    )
+    .await
+    {
+        Ok(answer) => answer,
+        Err(problem) => return *problem,
+    };
+
+    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
+    let schemas = schema_directory(&endpoint, &visible);
+    let index = schema::index(&endpoint, &visible, sha256_hex);
+    let space = gateway.resolver.resolve_space(&endpoint.space);
+    let dcat = endpoint_surface::dataset(&endpoint, space.as_deref(), &index, gateway.base_url());
+
+    let exported_at = crate::pdp::now().to_rfc3339();
+    let query = params
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let manifest = zip_export::Bundle {
+        slug: &endpoint.slug,
+        space: &endpoint.space,
+        query: &query,
+        exported_at: &exported_at,
+    };
+
+    let archive = match zip_export::bundle(&entities, &schemas, &dcat, &manifest, &limits) {
+        Ok(archive) => archive,
+        Err(zip_export::BundleError::TooLarge(_)) => return too_large(),
+        Err(error) => {
+            tracing::error!(%error, "the bundle does not serialize");
+            return ProblemDetails::internal().into_response();
+        }
+    };
+
+    let mut response = Response::new(Body::from(archive));
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static(zip_export::MEDIA_TYPE),
+    );
+    // The slug is base32 and the date is digits, so the filename needs no quoting beyond the
+    // quotes themselves (EP-43).
+    if let Ok(disposition) = HeaderValue::from_str(&format!(
+        "attachment; filename=\"{}\"",
+        zip_export::file_name(&endpoint.slug, &exported_at)
+    )) {
+        headers.insert(axum::http::header::CONTENT_DISPOSITION, disposition);
+    }
+    if restricted {
+        headers.insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
+    }
+    response
+}
+
+/// Every schema document the endpoint publishes, as the bundle stores them (EP-51).
+///
+/// One directory per major version, seven artifacts in each, each rendered from the caller's own
+/// projection by the same functions the `schema/` surface calls (EP-47).
+fn schema_directory(endpoint: &Endpoint, visible: &schema::Visible) -> Vec<(String, Vec<u8>)> {
+    let mut majors: Vec<u32> = endpoint.models.iter().map(|model| model.major).collect();
+    majors.sort_unstable();
+    majors.dedup();
+
+    let mut documents = Vec::new();
+    for major in majors {
+        let models: Vec<&Model> = endpoint
+            .models
+            .iter()
+            .filter(|model| model.major == major)
+            .collect();
+        for artifact in schema::Artifact::ALL {
+            let mut redacted = Vec::new();
+            let body = match artifact {
+                schema::Artifact::JsonSchema => {
+                    serde_json::to_vec_pretty(&schema::json_schema(&models, visible, &mut redacted))
+                }
+                schema::Artifact::Context => {
+                    serde_json::to_vec_pretty(&schema::context(&models, visible, &mut redacted))
+                }
+                other => Ok(schema::render(&models, other, visible).into_bytes()),
+            };
+            if let Ok(body) = body {
+                documents.push((format!("v{major}/{}", artifact.file_name()), body));
+            }
+        }
+    }
+    documents
 }
 
 /// What the `metadata` sheet of a workbook says about the download that produced it.
