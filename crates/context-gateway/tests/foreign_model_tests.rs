@@ -93,7 +93,7 @@ fn write(dir: &Path, name: &str, body: &str) {
 #[test]
 fn an_endpoint_does_not_serve_a_foreign_model_as_its_own() {
     let dir = repo("endpoint");
-    let (endpoints, _spaces, _accounts, _federations) =
+    let (endpoints, _spaces, _accounts, _federations, _agreements) =
         store::load(&dir).expect("the repository loads");
 
     let endpoint = endpoints
@@ -121,7 +121,7 @@ fn an_endpoint_does_not_serve_a_foreign_model_as_its_own() {
 #[test]
 fn the_space_surface_does_not_publish_a_mirror_either() {
     let dir = repo("space");
-    let (_endpoints, spaces, _accounts, _federations) =
+    let (_endpoints, spaces, _accounts, _federations, _agreements) =
         store::load(&dir).expect("the repository loads");
 
     let space = spaces
