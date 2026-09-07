@@ -19,6 +19,7 @@ pub mod platform;
 pub mod publish;
 pub mod secrets;
 pub mod service_accounts;
+pub mod sync;
 pub mod waves;
 
 pub use blueprints::{expand, ExpandError, Expanded};
