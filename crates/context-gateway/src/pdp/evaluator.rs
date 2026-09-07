@@ -393,7 +393,7 @@ pub fn granted_attrs(information: &[RegistrationInfo]) -> BTreeSet<String> {
 ///
 /// Every operand is parenthesized, so no operand can reach outside itself and change how
 /// its neighbours are grouped. That only holds if the caller's filter is balanced, which
-/// [`is_balanced`] establishes: an unbalanced filter is dropped rather than conjoined,
+/// `is_balanced` establishes: an unbalanced filter is dropped rather than conjoined,
 /// leaving the grants alone in force.
 pub fn conjoin(requested: Option<&str>, filters: &[String]) -> Option<String> {
     let union = match filters.len() {

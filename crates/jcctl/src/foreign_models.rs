@@ -18,7 +18,7 @@
 //! refused rather than written. A peer that publishes no schema surface at all is flagged and
 //! the reference stands without a model, which is what DM-48 asks for.
 //!
-//! Nothing is written by [`mirror`]: it is the whole judgement and [`write`] is the
+//! Nothing is written by [`mirror`]: it is the whole judgement and [`write()`] is the
 //! consequence, so a caller can print the plan and stop. A model whose digest changed comes
 //! back as [`Outcome::Changed`] carrying the digest the repository pinned and the local
 //! Mappings that read the model; DM-49 wants that change reviewed, so the caller puts it on a

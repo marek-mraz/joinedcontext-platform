@@ -185,7 +185,7 @@ pub enum ImportError {
 
 /// Reads a bundle, rewrites it for this repository and decides every collision (MF-22, MF-23).
 ///
-/// Nothing is written: `collect` is the whole judgement, and [`write`] is the consequence, so
+/// Nothing is written: `collect` is the whole judgement, and [`write()`] is the consequence, so
 /// a caller can print the plan and stop.
 pub fn collect(source: &Path, repo_dir: &Path, options: &Options) -> Result<Report, ImportError> {
     let destination =
