@@ -541,6 +541,13 @@
             "null"
           ]
         },
+        "ids": {
+          "description": "The entities to read instead of the whole type (PL-42): PF-42 URNs whose `{Type}` is `type` when both are set. Rendered as the `id=` parameter of the fetch.",
+          "items": {
+            "$ref": "#/definitions/Urn"
+          },
+          "type": "array"
+        },
         "q": {
           "description": "Entity query filter string.",
           "type": [

@@ -300,6 +300,22 @@ fn a_bloblang_compute_contributes_no_processor_of_its_own() {
     assert!(derived.processors[0].get("http").is_some());
 }
 
+/// PL-42: ticked entities become the `id=` parameter of the fetch, beside the type.
+#[test]
+fn pinned_ids_narrow_the_fetch_to_those_entities() {
+    let spec = SCHEDULED.replace(
+        "      attrs: [pm10, pm25, refDistrict]\n",
+        "      attrs: [pm10, pm25, refDistrict]\n      ids: [urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:a-1, urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:a-2]\n",
+    );
+    let derived = render(&pipeline(&spec), &context()).expect("renders");
+    let url = derived.processors[0]["http"]["url"].as_str().expect("url");
+    assert!(
+        url.contains("id=urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:a-1,urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:a-2"),
+        "{url}"
+    );
+    assert!(url.contains("type=AirQualityObserved"), "{url}");
+}
+
 /// PL-41: an inline `spec.compute.bloblang` is the last processor, after the fetch, so the
 /// mapping sees the page the source returned.
 #[test]

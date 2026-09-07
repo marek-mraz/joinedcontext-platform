@@ -156,6 +156,10 @@ pub struct SourceQuery {
     /// Attributes projection list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attrs: Vec<String>,
+    /// The entities to read instead of the whole type (PL-42): PF-42 URNs whose `{Type}` is
+    /// `type` when both are set. Rendered as the `id=` parameter of the fetch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<Urn>,
     /// Entity query filter string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
@@ -473,6 +477,14 @@ impl PipelineSpec {
             if let Some(ref q) = src.query {
                 if let Some(ref et) = q.entity_type {
                     names::validate_entity_type(et)?;
+                }
+                if let Some(ref et) = q.entity_type {
+                    if let Some(other) = q.ids.iter().find(|id| id.entity_type() != et) {
+                        return Err(Error::Kind {
+                            expected: "query.type",
+                            got: format!("{} in query.ids ({other})", other.entity_type()),
+                        });
+                    }
                 }
             }
             if let Some(ref tr) = src.trigger {

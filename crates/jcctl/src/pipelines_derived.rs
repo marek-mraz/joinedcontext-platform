@@ -190,6 +190,11 @@ fn query_source(
     if !query.attrs.is_empty() {
         params.push(format!("attrs={}", query.attrs.join(",")));
     }
+    if !query.ids.is_empty() {
+        // PL-42: the ticked entities, and nothing else the type holds.
+        let ids: Vec<String> = query.ids.iter().map(ToString::to_string).collect();
+        params.push(format!("id={}", ids.join(",")));
+    }
     for (name, value) in [
         ("q", &query.q),
         ("scopeQ", &query.scope_q),

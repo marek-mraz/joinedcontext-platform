@@ -215,6 +215,33 @@ fn inline_bloblang_is_for_bloblang_steps_only_and_never_empty() {
     assert!(empty.validate().is_err(), "an empty mapping must fail");
 }
 
+/// PL-42: `query.ids` pins the read to named entities; an id of another type than the query's
+/// is a mistake the manifest refuses rather than a fetch that returns nothing.
+#[test]
+fn query_ids_round_trip_and_must_match_the_query_type() {
+    let pinned = GOLDEN_DERIVED.replace(
+        "    query: { type: AirQualityObserved, attrs: [pm10, pm25, refDistrict], temporalQ: { window: P1D } }\n",
+        "    query:\n      type: AirQualityObserved\n      ids:\n        - urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:radvan-01\n        - urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:radvan-02\n",
+    );
+    let p = Pipeline::from_yaml(&pinned).expect("ids parse");
+    p.validate().expect("ids of the query's type validate");
+    let ids = &p.spec.source.as_ref().unwrap().query.as_ref().unwrap().ids;
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids[0].entity_type(), "AirQualityObserved");
+    let yaml = serde_norway::to_string(&p).expect("serializes");
+    assert_eq!(Pipeline::from_yaml(&yaml).expect("round trip").spec, p.spec);
+
+    let mixed = pinned.replace(
+        "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:radvan-02",
+        "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:radvan-02",
+    );
+    let err = Pipeline::from_yaml(&mixed)
+        .expect("parses")
+        .validate()
+        .expect_err("a Device id under an AirQualityObserved query must fail");
+    assert!(err.to_string().contains("Device"), "{err}");
+}
+
 #[test]
 fn test_compute_wasm_and_mapping_rules() {
     let mut p = Pipeline::from_yaml(GOLDEN_DERIVED).expect("golden");
