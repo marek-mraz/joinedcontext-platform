@@ -213,14 +213,35 @@ fn conforms_to(schema: &[Value]) -> Vec<Value> {
     standards
 }
 
-/// The DCAT-AP dataset record of one endpoint (EP-27, EP-68, EP-69).
+/// The title and description a person reads: the endpoint's own `metadata`, else the
+/// space's (EP-27).
 ///
-/// `space` carries the title and description a person reads; an endpoint whose space is not
-/// resolvable falls back to the space name, which is what the URL already says.
+/// The endpoint's text comes first because several endpoints publish slices of one space
+/// (EP-14, GW8): a catalogue that harvested the space's title for every one of them would
+/// list the same dataset name four times. An endpoint whose manifest names no text, and one
+/// whose space is not resolvable, fall back to the space name, which is what the URL
+/// already says.
+fn texts<'a>(
+    endpoint: &'a Endpoint,
+    space: Option<&'a Space>,
+) -> (&'a BTreeMap<String, String>, &'a BTreeMap<String, String>) {
+    let title = if endpoint.title.is_empty() {
+        space.map(|s| &s.title).unwrap_or(&EMPTY)
+    } else {
+        &endpoint.title
+    };
+    let description = if endpoint.description.is_empty() {
+        space.map(|s| &s.description).unwrap_or(&EMPTY)
+    } else {
+        &endpoint.description
+    };
+    (title, description)
+}
+
+/// The DCAT-AP dataset record of one endpoint (EP-27, EP-68, EP-69).
 pub fn dataset(endpoint: &Endpoint, space: Option<&Space>, index: &Value, base: &str) -> Value {
     let iri = iri(endpoint, base);
-    let title = space.map(|s| &s.title);
-    let description = space.map(|s| &s.description);
+    let (title, description) = texts(endpoint, space);
     let schema = schema_distributions(index, &iri);
 
     let mut distributions = representation_distributions(endpoint, &iri);
@@ -231,12 +252,12 @@ pub fn dataset(endpoint: &Endpoint, space: Option<&Space>, index: &Value, base: 
         "@id": iri,
         "@type": "dcat:Dataset",
         "dct:identifier": endpoint.slug,
-        "dct:title": localized(title.unwrap_or(&EMPTY), &endpoint.space),
+        "dct:title": localized(title, &endpoint.space),
         "dct:accessRights": access_rights(endpoint.audience),
         "dct:conformsTo": conforms_to(&schema),
         "dcat:distribution": distributions,
     });
-    if let Some(description) = description.filter(|map| !map.is_empty()) {
+    if !description.is_empty() {
         record["dct:description"] = localized(description, "");
     }
     if endpoint.audience != Audience::Public {
@@ -259,7 +280,7 @@ pub fn dataset_turtle(
     base: &str,
 ) -> String {
     let iri = iri(endpoint, base);
-    let title = plain(space.map(|s| &s.title).unwrap_or(&EMPTY), &endpoint.space);
+    let title = plain(texts(endpoint, space).0, &endpoint.space);
     let mut out = String::from(
         "@prefix dcat: <http://www.w3.org/ns/dcat#> .\n\
          @prefix dct: <http://purl.org/dc/terms/> .\n\
@@ -318,11 +339,9 @@ pub fn dataset_html(
     base: &str,
 ) -> String {
     let iri = iri(endpoint, base);
-    let title = escape(&plain(
-        space.map(|s| &s.title).unwrap_or(&EMPTY),
-        &endpoint.space,
-    ));
-    let description = escape(&plain(space.map(|s| &s.description).unwrap_or(&EMPTY), ""));
+    let (title, description) = texts(endpoint, space);
+    let title = escape(&plain(title, &endpoint.space));
+    let description = escape(&plain(description, ""));
     let rights = if endpoint.audience == Audience::Public {
         "public"
     } else {

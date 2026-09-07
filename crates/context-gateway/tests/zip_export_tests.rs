@@ -28,6 +28,8 @@ const SLUG: &str = "mluyob4nz52lok3ssk7pgn5vwt";
 fn endpoint(limits: Option<FileLimits>, hidden: &[&str]) -> Endpoint {
     Endpoint {
         slug: SLUG.to_owned(),
+        title: std::collections::BTreeMap::new(),
+        description: std::collections::BTreeMap::new(),
         space: "ovzdusie".to_owned(),
         project: "ovzdusie".to_owned(),
         audience: Audience::Public,

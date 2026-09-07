@@ -57,6 +57,8 @@ information:
 fn hub_endpoint() -> Endpoint {
     Endpoint {
         slug: HUB_SLUG.to_owned(),
+        title: std::collections::BTreeMap::new(),
+        description: std::collections::BTreeMap::new(),
         space: HUB.to_owned(),
         project: PROJECT.to_owned(),
         audience: Audience::Public,

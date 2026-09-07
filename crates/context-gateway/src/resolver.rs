@@ -24,6 +24,11 @@ pub struct Endpoint {
     pub space: String,
     /// The project the space belongs to, for audience checks (EP-14, EP-15).
     pub project: String,
+    /// The endpoint's own `metadata.title` per locale; the DCAT record prefers it to the
+    /// space's, so two endpoints over one space are two datasets with two names (EP-27).
+    pub title: BTreeMap<String, String>,
+    /// The endpoint's own `metadata.description` per locale (EP-27).
+    pub description: BTreeMap<String, String>,
     /// Who may use the endpoint at all (EP-14).
     pub audience: Audience,
     /// The projects allowed when the audience is `project-list` (EP-15).

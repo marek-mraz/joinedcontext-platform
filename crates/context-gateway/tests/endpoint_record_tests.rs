@@ -64,6 +64,8 @@ fn air_quality() -> Model {
 fn endpoint(audience: Audience) -> Endpoint {
     Endpoint {
         slug: SLUG.to_owned(),
+        title: std::collections::BTreeMap::new(),
+        description: std::collections::BTreeMap::new(),
         space: "ovzdusie".to_owned(),
         project: "ovzdusie".to_owned(),
         audience,
@@ -306,6 +308,80 @@ async fn the_record_carries_the_title_of_the_space_behind_it() {
     assert!(titles
         .iter()
         .any(|t| t["@value"] == json!("Kvalita ovzdušia")));
+}
+
+/// EP-27: several endpoints publish slices of one space (EP-14, GW8), so the record carries
+/// the endpoint's own `metadata.title` and `description` and reads the space's only when
+/// the endpoint names none; a catalogue that harvested the space's for every one of them
+/// would list four datasets under one name.
+#[tokio::test]
+async fn the_record_prefers_the_endpoints_own_title_and_description() {
+    let mut named = endpoint(Audience::Public);
+    named.title = BTreeMap::from([
+        ("en".to_owned(), "Air quality stations".to_owned()),
+        ("sk".to_owned(), "Stanice kvality ovzdušia".to_owned()),
+    ]);
+    named.description = BTreeMap::from([("en".to_owned(), "Only the stations".to_owned())]);
+    let app = router(Arc::new(
+        Gateway::new(
+            Broker::new("http://127.0.0.1:1"),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve([named.clone()])
+        .serve_spaces([space(named)]),
+    ));
+
+    let json_ld = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/endpoint/{SLUG}/"))
+                .header("accept", "application/ld+json")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    assert_eq!(json_ld.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(json_ld.into_body(), 512 * 1024)
+        .await
+        .expect("a readable body");
+    let record: Value = serde_json::from_slice(&body).expect("the record is JSON-LD");
+    let titles: Vec<&str> = record["dct:title"]
+        .as_array()
+        .expect("a language map")
+        .iter()
+        .filter_map(|t| t["@value"].as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        vec!["Air quality stations", "Stanice kvality ovzdušia"]
+    );
+    assert_eq!(
+        record["dct:description"][0]["@value"],
+        json!("Only the stations")
+    );
+
+    let turtle = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/endpoint/{SLUG}/"))
+                .header("accept", "text/turtle")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    let body = axum::body::to_bytes(turtle.into_body(), 512 * 1024)
+        .await
+        .expect("a readable body");
+    let turtle = String::from_utf8_lossy(&body);
+    assert!(
+        turtle.contains("dct:title \"Air quality stations\""),
+        "{turtle}"
+    );
+    assert!(!turtle.contains("\"Air quality\""), "{turtle}");
 }
 
 #[tokio::test]

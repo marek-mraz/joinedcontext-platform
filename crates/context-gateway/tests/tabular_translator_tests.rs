@@ -301,6 +301,8 @@ const SLUG: &str = "k4y7pq2mzt6vhx3nbwrs5cjd8f";
 fn endpoint(representations: Vec<Representation>, file_limits: Option<FileLimits>) -> Endpoint {
     Endpoint {
         slug: SLUG.to_owned(),
+        title: std::collections::BTreeMap::new(),
+        description: std::collections::BTreeMap::new(),
         space: "ovzdusie".to_owned(),
         project: "ovzdusie".to_owned(),
         audience: Audience::Public,

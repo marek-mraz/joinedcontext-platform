@@ -65,6 +65,8 @@ fn space(name: &str, policies: Vec<PolicySpec>) -> Space {
     Space {
         endpoint: Arc::new(Endpoint {
             slug: name.to_owned(),
+            title: std::collections::BTreeMap::new(),
+            description: std::collections::BTreeMap::new(),
             space: name.to_owned(),
             project: name.to_owned(),
             audience: Audience::Public,

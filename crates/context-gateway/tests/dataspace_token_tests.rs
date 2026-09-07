@@ -77,6 +77,8 @@ fn policy(assignee: &str) -> PolicySpec {
 fn endpoint(slug: &str, assignee: &str) -> Endpoint {
     Endpoint {
         slug: slug.to_owned(),
+        title: std::collections::BTreeMap::new(),
+        description: std::collections::BTreeMap::new(),
         space: SPACE.to_owned(),
         project: PROJECT.to_owned(),
         audience: Audience::Organization,

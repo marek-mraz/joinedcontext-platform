@@ -146,6 +146,8 @@ fn policy(condition: Option<&str>) -> PolicySpec {
 fn endpoint(condition: Option<&str>) -> Endpoint {
     Endpoint {
         slug: SLUG.to_owned(),
+        title: std::collections::BTreeMap::new(),
+        description: std::collections::BTreeMap::new(),
         space: SPACE.to_owned(),
         project: PROJECT.to_owned(),
         audience: Audience::Public,

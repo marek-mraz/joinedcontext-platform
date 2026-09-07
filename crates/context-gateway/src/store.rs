@@ -83,6 +83,8 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
         };
         endpoints.push(Endpoint {
             slug: spec.slug.to_string(),
+            title: language_map(&resource.manifest.metadata.rest, "title"),
+            description: language_map(&resource.manifest.metadata.rest, "description"),
             policies: bound,
             models: models.get(&key).cloned().unwrap_or_default(),
             space,
@@ -183,6 +185,10 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
         spaces.push(Space {
             endpoint: Arc::new(Endpoint {
                 slug: id.name.clone(),
+                // The canonical surface is the space itself, so its record reads the
+                // space's own title and description below.
+                title: BTreeMap::new(),
+                description: BTreeMap::new(),
                 space: id.name.clone(),
                 project,
                 audience: Audience::Public,

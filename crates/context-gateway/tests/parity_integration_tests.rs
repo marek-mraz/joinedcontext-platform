@@ -71,6 +71,8 @@ fn endpoint(
         .collect::<String>();
     Endpoint {
         slug: slug.to_owned(),
+        title: std::collections::BTreeMap::new(),
+        description: std::collections::BTreeMap::new(),
         space: space.to_owned(),
         project: space.to_owned(),
         audience: Audience::Public,

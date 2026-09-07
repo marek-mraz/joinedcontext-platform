@@ -31,6 +31,8 @@ information:
     .expect("the policy parses");
     Endpoint {
         slug: SLUG.to_owned(),
+        title: std::collections::BTreeMap::new(),
+        description: std::collections::BTreeMap::new(),
         space: "ovzdusie".to_owned(),
         project: "ovzdusie".to_owned(),
         audience: Audience::Public,
