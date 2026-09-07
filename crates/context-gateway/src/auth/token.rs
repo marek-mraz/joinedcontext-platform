@@ -35,6 +35,17 @@ pub struct Claims {
     /// The groups Keycloak asserts.
     #[serde(default)]
     pub groups: Vec<String>,
+    /// When the token expires. Always present: the verifier refuses a token without it.
+    pub exp: i64,
+    /// When the token was issued, which is what makes its lifetime measurable (DS-11).
+    #[serde(default)]
+    pub iat: Option<i64>,
+    /// The data space agreement a transfer token acts under (DS-11, DS-13).
+    #[serde(default, rename = "agreementId")]
+    pub agreement_id: Option<String>,
+    /// The DID of the participant a transfer token was issued to (DS-04, DS-11).
+    #[serde(default)]
+    pub participant: Option<String>,
 }
 
 /// Keycloak's realm role container.

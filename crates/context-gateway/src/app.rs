@@ -12,6 +12,7 @@
 //! 6. forward with the tenant pinned, then project the answer back down (R9, R22).
 
 use crate::auth::accounts::ServiceAccounts;
+use crate::auth::dataspace_token::{self, Agreements};
 use crate::auth::token::{self, Claims, Verifier};
 use crate::federation::{Federations, Member};
 use crate::handlers::{endpoint_surface, schema, space_surface};
@@ -72,6 +73,9 @@ pub struct Gateway {
     /// The registrations of every space, swapped whole like the accounts are. Empty is the
     /// ordinary case: a space with no registration federates nothing (EP-70).
     federation: ArcSwap<Federations>,
+    /// The data space agreements, swapped whole with the rest: a terminated agreement stops
+    /// authorising reads in the same reconcile that withdraws its compiled grants (DS-12).
+    agreements: ArcSwap<Agreements>,
     /// The gateway's public base URL, when the deployment names one.
     pub public_url: Option<String>,
     /// One token bucket per endpoint and caller (EP-20).
@@ -89,6 +93,7 @@ impl Gateway {
             verifier: None,
             accounts: ArcSwap::from_pointee(ServiceAccounts::new()),
             federation: ArcSwap::from_pointee(Federations::new()),
+            agreements: ArcSwap::from_pointee(Agreements::new()),
             public_url: None,
             rate_limiter: RateLimiter::new(),
         }
@@ -119,6 +124,15 @@ impl Gateway {
     /// Replaces the federation table, the same way the accounts are replaced (EP-70).
     pub fn replace_federation(&self, federations: Federations) {
         self.federation.store(Arc::new(federations));
+    }
+
+    /// Replaces the agreement table (DS-12).
+    ///
+    /// Called by the reaper with the rest, which is what makes "revokes outstanding transfer
+    /// tokens" true without anything having to find those tokens: they name an agreement the
+    /// gateway no longer serves.
+    pub fn replace_agreements(&self, agreements: Agreements) {
+        self.agreements.store(Arc::new(agreements));
     }
 
     /// The registrations of one space, for a surface that lists what an endpoint federates.
@@ -424,6 +438,9 @@ async fn serve_ngsi_ld(
         slug = %endpoint.slug,
         space = %endpoint.space,
         principal = %principal_of(&subject),
+        // Empty for every caller that is not acting under an agreement; DS-13 is about the
+        // records that are.
+        agreement = subject.agreement.as_deref().unwrap_or_default(),
         operation = %operation.as_str(),
         allowed = !verdict.is_deny(),
         "decision"
@@ -779,6 +796,19 @@ fn subject_of(
     endpoint: &Endpoint,
     gateway: &Gateway,
 ) -> Result<Subject, Box<ProblemDetails>> {
+    // A data space consumer, before anything looks at `azp`. The connector obtained this
+    // token with its own ServiceAccount, and resolving that account would hand the consumer
+    // the connector's grants instead of the agreement's (DS-01, DS-02).
+    if dataspace_token::presented(claims) {
+        return dataspace_token::subject(
+            claims,
+            gateway.agreements.load().as_ref(),
+            endpoint,
+            crate::pdp::now(),
+        )
+        .map_err(|refused| Box::new(ProblemDetails::from(refused)));
+    }
+
     let groups: BTreeSet<String> = claims
         .groups
         .iter()
@@ -799,6 +829,7 @@ fn subject_of(
                 roles: account.roles_in(&account.project, &endpoint.space),
                 groups,
                 did: None,
+                agreement: None,
             });
         }
         if claims.preferred_username.is_none() {
@@ -827,14 +858,18 @@ fn subject_of(
         roles: claims.roles().iter().cloned().collect(),
         groups,
         did: None,
+        agreement: None,
     })
 }
 
 /// The principal, as one string for the audit log.
 fn principal_of(subject: &Subject) -> String {
-    match (&subject.user, &subject.service_account) {
-        (Some(user), _) => format!("user:{user}"),
-        (_, Some(account)) => format!("serviceAccount:{account}"),
+    match (&subject.user, &subject.service_account, &subject.did) {
+        (Some(user), _, _) => format!("user:{user}"),
+        (_, Some(account), _) => format!("serviceAccount:{account}"),
+        // A data space consumer is its DID and nothing else, so the audit line says so
+        // rather than calling a whole agreement anonymous (DS-13).
+        (_, _, Some(did)) => did.clone(),
         _ => "anonymous".to_owned(),
     }
 }

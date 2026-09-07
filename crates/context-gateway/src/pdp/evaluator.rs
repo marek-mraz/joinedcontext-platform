@@ -32,6 +32,10 @@ pub struct Subject {
     pub roles: BTreeSet<String>,
     /// The decentralized identifier of a data-space participant, when one is calling.
     pub did: Option<String>,
+    /// The data space agreement this caller acts under, which every audit record produced
+    /// under it carries (DS-13). Never a grant of its own: what the agreement allows is in
+    /// the `Policy` entities compiled from it.
+    pub agreement: Option<String>,
 }
 
 impl Subject {

@@ -69,7 +69,7 @@ impl Reaper {
             return false;
         }
         match store::load(&self.dir) {
-            Ok((endpoints, spaces, accounts, federations)) => {
+            Ok((endpoints, spaces, accounts, federations, agreements)) => {
                 let counts = (endpoints.len(), spaces.len(), accounts.len());
                 // The endpoint table carries the policies, so replacing it purges every
                 // grant the PDP would have honoured; the space table carries the same
@@ -78,11 +78,16 @@ impl Reaper {
                 // what a token's `azp` resolves through, so a withdrawn credential stops
                 // resolving here; the federation table decides whether a read over a space
                 // can be served at all, so a registration that changed identity mode takes
-                // effect with the rest and not one reload later (PF-48).
+                // effect with the rest and not one reload later (PF-48); the agreement table
+                // is what a transfer token is checked against (DS-12).
                 self.gateway.resolver.replace(endpoints);
                 self.gateway.resolver.replace_spaces(spaces);
                 self.gateway.replace_accounts(accounts);
                 self.gateway.replace_federation(federations);
+                // DS-12: an agreement that ended stops authorising reads here in the same
+                // reconcile that withdraws the `Policy` entities compiled from it, so an
+                // outstanding transfer token names an agreement nobody serves any more.
+                self.gateway.replace_agreements(agreements);
                 self.seen = current;
                 tracing::info!(
                     endpoints = counts.0,
