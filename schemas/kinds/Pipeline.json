@@ -375,6 +375,10 @@
       "additionalProperties": false,
       "description": "Desired specification of a [`Pipeline`][crate::kinds::Pipeline] resource (PL-01..PL-28).",
       "properties": {
+        "allowFeedback": {
+          "description": "The author knows this resident pipeline triggers itself and accepts it (PL-37).\n\nA derived pipeline whose output type is the type its own subscription watches feeds its own trigger, and the reconciler refuses it. Setting this says the loop is deliberate, which is why PL-37 puts the change in the yellow lane: a person reviews it.",
+          "type": "boolean"
+        },
         "class": {
           "allOf": [
             {

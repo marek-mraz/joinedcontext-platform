@@ -40,6 +40,13 @@ pub struct PipelineSpec {
     /// Optional output entity type and write mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Output>,
+    /// The author knows this resident pipeline triggers itself and accepts it (PL-37).
+    ///
+    /// A derived pipeline whose output type is the type its own subscription watches feeds its
+    /// own trigger, and the reconciler refuses it. Setting this says the loop is deliberate,
+    /// which is why PL-37 puts the change in the yellow lane: a person reviews it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_feedback: bool,
     /// Secret references injected into runner environments (PL-14..PL-16).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_refs: Vec<SecretRef>,
