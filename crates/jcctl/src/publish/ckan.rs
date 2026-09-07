@@ -488,6 +488,8 @@ fn managed_resources(resources: Option<&Value>) -> Vec<Value> {
 pub struct InMemoryCkan {
     organizations: BTreeSet<String>,
     packages: BTreeMap<String, Value>,
+    /// DataStore tables by resource id: the declared fields, and the rows by primary key.
+    tables: BTreeMap<String, (Vec<Value>, BTreeMap<String, Value>)>,
     calls: Vec<(String, Value)>,
     token: String,
 }
@@ -535,6 +537,18 @@ impl InMemoryCkan {
         &self.token
     }
 
+    /// The DataStore rows under one resource, keyed by their primary key (EP-65).
+    pub fn rows(&self, resource_id: &str) -> Option<&BTreeMap<String, Value>> {
+        self.tables.get(resource_id).map(|(_, rows)| rows)
+    }
+
+    /// The DataStore fields declared for one resource, in declaration order.
+    pub fn table_fields(&self, resource_id: &str) -> Option<&[Value]> {
+        self.tables
+            .get(resource_id)
+            .map(|(fields, _)| fields.as_slice())
+    }
+
     fn rejected(action: &str, message: &str) -> CkanError {
         CkanError::Rejected {
             action: action.to_owned(),
@@ -551,12 +565,19 @@ impl CkanApi for InMemoryCkan {
                 .organizations
                 .contains(name)
                 .then(|| json!({ "name": name }))),
+            "resource_show" => Ok(self
+                .tables
+                .get(name)
+                .map(|(fields, _)| json!({ "resource_id": name, "id": name, "fields": fields }))),
             other => Err(Self::rejected(other, "unknown show action")),
         }
     }
 
     fn action(&mut self, action: &str, payload: &Value) -> Result<Value, CkanError> {
         self.calls.push((action.to_owned(), payload.clone()));
+        if action.starts_with("datastore_") {
+            return self.datastore(action, payload);
+        }
         let name = payload
             .get("name")
             .or_else(|| payload.get("id"))
@@ -592,6 +613,102 @@ impl CkanApi for InMemoryCkan {
             }
             other => Err(Self::rejected(other, "unknown action")),
         }
+    }
+}
+
+impl InMemoryCkan {
+    /// The DataStore half of the Action API: create or extend a table, upsert rows, delete.
+    ///
+    /// It enforces the one rule that matters to a caller building payloads: an upsert
+    /// naming a field the table does not declare is refused, the way CKAN refuses it.
+    fn datastore(&mut self, action: &str, payload: &Value) -> Result<Value, CkanError> {
+        match action {
+            "datastore_create" => {
+                let declared = payload
+                    .get("fields")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                match payload.get("resource_id").and_then(Value::as_str) {
+                    Some(id) => {
+                        let (fields, _) = self
+                            .tables
+                            .get_mut(id)
+                            .ok_or_else(|| Self::rejected(action, "unknown resource"))?;
+                        fields.extend(declared);
+                        Ok(json!({ "resource_id": id }))
+                    }
+                    None => {
+                        let id = payload["resource"]["name"]
+                            .as_str()
+                            .ok_or_else(|| Self::rejected(action, "the resource has no name"))?
+                            .to_owned();
+                        if self.tables.contains_key(&id) {
+                            return Err(Self::rejected(action, "that table already exists"));
+                        }
+                        self.tables.insert(id.clone(), (declared, BTreeMap::new()));
+                        Ok(json!({ "resource_id": id }))
+                    }
+                }
+            }
+            "datastore_upsert" => {
+                let id = Self::resource_of(action, payload)?;
+                let (fields, rows) = self
+                    .tables
+                    .get_mut(&id)
+                    .ok_or_else(|| Self::rejected(action, "unknown resource"))?;
+                let known: BTreeSet<&str> =
+                    fields.iter().filter_map(|f| f["id"].as_str()).collect();
+                for record in payload["records"].as_array().into_iter().flatten() {
+                    let members = record
+                        .as_object()
+                        .ok_or_else(|| Self::rejected(action, "a record is not an object"))?;
+                    if let Some(unknown) = members.keys().find(|key| !known.contains(key.as_str()))
+                    {
+                        return Err(Self::rejected(
+                            action,
+                            &format!("the table has no field '{unknown}'"),
+                        ));
+                    }
+                    let key = members
+                        .get("entity_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| Self::rejected(action, "a record has no entity_id"))?
+                        .to_owned();
+                    rows.insert(key, record.clone());
+                }
+                Ok(json!({}))
+            }
+            "datastore_delete" => {
+                let id = Self::resource_of(action, payload)?;
+                match payload.get("filters") {
+                    None => {
+                        self.tables.remove(&id);
+                    }
+                    Some(filters) => {
+                        let (_, rows) = self
+                            .tables
+                            .get_mut(&id)
+                            .ok_or_else(|| Self::rejected(action, "unknown resource"))?;
+                        for key in filters["entity_id"].as_array().into_iter().flatten() {
+                            if let Some(key) = key.as_str() {
+                                rows.remove(key);
+                            }
+                        }
+                    }
+                }
+                Ok(json!({}))
+            }
+            other => Err(Self::rejected(other, "unknown action")),
+        }
+    }
+
+    fn resource_of(action: &str, payload: &Value) -> Result<String, CkanError> {
+        payload
+            .get("resource_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| Self::rejected(action, "the payload names no resource"))
     }
 }
 
