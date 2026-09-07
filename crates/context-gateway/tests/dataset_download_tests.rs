@@ -158,6 +158,44 @@ async fn a_bare_csv_download_selects_the_same_way() {
     );
 }
 
+/// The caller's `Accept` names what it wants back, not what the broker speaks: `jcctl publish
+/// ckan` asks `file.csv` with `Accept: text/csv`, and forwarded to the broker that was a `406`.
+#[tokio::test]
+async fn the_callers_accept_never_reaches_the_broker() {
+    for (path, accept) in [
+        ("file.csv", "text/csv"),
+        (
+            "file.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+        ("file.geojson", "application/geo+json"),
+        ("file.zip", "application/zip"),
+    ] {
+        let broker = BrokerStub::start(vec![json!([station()])]).await;
+        let mut endpoint = unrestricted_endpoint();
+        endpoint
+            .representations
+            .extend([Representation::Xlsx, Representation::Zip]);
+        let response = gateway(&broker.url, endpoint)
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(format!("/api/endpoint/{SLUG}/{path}"))
+                    .header("Accept", accept)
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("the gateway answers");
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let hops = broker.hops();
+        assert!(!hops.is_empty(), "{path}: no hop");
+        assert!(
+            hops.iter().all(|hop| hop.accept == "application/json"),
+            "{path}: {hops:?}"
+        );
+    }
+}
+
 /// A space with nothing in it is an empty file. Asking the broker for "no types at all"
 /// would be an unselected query again, so the gateway does not ask.
 #[tokio::test]

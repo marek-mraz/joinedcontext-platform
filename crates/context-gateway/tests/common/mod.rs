@@ -122,6 +122,8 @@ pub struct Hop {
     pub tenant: String,
     /// Whether any value the client forged survived the hop.
     pub forged: bool,
+    /// The `Accept` the gateway asked with.
+    pub accept: String,
 }
 
 /// A broker on a real socket, because the gateway forwards over HTTP and what these tests
@@ -171,6 +173,11 @@ impl BrokerStub {
                             .get_all("NGSILD-Tenant")
                             .iter()
                             .any(|value| value.as_bytes() == b"somebody-elses-space"),
+                        accept: headers
+                            .get("Accept")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned(),
                     });
                     let pages = served.lock().expect("no poisoned lock");
 

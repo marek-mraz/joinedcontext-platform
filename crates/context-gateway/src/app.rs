@@ -27,7 +27,7 @@ use crate::{egress, handlers, mcp, middleware::tenancy, operations, query, telem
 use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::header::{ALLOW, AUTHORIZATION, CONTENT_LENGTH, IF_MATCH};
+use axum::http::header::{ACCEPT, ALLOW, AUTHORIZATION, CONTENT_LENGTH, IF_MATCH};
 use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{any, get, post};
@@ -1464,6 +1464,15 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// A file route names its format in the path, so the hop to the broker asks for JSON whatever
+/// the caller's `Accept` said: forwarded as it came, `Accept: text/csv` on `file.csv` was the
+/// broker's `406` (EP-08, EP-44).
+fn broker_speaks_json(request: &mut Request) {
+    request
+        .headers_mut()
+        .insert(ACCEPT, HeaderValue::from_static("application/json"));
+}
+
 /// The same data as a `FeatureCollection` (T-0158, EP-09, EP-10).
 async fn file_geojson(
     State(gateway): State<Arc<Gateway>>,
@@ -1471,6 +1480,7 @@ async fn file_geojson(
     mut request: Request,
 ) -> Response<Body> {
     tenancy::strip_client_headers(&mut request);
+    broker_speaks_json(&mut request);
     let (endpoint, subject) = match admit(
         &gateway,
         &slug,
@@ -1833,6 +1843,7 @@ async fn tabular_download(
     representation: Representation,
 ) -> Response<Body> {
     tenancy::strip_client_headers(&mut request);
+    broker_speaks_json(&mut request);
     let (endpoint, subject) = match admit(&gateway, &slug, Some(representation), request.headers())
     {
         Ok(admitted) => admitted,
@@ -1913,6 +1924,7 @@ async fn file_zip(
     mut request: Request,
 ) -> Response<Body> {
     tenancy::strip_client_headers(&mut request);
+    broker_speaks_json(&mut request);
     let (endpoint, subject) = match admit(
         &gateway,
         &slug,
