@@ -6,9 +6,12 @@
 //! compiled `Policy` says, so an agreement that was never compiled grants nothing at all, and
 //! an agreement compiled twice produces the same policies.
 //!
-//! Reading the document is not re-implemented here. [`access_odrl::read`] already takes an
-//! ODRL document apart into the six R26 names, because the access surface has to round-trip
-//! its own output; a second parser would be a second opinion about what an agreement says.
+//! Reading the document is not re-implemented here.
+//! [`crate::handlers::access_odrl::read`] already takes an ODRL document apart into the six
+//! R26 names, because the access surface has to round-trip its own output; a second parser
+//! would be a second opinion about what an agreement says. The path is spelled out because
+//! the `use` below imports the module as `{self, Grant}`, and rustdoc does not resolve a
+//! link through a `self` import.
 //!
 //! **The ceiling (DS-03).** A negotiated agreement is a subset of an offer, and nothing in the
 //! document itself proves that. So every compiled policy is checked against the offered
