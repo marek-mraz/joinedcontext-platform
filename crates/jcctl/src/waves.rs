@@ -122,9 +122,11 @@ pub fn plan(repo: &Repository) -> Plan {
 mod tests {
     use super::*;
 
-    /// Kinds the reconciler never converges: a `Bundle` exists only for a download and a
-    /// `Blueprint` is expanded at authoring time (CC-22, CC-25).
-    const ARTIFACTS: &[&str] = &["Bundle", "Blueprint"];
+    /// Kinds the reconciler never converges: a `Bundle` exists only for a download, a
+    /// `Blueprint` is expanded at authoring time, and a `UiSchema` has no counterpart outside
+    /// the repository at all — the Portal reads the arrangement and draws the form itself
+    /// (CC-22, CC-25, UI-02).
+    const ARTIFACTS: &[&str] = &["Bundle", "Blueprint", "UiSchema"];
 
     /// A kind added to the catalogue without a wave never reconciles, and the repository
     /// it appears in converges silently short of what Git says.
