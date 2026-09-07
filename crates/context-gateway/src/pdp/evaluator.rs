@@ -322,7 +322,7 @@ fn union<'a>(scopes: impl Iterator<Item = &'a str>) -> Option<String> {
 
 /// `requested ∩ granted`, or the granted set when the caller asked for nothing specific
 /// (GW11). Never the requested set: that would let a caller name what it was not given.
-fn narrow(requested: &BTreeSet<String>, granted: &BTreeSet<String>) -> BTreeSet<String> {
+pub fn narrow(requested: &BTreeSet<String>, granted: &BTreeSet<String>) -> BTreeSet<String> {
     if granted.is_empty() {
         return requested.clone();
     }
@@ -391,7 +391,7 @@ pub fn granted_attrs(information: &[RegistrationInfo]) -> BTreeSet<String> {
 /// its neighbours are grouped. That only holds if the caller's filter is balanced, which
 /// [`is_balanced`] establishes: an unbalanced filter is dropped rather than conjoined,
 /// leaving the grants alone in force.
-fn conjoin(requested: Option<&str>, filters: &[String]) -> Option<String> {
+pub fn conjoin(requested: Option<&str>, filters: &[String]) -> Option<String> {
     let union = match filters.len() {
         0 => None,
         1 => Some(format!("({})", filters[0])),

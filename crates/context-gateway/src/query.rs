@@ -217,7 +217,10 @@ fn join_list(items: &BTreeSet<String>) -> String {
 
 /// Percent-encodes everything but the unreserved set of RFC 3986, which is always safe in
 /// a query value and never needs a table of exceptions per parameter.
-fn encode(raw: &str) -> String {
+///
+/// Public because the egress path carries a whole URL inside one query parameter, which is
+/// the same encoding problem this already solves.
+pub fn encode(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for byte in raw.bytes() {
         match byte {

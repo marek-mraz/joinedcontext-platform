@@ -17,16 +17,16 @@ use crate::federation::{Federations, Member};
 use crate::handlers::{endpoint_surface, schema, space_surface};
 use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::evaluator::{Constraints, Subject, Verdict};
-use crate::pdp::write_guard;
+use crate::pdp::{conditional, write_guard};
 use crate::pdp::{geo, projection, temporal, Pdp};
 use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, Model, SlugResolver, Space};
 use crate::translators::{geojson, tabular, zip_export};
-use crate::{handlers, mcp, middleware::tenancy, operations, query};
+use crate::{egress, handlers, mcp, middleware::tenancy, operations, query};
 use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, IF_MATCH};
 use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{any, get, post};
@@ -174,6 +174,12 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/access", get(access))
         .route("/api/endpoint/{slug}/mcp", post(mcp_message))
         .route("/api/endpoint/{slug}/access/check", post(access_check))
+        // Where a rewritten notification endpoint points, and the only surface the
+        // broker calls rather than answers (R46).
+        .route(
+            "/api/endpoint/{slug}/egress/notifications",
+            post(egress::notifications::deliver),
+        )
         .route("/api/endpoint/{slug}/file.geojson", get(file_geojson))
         .route("/api/endpoint/{slug}/file.csv", get(file_csv))
         .route("/api/endpoint/{slug}/file.xlsx", get(file_xlsx))
@@ -470,7 +476,7 @@ async fn serve_ngsi_ld(
         return ProblemDetails::internal().into_response();
     }
 
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
     let Ok(sent) = axum::body::to_bytes(body, MAX_BODY).await else {
         return ProblemDetails::bad_request()
             .with_detail("request body is unreadable or larger than the gateway accepts")
@@ -484,11 +490,50 @@ async fn serve_ngsi_ld(
         return unsupported_media_type().into_response();
     }
 
-    if operation.is_write() && !sent.is_empty() {
+    // A subscription is a standing query, not an entity: it is narrowed to the grants and
+    // its delivery routed back through the gateway, rather than checked as a write payload
+    // whose members would all read as ungranted attributes (GW27, R46).
+    let subscribing = matches!(
+        operation,
+        Operation::CreateSubscription | Operation::UpdateSubscription
+    );
+    let mut sent = sent.to_vec();
+    if subscribing && !sent.is_empty() {
+        match narrowed_subscription(
+            &sent,
+            &constraints,
+            &endpoint,
+            gateway.base_url(),
+            operation,
+        ) {
+            Ok(narrowed) => sent = narrowed,
+            Err(problem) => return problem.into_response(),
+        }
+        parts.headers.remove(CONTENT_LENGTH);
+        parts
+            .headers
+            .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
+    } else if operation.is_write() && !sent.is_empty() {
         if let Some(problem) =
             refuse_write(&sent, &path, &constraints, &endpoint, &gateway.org_domain)
         {
             return problem.into_response();
+        }
+    }
+
+    // A grant that decides from the stored entity, or a caller that sent `If-Match`, turns
+    // the write into a read, an evaluation and then a conditional write (R45, GW16).
+    if conditional::required(operation, &path, &parts.headers, &constraints) {
+        match conditional::evaluate(&gateway.broker, &path, &parts.headers, &constraints).await {
+            conditional::Precondition::Refuse(problem) => return problem.into_response(),
+            conditional::Precondition::Forward(etag) => {
+                // The caller's own tag was just checked against the same read, so what goes
+                // upstream is the tag the gateway read and nothing the client sent.
+                parts.headers.remove(IF_MATCH);
+                if let Some(etag) = etag {
+                    parts.headers.insert(IF_MATCH, etag);
+                }
+            }
         }
     }
 
@@ -584,6 +629,31 @@ fn refuse_write(
         }
     }
     None
+}
+
+/// Narrows a subscription payload to the grants and routes its delivery through the
+/// gateway (GW27, R46).
+fn narrowed_subscription(
+    body: &[u8],
+    constraints: &Constraints,
+    endpoint: &Endpoint,
+    base_url: &str,
+    operation: Operation,
+) -> Result<Vec<u8>, Box<ProblemDetails>> {
+    let mut payload: Value = serde_json::from_slice(body).map_err(|_| {
+        Box::new(ProblemDetails::bad_request().with_detail("request body is not JSON"))
+    })?;
+    egress::notifications::narrow_subscription(
+        &mut payload,
+        constraints,
+        endpoint,
+        base_url,
+        operation == Operation::CreateSubscription,
+    )?;
+    serde_json::to_vec(&payload).map_err(|error| {
+        tracing::error!(%error, "the narrowed subscription does not serialize");
+        Box::new(ProblemDetails::internal())
+    })
 }
 
 /// Cuts the broker's answer down to what the grants cover (R9, R22, R24).

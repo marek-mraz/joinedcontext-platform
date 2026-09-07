@@ -13,6 +13,7 @@
 pub mod app;
 pub mod auth;
 pub mod config;
+pub mod egress;
 pub mod federation;
 pub mod handlers;
 pub mod mcp;
