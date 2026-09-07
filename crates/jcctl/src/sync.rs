@@ -171,10 +171,11 @@ pub struct Proposal {
     pub rejected: Vec<String>,
 }
 
-/// Whether a run is due (MF-28).
+/// Whether a scheduled run is due (MF-28).
 ///
-/// A webhook schedule is never due on a timer: it runs when the caller says the source told
-/// it to, which is the caller passing `now` with no `last_run_at` to beat.
+/// A webhook schedule is never due on a timer, so this is `false` for one however long it has
+/// waited: such a source runs when its origin says it moved, and [`poll_now`] is how a caller
+/// says so.
 pub fn due(schedule: &Schedule, state: &State, now: u64) -> bool {
     if state.paused {
         return false;
@@ -200,6 +201,40 @@ pub fn poll(
     workspace: &Path,
     remote: &impl SyncRemote,
 ) -> Result<Run, SyncError> {
+    judge(source, state, now, repo_dir, workspace, remote, false)
+}
+
+/// Runs the loop because somebody asked for it, whatever the schedule says (MF-28).
+///
+/// The two callers are the webhook route of a `schedule: { webhook: true }` source and an
+/// operator's **Sync now**, which is why this exists at all: [`due`] is false for every webhook
+/// schedule, so a source that runs on its origin's word can never reach a run through [`poll`].
+///
+/// Only the wait is skipped. A paused source is still paused and an open proposal still blocks
+/// the next one — the switch and the reviewer are not overridden by the button — and a source
+/// that has not moved still costs one `revision` call and no checkout.
+pub fn poll_now(
+    source: &RawManifest,
+    state: &State,
+    now: u64,
+    repo_dir: &Path,
+    workspace: &Path,
+    remote: &impl SyncRemote,
+) -> Result<Run, SyncError> {
+    judge(source, state, now, repo_dir, workspace, remote, true)
+}
+
+/// The judgement both entry points share; `asked` is whether the wait has already been served.
+#[allow(clippy::too_many_arguments)]
+fn judge(
+    source: &RawManifest,
+    state: &State,
+    now: u64,
+    repo_dir: &Path,
+    workspace: &Path,
+    remote: &impl SyncRemote,
+    asked: bool,
+) -> Result<Run, SyncError> {
     let (spec, namespace) = spec_of(source)?;
 
     if state.paused {
@@ -214,7 +249,7 @@ pub fn poll(
             "a proposal from an earlier run is still open",
         ));
     }
-    if !due(&spec.schedule, state, now) {
+    if !asked && !due(&spec.schedule, state, now) {
         return Ok(idle(state, Phase::Synced, "the next run is not due yet"));
     }
 

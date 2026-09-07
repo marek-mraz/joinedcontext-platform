@@ -456,3 +456,90 @@ fn the_envelope_counts_what_the_proposal_carries() {
     assert_eq!(proposal.envelope["status"]["plan"]["delete"], json!(0));
     assert_eq!(Action::Create.as_str(), "CREATE");
 }
+
+/// MF-28: a source that runs on its origin's word runs when the caller says so, and on no
+/// timer at all (T-0475).
+#[test]
+fn a_webhook_source_runs_when_it_is_asked_for_and_never_on_a_tick() {
+    let dirs = dirs("asked");
+    let remote = Fake::at("9f1c0de", &[("space.yaml", SANDBOX)]);
+    let manifest = source(json!({ "schedule": { "webhook": true } }));
+
+    // However long the timer runs, `poll` proposes nothing and the remote is never touched:
+    // there is no interval to beat and there never will be.
+    for now in [HOUR, HOUR * 24, HOUR * 24 * 365] {
+        let outcome = sync::poll(&manifest, &State::default(), now, &dirs.0, &dirs.1, &remote)
+            .expect("the tick is judged");
+        assert_eq!(outcome.phase, Phase::Synced);
+        assert!(outcome.proposal.is_none());
+    }
+    assert!(remote.calls().is_empty(), "{:?}", remote.calls());
+
+    let outcome = sync::poll_now(
+        &manifest,
+        &State::default(),
+        HOUR,
+        &dirs.0,
+        &dirs.1,
+        &remote,
+    )
+    .expect("the asked-for run is judged");
+    assert_eq!(outcome.phase, Phase::PendingApproval);
+    let proposal = outcome.proposal.expect("a proposal");
+    assert_eq!(proposal.name, "chg-sync-regional-9f1c0de");
+    assert_eq!(proposal.files.len(), 1);
+}
+
+/// The button skips the wait and nothing else: the operator's switch and the reviewer's open
+/// proposal both still stop the run (T-0475).
+#[test]
+fn an_asked_for_run_is_still_refused_by_the_switch_and_by_a_reviewer() {
+    let dirs = dirs("asked-stopped");
+    let remote = Fake::at("9f1c0de", &[("space.yaml", SANDBOX)]);
+    let manifest = source(json!({ "schedule": { "webhook": true } }));
+
+    let paused = State {
+        paused: true,
+        ..State::default()
+    };
+    let outcome = sync::poll_now(&manifest, &paused, HOUR, &dirs.0, &dirs.1, &remote)
+        .expect("the asked-for run is judged");
+    assert_eq!(outcome.phase, Phase::Paused);
+    assert!(outcome.proposal.is_none());
+
+    let waiting = State {
+        open_proposal: Some("chg-sync-regional-9f1c0de".to_owned()),
+        ..State::default()
+    };
+    let outcome = sync::poll_now(&manifest, &waiting, HOUR, &dirs.0, &dirs.1, &remote)
+        .expect("the asked-for run is judged");
+    assert_eq!(outcome.phase, Phase::PendingApproval);
+    assert!(outcome.proposal.is_none());
+
+    assert!(
+        remote.calls().is_empty(),
+        "neither refusal reaches the origin: {:?}",
+        remote.calls()
+    );
+}
+
+/// An asked-for run of a source that has not moved costs the cheap call and nothing more
+/// (CC-18, T-0475).
+#[test]
+fn an_asked_for_run_of_an_unmoved_source_is_one_call_and_no_checkout() {
+    let dirs = dirs("asked-unmoved");
+    let remote = Fake::at("9f1c0de", &[("space.yaml", SANDBOX)]);
+    let state = State {
+        observed_revision: Some("9f1c0de".to_owned()),
+        ..State::default()
+    };
+    let manifest = source(json!({ "schedule": { "webhook": true } }));
+
+    let outcome = sync::poll_now(&manifest, &state, HOUR, &dirs.0, &dirs.1, &remote)
+        .expect("the asked-for run is judged");
+
+    assert_eq!(outcome.phase, Phase::Synced);
+    assert!(outcome.proposal.is_none());
+    assert_eq!(outcome.state.last_run_at, Some(HOUR));
+    assert_eq!(remote.calls(), vec!["revision".to_owned()]);
+}
