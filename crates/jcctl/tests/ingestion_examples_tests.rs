@@ -17,7 +17,7 @@ use jcctl::bento::{render, InputContext, ORG_DOMAIN_VAR};
 use jcctl::pipelines::{runtime_of, Runtime};
 
 /// Every example folder, and the connection type it is there to demonstrate.
-const EXAMPLES: [(&str, DataSourceType); 7] = [
+const EXAMPLES: [(&str, DataSourceType); 14] = [
     ("hsl-hfp-mqtt", DataSourceType::Mqtt),
     ("http-json-poll", DataSourceType::Http),
     ("csv-fetch", DataSourceType::Http),
@@ -25,14 +25,28 @@ const EXAMPLES: [(&str, DataSourceType); 7] = [
     ("helsinki-city-bikes", DataSourceType::Http),
     ("helsinki-hsy-air", DataSourceType::Http),
     ("helsinki-digitraffic-tms", DataSourceType::Http),
+    ("helsinki-fmi-weather", DataSourceType::Http),
+    ("helsinki-marine-vessels", DataSourceType::Http),
+    ("helsinki-parking-zones", DataSourceType::Http),
+    ("helsinki-linked-events", DataSourceType::Http),
+    ("helsinki-palvelukartta", DataSourceType::Http),
+    ("helsinki-hri-population", DataSourceType::Http),
+    ("helsinki-ev-charging", DataSourceType::Http),
 ];
 
 /// The examples that also publish: the folder carries the Endpoint the pipeline writes into
 /// and the catalogue entry it becomes (T-0321…T-0323, EP-01, EP-62).
-const PUBLISHED: [&str; 3] = [
+const PUBLISHED: [&str; 10] = [
     "helsinki-city-bikes",
     "helsinki-hsy-air",
     "helsinki-digitraffic-tms",
+    "helsinki-fmi-weather",
+    "helsinki-marine-vessels",
+    "helsinki-parking-zones",
+    "helsinki-linked-events",
+    "helsinki-palvelukartta",
+    "helsinki-hri-population",
+    "helsinki-ev-charging",
 ];
 
 fn examples_dir() -> PathBuf {
@@ -115,6 +129,31 @@ fn each_example_lands_in_the_runtime_its_comment_promises() {
     assert_eq!(forty_five.schedule, "* * * * *");
     assert_eq!(forty_five.interval.as_deref(), Some("45s"));
     assert_eq!(forty_five.count, 1);
+
+    // The seven Helsinki dataset pipelines each declare the cron expression their period means,
+    // so the job starts, fetches once and exits. Without one the reconciler falls back to a job
+    // every minute whose runner waits out the period before its single fetch, which for a daily
+    // dataset would hold a pod for a day to do a second of work (PL-27).
+    for (example, schedule) in [
+        ("helsinki-marine-vessels", "* * * * *"),
+        ("helsinki-parking-zones", "*/5 * * * *"),
+        ("helsinki-fmi-weather", "*/10 * * * *"),
+        ("helsinki-linked-events", "*/30 * * * *"),
+        ("helsinki-ev-charging", "*/30 * * * *"),
+        ("helsinki-palvelukartta", "7 * * * *"),
+        ("helsinki-hri-population", "20 3 * * *"),
+    ] {
+        let Runtime::Scheduled(job) = runtime_of(&pipeline(example).spec) else {
+            panic!("{example} is past the thirty-second rule and belongs in a CronJob");
+        };
+        assert_eq!(job.schedule, schedule, "{example}");
+        assert_eq!(
+            job.interval, None,
+            "{example}: the cron expression is the cadence, so the runner fetches once and exits"
+        );
+        assert_eq!(job.count, 1, "{example}");
+        assert_eq!(job.concurrency_policy, "Forbid", "{example}");
+    }
 }
 
 /// PL-39: the rendered config is the author's file with the connection's input in front of it.
@@ -255,12 +294,21 @@ const DEMO_ORG_DOMAIN: &str = "hel.fi";
 #[test]
 fn the_domain_of_a_minted_id_comes_from_the_environment_and_never_from_the_pipeline_file() {
     let injection = format!("env(\"{ORG_DOMAIN_VAR}\")");
+    // The two shapes a written-in domain takes: a string of its own, `"hel.fi"`, or a segment of
+    // a spelled-out id, `:hel.fi:`. The bare substring is not the test, because three of the
+    // Helsinki feeds are served from the city's own domain and `https://api.hel.fi/...` in a
+    // `source` attribute is provenance rather than a minted id.
+    let written_as_a_value = format!("\"{DEMO_ORG_DOMAIN}\"");
+    let written_as_a_segment = format!(":{DEMO_ORG_DOMAIN}:");
     for (example, _) in EXAMPLES {
         let bento = read(example, "bento.yaml");
-        assert!(
-            !bento.contains(DEMO_ORG_DOMAIN),
-            "{example}/bento.yaml writes the organization domain into the pipeline (PF-44)"
-        );
+        for line in bento.lines() {
+            assert!(
+                !line.contains(&written_as_a_value) && !line.contains(&written_as_a_segment),
+                "{example}/bento.yaml writes the organization domain into the pipeline \
+                 (PF-44): {line}"
+            );
+        }
         assert!(
             bento.contains(&injection),
             "{example}/bento.yaml mints an id without {injection} (PF-44)"

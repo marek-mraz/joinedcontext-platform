@@ -1,7 +1,7 @@
 # Ingestion examples
 
-Seven pipelines that read the outside world and write NGSI-LD entities through an Endpoint. Each
-folder is what a `projects/{project}/pipelines/{name}/` folder looks like in an organization
+Fourteen pipelines that read the outside world and write NGSI-LD entities through an Endpoint.
+Each folder is what a `projects/{project}/pipelines/{name}/` folder looks like in an organization
 repository (PL-01), plus the `DataSource` the pipeline reads from (MF-35).
 
 | Folder | Reads | Cadence | Produces |
@@ -13,17 +13,35 @@ repository (PL-01), plus the `DataSource` the pipeline reads from (MF-35).
 | `helsinki-city-bikes/` | the HSL city bike GBFS station status feed | 60 s, CronJob | `BikeHireDockingStation` |
 | `helsinki-hsy-air/` | HSY's open air quality WFS | 5 min, CronJob | `AirQualityObserved` |
 | `helsinki-digitraffic-tms/` | Fintraffic's TMS counters | 60 s, CronJob | `TrafficFlowObserved`, one per direction |
+| `helsinki-fmi-weather/` | FMI's Kaisaniemi observations, WFS in XML | 10 min, CronJob | `WeatherObserved` |
+| `helsinki-marine-vessels/` | Digitraffic's AIS positions off Helsinki | 60 s, CronJob | `Vessel` |
+| `helsinki-parking-zones/` | the city's parking-area register, WFS | 5 min, CronJob | `OffStreetParking`, one per area |
+| `helsinki-linked-events/` | the city's Linked Events register | 30 min, CronJob | `Event`, titles in every language |
+| `helsinki-palvelukartta/` | the region's service map units | 1 h, CronJob | `PointOfInterest` |
+| `helsinki-hri-population/` | Paavo postal-code statistics, CSV | daily, CronJob | `StatisticalPopulation` |
+| `helsinki-ev-charging/` | OpenStreetMap charging stations, Overpass | 30 min, CronJob | `EVChargingStation` |
 
-All seven write into the documented demonstration instance: organization `hel.fi`, project
-`helsinki`, spaces `air-quality`, `transport`, `bikes` and `traffic`. The MQTT and the
-GTFS-realtime recipe are two views of the same fleet and mint the same ids, so a deployment runs
-one of them, not both.
+All fourteen write into the documented demonstration instance: organization `hel.fi`, project
+`helsinki`, spaces `air-quality`, `transport`, `bikes`, `traffic`, `weather`, `marine`,
+`parking`, `events`, `services`, `statistics` and `charging`. The MQTT and the GTFS-realtime
+recipe are two views of the same fleet and mint the same ids, so a deployment runs one of them,
+not both.
 
-The last three are the Helsinki open-data set, and they carry two files the first four do not:
+The last ten are the Helsinki open-data set, and they carry two files the first four do not:
 `endpoint.yaml` is the Endpoint the pipeline writes into and the public reads from, and its
 `spec.publish.ckan` block is the dataset it becomes in the catalogue named once for the whole
 tree in `ckan-instance.yaml` (EP-01, EP-62). The catalogue's API token is a reference; the
 schema has no field a token could be written into (EP-67, CC-06).
+
+## Cadence, and why the later seven name a cron expression
+
+A period past thirty seconds makes `class: auto` a CronJob (PL-26), and a `spec.schedule`
+decides what that job's clock is. With one, the job starts, fetches once and exits. Without one
+the reconciler falls back to a job every minute whose runner waits out the period before its
+single fetch, which is fine at forty-five seconds and absurd at a day: a pod would be held for
+twenty-four hours to do a second of work. The seven Helsinki dataset pipelines therefore each
+declare the expression their period means, and `ingestion_examples_tests` checks that the two
+still agree.
 
 ## What is in a folder
 
