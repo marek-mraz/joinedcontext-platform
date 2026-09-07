@@ -323,3 +323,11 @@ fn which(binary: &str) -> Result<std::path::PathBuf, ()> {
         .find(|candidate| Path::new(candidate).is_file())
         .ok_or(())
 }
+
+#[test]
+fn a_repository_without_users_gets_no_files() {
+    let dir = demo_repo("roles_no_users");
+    assert!(roles::files(&load(&dir)).expect("compiles").is_none());
+    assert!(roles::render(&dir).expect("renders").is_empty());
+    assert!(!dir.join(roles::CODEOWNERS).exists());
+}

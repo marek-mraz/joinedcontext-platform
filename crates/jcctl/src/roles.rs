@@ -226,19 +226,31 @@ pub fn compile(repo: &Repository) -> Result<Compiled, RolesError> {
     })
 }
 
+/// Every file the repository should hold for its roles: the two compiled ones and the three
+/// the gate consists of, as `(path, content)`. `None` when the repository has no `users/`,
+/// so a repository that has not adopted roles as code is left alone.
+pub fn files(repo: &Repository) -> Result<Option<Vec<(&'static str, String)>>, RolesError> {
+    if repo
+        .iter()
+        .all(|(_, r)| r.manifest.kind != "Role" && r.manifest.kind != "RoleBinding")
+    {
+        return Ok(None);
+    }
+    let compiled = compile(repo)?;
+    Ok(Some(vec![
+        (CODEOWNERS, compiled.codeowners),
+        (ROLES_JSON, compiled.roles_json),
+        (ROLES_REGO, REGO.to_string()),
+        (ROLES_TEST_REGO, REGO_TESTS.to_string()),
+        (WORKFLOW, WORKFLOW_YAML.to_string()),
+    ]))
+}
+
 /// Writes the compiled files and the gate into the repository; returns what it wrote.
 pub fn render(repo_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let repo = Repository::load(repo_dir)?;
-    let compiled = compile(&repo)?;
-    let files = [
-        (CODEOWNERS, compiled.codeowners.as_str()),
-        (ROLES_JSON, compiled.roles_json.as_str()),
-        (ROLES_REGO, REGO),
-        (ROLES_TEST_REGO, REGO_TESTS),
-        (WORKFLOW, WORKFLOW_YAML),
-    ];
     let mut written = Vec::new();
-    for (rel, content) in files {
+    for (rel, content) in files(&repo)?.unwrap_or_default() {
         let path = repo_dir.join(rel);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
