@@ -12,6 +12,7 @@ import io
 import json
 import re
 from pathlib import Path
+from urllib.parse import quote
 from wsgiref.util import setup_testing_defaults
 
 import pytest
@@ -296,7 +297,7 @@ def test_the_index_hands_the_browser_no_fetchable_address(catalogue_documents):
     for subject in body["subjects"]:
         assert set(subject) == {"name", "title", "models"}
         for model in subject["models"]:
-            assert set(model) <= {"id", "name", "description"}
+            assert set(model) <= {"id", "name", "description", "attributes"}
             assert "http" not in json.dumps({k: v for k, v in model.items() if k != "description"})
 
 
@@ -339,6 +340,112 @@ def test_a_catalogue_that_was_never_reached_answers_an_empty_index(monkeypatch):
 
     assert status == 200
     assert body == {"subjects": [], "refreshedAt": None, "stale": True}
+
+
+# --- attribute names, filled per subject (T-0404, DM-07, DM-12) ------------------------
+
+#: A catalogue schema as the organisation publishes one: an `allOf` of the shared commons by
+#: `$ref` and one inline branch carrying the model's own attributes. The `$ref` is what makes
+#: reading only the top level import a model with no slots at all.
+SCHEMAS = {
+    "AirQualityObserved": {
+        "allOf": [
+            {"$ref": "https://smart-data-models.github.io/data-models/common-schema.json"},
+            {"properties": {"temperature": {"type": "number"}, "no2": {"type": "number"}}},
+        ]
+    },
+    "WaterQualityObserved": {"allOf": [{"properties": {"pH": {"type": "number"}}}]},
+}
+
+
+@pytest.fixture
+def catalogue_schemas(monkeypatch, catalogue_documents):
+    """The per-model schemas, and a count of how often one was fetched."""
+    fetched: list[str] = []
+
+    class Answer:
+        def __init__(self, document):
+            self._document = document
+
+        def json(self):
+            return self._document
+
+    def get(url: str):
+        fetched.append(url)
+        name = url.rsplit("/", 2)[-2]
+        if name not in SCHEMAS:
+            raise service.ImportError_(f"{url} answered 404")
+        return Answer(SCHEMAS[name])
+
+    monkeypatch.setattr(service, "resolve_commit", lambda subject, *a, **k: "c0ffee")
+    monkeypatch.setattr(service, "_get", get)
+    return fetched
+
+
+def test_the_first_paint_of_the_catalogue_costs_one_fetch(catalogue_schemas):
+    """1118 models and no upstream aggregate: browsing must not pay for all of them."""
+    _, body = call("GET", "/catalog")
+
+    assert catalogue_schemas == [], "no schema was fetched to render the index"
+    assert [model["name"] for model in body["subjects"][0]["models"]] == [
+        "AirQualityObserved", "WaterQualityObserved"
+    ]
+    assert all("attributes" not in model for model in body["subjects"][0]["models"])
+
+
+def test_a_subject_the_wizard_opens_answers_its_attribute_names(catalogue_schemas):
+    _, body = call("GET", "/catalog", query="subject=dataModel.Environment")
+
+    models = {model["name"]: model for model in body["subjects"][0]["models"]}
+    assert models["AirQualityObserved"]["attributes"] == ["no2", "temperature"]
+    assert models["WaterQualityObserved"]["attributes"] == ["pH"]
+    # The commons branch is a `$ref` left unresolved on purpose: `id`, `type` and `owner` are
+    # on every model and distinguish nothing, and resolving them would cost another request.
+    assert len(catalogue_schemas) == 2
+
+
+def test_a_subject_nobody_opened_still_lists_its_models(catalogue_schemas):
+    call("GET", "/catalog", query="subject=dataModel.Environment")
+    _, body = call("GET", "/catalog")
+
+    subject = body["subjects"][0]
+    assert [model["name"] for model in subject["models"]] == [
+        "AirQualityObserved", "WaterQualityObserved"
+    ]
+    assert subject["models"][0]["attributes"] == ["no2", "temperature"], "the fill is cached"
+
+
+def test_a_subject_is_filled_once_and_survives_a_refresh(catalogue_schemas):
+    call("GET", "/catalog", query="subject=dataModel.Environment")
+    filled_once = len(catalogue_schemas)
+    call("GET", "/catalog", query="subject=dataModel.Environment")
+    assert len(catalogue_schemas) == filled_once, "the second reader used the cache"
+
+    _, body = call("GET", "/catalog", query="refresh=true")
+    # A daily refresh refetches the index and must not cost the wizard what it already opened.
+    assert body["subjects"][0]["models"][0]["attributes"] == ["no2", "temperature"]
+
+
+def test_a_subject_the_index_does_not_list_fetches_nothing(catalogue_schemas):
+    """DM-10: `?subject=` is a value a browser sends, and only a catalogue name may become
+    a request upstream."""
+    for steered in ["../../etc", "https://example.org/x", "dataModel.Nope"]:
+        status, body = call("GET", "/catalog", query=f"subject={quote(steered)}")
+        assert status == 200, steered
+        assert catalogue_schemas == [], steered
+
+
+def test_a_model_whose_schema_is_missing_leaves_the_subject_searchable(
+    monkeypatch, catalogue_schemas
+):
+    """One 404 must not cost the subject its other models' attributes."""
+    monkeypatch.delitem(SCHEMAS, "WaterQualityObserved")
+
+    _, body = call("GET", "/catalog", query="subject=dataModel.Environment")
+
+    models = {model["name"]: model for model in body["subjects"][0]["models"]}
+    assert models["AirQualityObserved"]["attributes"] == ["no2", "temperature"]
+    assert "attributes" not in models["WaterQualityObserved"]
 
 
 def test_an_oversized_catalogue_document_is_refused(monkeypatch):

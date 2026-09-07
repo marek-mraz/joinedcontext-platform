@@ -8,7 +8,8 @@ request except the catalogue cache DM-12 asks for.
 
 ```text
 GET  /healthz     is the process up, and which generator version is in this image
-GET  /catalog     the Smart Data Models catalogue index, cached (`?refresh=true` refills now)
+GET  /catalog     the Smart Data Models catalogue index, cached (`?refresh=true` refills now,
+                  `?subject=` fills that subject's attribute names)
 POST /generate    {"source": "<LinkML YAML>"}  -> the artifact set
 POST /import-sdm  {"model": "dataModel.X/Y"}   -> the same set, plus the LinkML it produced
 ```
@@ -40,7 +41,17 @@ from gen_docs import compile_docs
 from gen_example import compile_example
 from gen_json_schema import compile_schema
 from gen_rdf_artifacts import compile_owl, compile_shacl
-from import_sdm import RAW_BASE, ImportError_, _get, convert, fetch, split_identifier
+from import_sdm import (
+    RAW_BASE,
+    SCHEMA_FILE,
+    ImportError_,
+    _composed,
+    _get,
+    convert,
+    fetch,
+    resolve_commit,
+    split_identifier,
+)
 
 #: Largest body this service reads, the same cap the Portal applies before forwarding (DM-18).
 #: Model Tools is shared and stateless, so it refuses an oversized source itself rather than
@@ -164,14 +175,17 @@ class Catalogue:
 
     def __init__(self) -> None:
         # One refresh at a time: the lock is held across the fetch on purpose, so ten editors
-        # opening the wizard at once produce one request upstream and not ten.
+        # opening the wizard at once produce one request upstream and not ten. It is held
+        # across an attribute fill for the same reason, which is also why a fill is per subject
+        # and not per model.
         self._lock = threading.Lock()
         self._subjects: list[dict[str, Any]] | None = None
+        self._attributes: dict[str, dict[str, list[str]]] = {}
         self._filled_at: float = 0.0
         self._refreshed_at: str | None = None
         self._stale = False
 
-    def index(self, refresh: bool = False) -> dict[str, Any]:
+    def index(self, refresh: bool = False, subject: str | None = None) -> dict[str, Any]:
         with self._lock:
             fresh = (
                 self._subjects is not None
@@ -179,6 +193,8 @@ class Catalogue:
             )
             if refresh or not fresh:
                 self._fill()
+            if subject:
+                self._fill_attributes(subject)
             return {
                 "subjects": self._subjects or [],
                 "refreshedAt": self._refreshed_at,
@@ -194,6 +210,39 @@ class Catalogue:
         self._filled_at = time.time()
         self._refreshed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._stale = False
+        # A daily refresh must not cost the wizard the subjects it already opened.
+        for name in list(self._attributes):
+            self._attach(name)
+
+    def _fill_attributes(self, subject: str) -> None:
+        """Fill one subject's attribute names, once (T-0404, DM-12).
+
+        Only a subject the index already lists is fetched. That is not a performance guard:
+        `?subject=` is a value a browser sends, and a catalogue name is the only thing it may
+        turn into a request upstream.
+        """
+        entry = next((s for s in self._subjects or [] if s["name"] == subject), None)
+        if entry is None:
+            return
+        if subject not in self._attributes:
+            try:
+                self._attributes[subject] = fetch_attributes(
+                    subject, [model["name"] for model in entry["models"]]
+                )
+            except Exception:  # noqa: BLE001 - the subject still lists its models
+                return
+        self._attach(subject)
+
+    def _attach(self, subject: str) -> None:
+        """Put the cached attribute names back on the models of one subject."""
+        filled = self._attributes.get(subject) or {}
+        for entry in self._subjects or []:
+            if entry["name"] != subject:
+                continue
+            for model in entry["models"]:
+                names = filled.get(model["name"])
+                if names is not None:
+                    model["attributes"] = names
 
 
 def _document(url: str) -> Any:
@@ -238,8 +287,8 @@ def fetch_catalogue() -> list[dict[str, Any]]:
             description = detail.get("description")
             if description:
                 model["description"] = description
-            # Attribute search needs the attribute names of 1118 models and the catalogue
-            # publishes no aggregate carrying them (T-0404). Absent, not empty by accident.
+            # No attributes here: the catalogue publishes no aggregate carrying them, so
+            # they are filled per subject when the wizard opens one (`fetch_attributes`).
             models.append(model)
         subjects.append(
             {
@@ -249,6 +298,36 @@ def fetch_catalogue() -> list[dict[str, Any]]:
             }
         )
     return subjects
+
+
+def fetch_attributes(subject: str, models: list[str]) -> dict[str, list[str]]:
+    """The attribute names of every model of one subject, keyed by model name (DM-12).
+
+    The catalogue publishes no document carrying the attributes of all 1118 models, so there
+    is nothing to add to the index and nothing to refresh daily: the names exist only in each
+    model's own `schema.json`. Fetching all of them is neither a startup cost nor a daily one
+    anybody wants, and the wizard browses per subject anyway, so a subject is the unit — about
+    fifteen requests for `dataModel.Environment`, once, cached until the index is refetched.
+
+    Only the model's own attributes are read. A catalogue schema is an `allOf` of the shared
+    commons by `$ref` and one inline branch; the commons carry `id`, `type`, `name`, `owner`
+    and the rest, which every model has and no search distinguishes anything by, so the `$ref`
+    is deliberately left unresolved and costs no second request.
+
+    A model whose schema does not answer is left without attributes rather than failing the
+    subject: an unsearchable model is worse than a subject the wizard cannot open at all.
+    """
+    commit = resolve_commit(subject)
+    filled: dict[str, list[str]] = {}
+    for name in models:
+        try:
+            schema = _get(f"{RAW_BASE}{subject}/{commit}/{name}/{SCHEMA_FILE}").json()
+            properties = _composed(schema, "properties")
+        except Exception:  # noqa: BLE001 - one model missing is not the subject failing
+            continue
+        if isinstance(properties, dict):
+            filled[name] = sorted(properties)
+    return filled
 
 
 def _details() -> list[Any]:
@@ -264,8 +343,16 @@ CATALOGUE = Catalogue()
 
 
 def catalog(query: dict[str, str]) -> tuple[int, dict[str, Any]]:
-    """`GET /catalog`: the index, refilled first when the caller asks for a refresh."""
-    return 200, CATALOGUE.index(refresh=query.get("refresh", "").lower() == "true")
+    """`GET /catalog`: the index, refilled first when the caller asks for a refresh.
+
+    `?subject=` is the wizard opening one subject, and the models of that subject come back
+    carrying their attribute names. Without it the answer costs one fetch, which is what keeps
+    the first paint of a catalogue of 1118 models cheap (T-0404).
+    """
+    return 200, CATALOGUE.index(
+        refresh=query.get("refresh", "").lower() == "true",
+        subject=query.get("subject") or None,
+    )
 
 
 def healthz() -> tuple[int, dict[str, Any]]:

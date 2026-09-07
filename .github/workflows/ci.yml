@@ -28,6 +28,10 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11", cache: "pip", cache-dependency-path: tools/model-tools/pyproject.toml }
       - run: pip install .[test]
+      # DM-39's golden tests run the compiled Bloblang through the Bento the cluster runs, by
+      # digest. Pulling it here rather than inside the first test that needs it turns a
+      # registry outage into a step that says so.
+      - run: docker pull ghcr.io/warpstreamlabs/bento@sha256:656c55de3f8deddd4ee743f3c76f3b497e67324e940f2bc1769693cd8b906364
       - run: pytest -q
       # DM-02: a committed artifact must equal what this generator renders now, or the schema a
       # partner reads is not the schema the source says. The check lives in this job because
