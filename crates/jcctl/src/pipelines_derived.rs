@@ -59,8 +59,9 @@ pub struct Derived {
     /// `input:` of the generated config.
     pub input: Value,
     /// The processors the reconciler contributes, in order: the source fetch for a query, then
-    /// the compute step for the kinds that are one. `bloblang` compute is written by the author
-    /// in the pipeline's own `bento.yaml` and contributes nothing here.
+    /// the compute step for the kinds that are one. `bloblang` compute contributes its inline
+    /// `spec.compute.bloblang` as the last `mapping` processor (PL-41), or nothing when the
+    /// author keeps the mapping in the pipeline's own `bento.yaml`.
     pub processors: Vec<Value>,
     /// The CIM 009 subscription the reconciler creates through the source Endpoint, for a
     /// resident trigger. A scheduled query needs none.
@@ -277,8 +278,12 @@ fn compute_processor(
         return Ok(None);
     };
     match compute.kind {
-        // The author writes the mapping in the pipeline's own bento.yaml; nothing to add.
-        ComputeKind::Bloblang => Ok(None),
+        // Inline in the manifest it is the last processor (PL-41); otherwise the author writes
+        // the mapping in the pipeline's own bento.yaml and there is nothing to add.
+        ComputeKind::Bloblang => Ok(compute
+            .bloblang
+            .as_ref()
+            .map(|mapping| json!({ "mapping": mapping }))),
         ComputeKind::Mapping => Err(DerivedError::Elsewhere {
             kind: compute.kind,
             reason: "a compiled LinkML-Map is rendered by the mapping compiler (PL-29)",

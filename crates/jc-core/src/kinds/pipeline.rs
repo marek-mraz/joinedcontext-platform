@@ -19,6 +19,11 @@ static PERIOD_RE: LazyLock<regex::Regex> =
 pub struct PipelineSpec {
     /// Operational execution class (PL-04, PL-05).
     pub class: PipelineClass,
+    /// Whether the pipeline runs (PL-40). `false` pauses it: the reconciler leaves a resident
+    /// stream out of the runner and suspends a scheduled CronJob, the manifest stays, and a
+    /// Resume is the flag flipped back. Absent means `true`, and `true` is not written back.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
     /// Standard cron schedule expression for scheduled runs (PL-04, PL-26..PL-28).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
@@ -53,6 +58,14 @@ pub struct PipelineSpec {
     /// Resource quotas allocated to this pipeline runner (PL-11).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quotas: Option<PipelineQuotas>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// Operational execution class of a data pipeline (PL-04, PL-05).
@@ -200,6 +213,11 @@ pub struct Compute {
     /// Reference to a [`Mapping`][crate::kinds::Mapping] resource.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mapping_ref: Option<Ref>,
+    /// The inline mapping of a `bloblang` step (PL-41): the reconciler renders it as the last
+    /// `mapping` processor of the generated `bento.yaml`. Absent means the author keeps the
+    /// mapping in `bento.yaml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bloblang: Option<String>,
 }
 
 /// Execution technology category for pipeline compute steps (PL-33).
@@ -375,6 +393,22 @@ impl PipelineSpec {
         }
 
         if let Some(ref c) = self.compute {
+            if let Some(ref mapping) = c.bloblang {
+                if c.kind != ComputeKind::Bloblang {
+                    return Err(Error::Name {
+                        field: "spec.compute.bloblang",
+                        value: c.kind.to_string(),
+                        reason: "bloblang is only valid when compute.kind is `bloblang`",
+                    });
+                }
+                if mapping.trim().is_empty() {
+                    return Err(Error::Name {
+                        field: "spec.compute.bloblang",
+                        value: String::new(),
+                        reason: "bloblang must not be empty; leave the field out to keep the mapping in bento.yaml",
+                    });
+                }
+            }
             match c.kind {
                 ComputeKind::Wasm => {
                     if c.module.is_none() {

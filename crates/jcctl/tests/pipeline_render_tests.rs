@@ -20,6 +20,24 @@ spec:
     manifest.spec
 }
 
+/// PL-40: a paused scheduled pipeline keeps its schedule and carries `suspend`, so a Resume
+/// is the flag alone; a running one renders `suspend: false`.
+#[test]
+fn a_paused_pipeline_renders_a_suspended_cron_job() {
+    let Runtime::Scheduled(paused) =
+        runtime_of(&pipeline("auto", "  period: 5m\n  enabled: false\n"))
+    else {
+        panic!("five minutes is scheduled")
+    };
+    assert!(paused.suspend);
+    assert_eq!(paused.schedule, "* * * * *");
+
+    let Runtime::Scheduled(running) = runtime_of(&pipeline("auto", "  period: 5m\n")) else {
+        panic!("five minutes is scheduled")
+    };
+    assert!(!running.suspend);
+}
+
 /// PL-26: at fifteen seconds a pod start would cost more than the period itself, so the
 /// pipeline stays in the project's resident runner.
 #[test]

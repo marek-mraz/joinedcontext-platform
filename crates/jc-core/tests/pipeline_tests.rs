@@ -158,6 +158,50 @@ fn test_cron_expression_validation() {
     assert!(p.validate().is_err(), "6-field cron must fail");
 }
 
+/// PL-40: `enabled` is absent-means-true and `true` is never written back, so a manifest
+/// that never mentioned the field round-trips unchanged; a Pause is one explicit `false`.
+#[test]
+fn enabled_defaults_to_true_and_round_trips_only_when_false() {
+    let running = Pipeline::from_yaml(GOLDEN_MQTT).expect("golden");
+    assert!(running.spec.enabled);
+    let yaml = serde_norway::to_string(&running).expect("serializes");
+    assert!(!yaml.contains("enabled"), "true is the default and stays implicit:\n{yaml}");
+
+    let paused_yaml = GOLDEN_MQTT.replace("  class: resident", "  class: resident\n  enabled: false");
+    let paused = Pipeline::from_yaml(&paused_yaml).expect("a paused manifest parses");
+    paused.validate().expect("a paused manifest validates");
+    assert!(!paused.spec.enabled);
+    let yaml = serde_norway::to_string(&paused).expect("serializes");
+    assert!(yaml.contains("enabled: false"), "{yaml}");
+    let again = Pipeline::from_yaml(&yaml).expect("round trip");
+    assert_eq!(again.spec, paused.spec);
+}
+
+/// PL-41: the inline mapping belongs to a `bloblang` step only, and an empty one is a mistake
+/// rather than a way to say "see bento.yaml".
+#[test]
+fn inline_bloblang_is_for_bloblang_steps_only_and_never_empty() {
+    let inline = GOLDEN_DERIVED.replace(
+        "    kind: wasm                             # bloblang | mapping | wasm | container\n    module: ./compute                      # Rust crate beside the pipeline, built in CI to wasm32-wasip1\n    function: process\n",
+        "    kind: bloblang\n    bloblang: |\n      root = this\n      root.computedBy = \"pipeline\"\n",
+    );
+    let p = Pipeline::from_yaml(&inline).expect("inline bloblang parses");
+    p.validate().expect("inline bloblang validates");
+    let mapping = p.spec.compute.as_ref().unwrap().bloblang.as_deref().unwrap();
+    assert!(mapping.starts_with("root = this\n"), "{mapping:?}");
+    let yaml = serde_norway::to_string(&p).expect("serializes");
+    assert_eq!(Pipeline::from_yaml(&yaml).expect("round trip").spec, p.spec);
+
+    let mut wrong_kind = Pipeline::from_yaml(GOLDEN_DERIVED).expect("golden");
+    wrong_kind.spec.compute.as_mut().unwrap().bloblang = Some("root = this".to_string());
+    let err = wrong_kind.validate().expect_err("bloblang on a wasm step must fail");
+    assert!(err.to_string().contains("bloblang"), "{err}");
+
+    let mut empty = p.clone();
+    empty.spec.compute.as_mut().unwrap().bloblang = Some("  \n".to_string());
+    assert!(empty.validate().is_err(), "an empty mapping must fail");
+}
+
 #[test]
 fn test_compute_wasm_and_mapping_rules() {
     let mut p = Pipeline::from_yaml(GOLDEN_DERIVED).expect("golden");

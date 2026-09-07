@@ -300,6 +300,23 @@ fn a_bloblang_compute_contributes_no_processor_of_its_own() {
     assert!(derived.processors[0].get("http").is_some());
 }
 
+/// PL-41: an inline `spec.compute.bloblang` is the last processor, after the fetch, so the
+/// mapping sees the page the source returned.
+#[test]
+fn an_inline_bloblang_compute_is_the_last_mapping_processor() {
+    let spec = SCHEDULED.replace(
+        "    kind: wasm\n    module: ./compute\n    function: process\n",
+        "    kind: bloblang\n    bloblang: |\n      root = this\n      root.index = this.pm10 * 2\n",
+    );
+    let derived = render(&pipeline(&spec), &context()).expect("renders");
+    assert_eq!(derived.processors.len(), 2, "{:?}", derived.processors);
+    assert!(derived.processors[0].get("http").is_some());
+    assert_eq!(
+        derived.processors[1]["mapping"].as_str(),
+        Some("root = this\nroot.index = this.pm10 * 2\n")
+    );
+}
+
 /// PL-37: a pipeline that writes what it watches feeds its own trigger.
 #[test]
 fn a_pipeline_that_writes_the_type_it_watches_is_refused() {

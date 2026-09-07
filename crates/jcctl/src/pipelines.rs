@@ -32,6 +32,8 @@ pub struct CronJob {
     pub concurrency_policy: &'static str,
     /// A run that could not start within this window is skipped rather than piled up.
     pub starting_deadline_seconds: u32,
+    /// `spec.suspend` of the CronJob: a paused pipeline keeps its schedule and runs nothing (PL-40).
+    pub suspend: bool,
 }
 
 /// The cadence at which a scheduled run stops being worth a pod start (PL-26).
@@ -40,7 +42,9 @@ const RESIDENT_BELOW_SECONDS: u64 = 30;
 /// Decides where one pipeline runs (PL-26, PL-28).
 ///
 /// An explicit `class` always wins; `auto` reads `spec.period`, and a pipeline with no
-/// period is push-based and therefore resident.
+/// period is push-based and therefore resident. A paused pipeline (`spec.enabled: false`,
+/// PL-40) keeps its runtime: the streams renderer leaves it out of the runner and the
+/// CronJob carries `suspend`, so a Resume changes nothing but the flag.
 pub fn runtime_of(spec: &PipelineSpec) -> Runtime {
     match spec.class {
         PipelineClass::Resident => Runtime::Resident,
@@ -67,6 +71,7 @@ fn cron_job(spec: &PipelineSpec) -> CronJob {
         count,
         concurrency_policy: "Forbid",
         starting_deadline_seconds: 30,
+        suspend: !spec.enabled,
     };
 
     match (
@@ -84,6 +89,7 @@ fn cron_job(spec: &PipelineSpec) -> CronJob {
             count: 1,
             concurrency_policy: "Forbid",
             starting_deadline_seconds: 30,
+            suspend: !spec.enabled,
         },
         // `class: scheduled` without either is refused by `PipelineSpec::validate`; a
         // manifest that reached here anyway runs once a minute rather than not at all.
@@ -93,6 +99,7 @@ fn cron_job(spec: &PipelineSpec) -> CronJob {
             count: 1,
             concurrency_policy: "Forbid",
             starting_deadline_seconds: 30,
+            suspend: !spec.enabled,
         },
     }
 }
