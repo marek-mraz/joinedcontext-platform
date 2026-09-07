@@ -62,6 +62,14 @@ pub fn is_encrypted_file(file_name: &str) -> bool {
 pub struct SecretValue(Zeroizing<String>);
 
 impl SecretValue {
+    /// Wraps a plaintext value the reconciler already holds in memory.
+    ///
+    /// Crate-visible on purpose: the callers are the two backends that decrypt or fetch, so
+    /// no command can turn a string it read out of a manifest into a secret value.
+    pub(crate) fn new(plaintext: String) -> Self {
+        Self(Zeroizing::new(plaintext))
+    }
+
     /// The plaintext. Every call site that uses this is a place where a secret can escape.
     pub fn expose(&self) -> &str {
         &self.0
@@ -634,7 +642,7 @@ fn decrypt_parts(
     );
 
     let text = std::str::from_utf8(&plaintext).map_err(|_| "the plaintext is not UTF-8")?;
-    Ok(SecretValue(Zeroizing::new(text.to_owned())))
+    Ok(SecretValue::new(text.to_owned()))
 }
 
 fn hex_upper(bytes: &[u8]) -> String {
