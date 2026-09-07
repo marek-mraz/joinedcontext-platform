@@ -32,11 +32,12 @@ async fn main() -> ExitCode {
         Box::new(PolicyPdp),
         config.org_domain.clone(),
     );
-    let (endpoints, spaces, accounts) = match &config.repo_dir {
+    let (endpoints, spaces, accounts, federations) = match &config.repo_dir {
         None => (
             Vec::new(),
             Vec::new(),
             context_gateway::auth::accounts::ServiceAccounts::new(),
+            context_gateway::federation::Federations::new(),
         ),
         Some(dir) => match store::load(dir) {
             Ok(loaded) => {
@@ -58,6 +59,7 @@ async fn main() -> ExitCode {
         },
     };
     let gateway = gateway.serve(endpoints).serve_spaces(spaces);
+    gateway.replace_federation(federations);
 
     // The realm's keys are refreshed in the background; a request never fetches (PF-46).
     let gateway = match (&config.oidc_issuer, &config.oidc_jwks_url) {

@@ -7,6 +7,7 @@
 //! the same thing an endpoint that does not exist answers (EP-03).
 
 use crate::auth::accounts::{accounts_of, ServiceAccounts};
+use crate::federation::{federations_of, Federations};
 use crate::resolver::{Endpoint, Model, Space};
 use jc_core::kinds::{
     Audience, ContextSpaceSpec, DataModelSpec, EndpointSpec, PolicySpec, Representation,
@@ -18,12 +19,15 @@ use std::sync::Arc;
 
 /// Loads the endpoint table and the identity table from the repository under `dir`
 /// (CC-08, PF-46).
-pub fn load(dir: &Path) -> Result<(Vec<Endpoint>, Vec<Space>, ServiceAccounts), jcctl::LoadError> {
+pub fn load(
+    dir: &Path,
+) -> Result<(Vec<Endpoint>, Vec<Space>, ServiceAccounts, Federations), jcctl::LoadError> {
     let repo = Repository::load(dir)?;
     Ok((
         endpoints_with_models(&repo, Some(dir)),
         spaces_of(&repo, Some(dir)),
         accounts_of(&repo),
+        federations_of(&repo),
     ))
 }
 

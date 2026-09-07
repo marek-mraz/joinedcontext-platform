@@ -69,17 +69,20 @@ impl Reaper {
             return false;
         }
         match store::load(&self.dir) {
-            Ok((endpoints, spaces, accounts)) => {
+            Ok((endpoints, spaces, accounts, federations)) => {
                 let counts = (endpoints.len(), spaces.len(), accounts.len());
                 // The endpoint table carries the policies, so replacing it purges every
                 // grant the PDP would have honoured; the space table carries the same
                 // policies for the `/cs` surface and has to be swapped with it, or a
                 // withdrawn grant would still be honoured there; the accounts table is
                 // what a token's `azp` resolves through, so a withdrawn credential stops
-                // resolving here.
+                // resolving here; the federation table decides whether a read over a space
+                // can be served at all, so a registration that changed identity mode takes
+                // effect with the rest and not one reload later (PF-48).
                 self.gateway.resolver.replace(endpoints);
                 self.gateway.resolver.replace_spaces(spaces);
                 self.gateway.replace_accounts(accounts);
+                self.gateway.replace_federation(federations);
                 self.seen = current;
                 tracing::info!(
                     endpoints = counts.0,

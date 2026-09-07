@@ -15,6 +15,19 @@ use std::collections::BTreeSet;
 /// not a valid NGSI-LD entity.
 const STRUCTURAL: &[&str] = &["id", "type", "@context", "@id", "@type", "scope"];
 
+/// The members the broker generates rather than the author writing them, which a read keeps
+/// whatever the grants name (EP-71, CIM 009 clause 4.8).
+///
+/// A grant is a statement about the data a caller may see, not about whether they may know
+/// when it was written or which registered source answered. On a federated endpoint that
+/// distinction is the whole of provenance: strip these and a merged answer stops saying where
+/// any of it came from, which is what EP-71 exists to prevent.
+///
+/// A read only. [`ungranted`] deliberately does not know about this list, so a write that
+/// carries one of these members is still refused: they are the broker's to set, never a
+/// client's to send.
+const SYSTEM: &[&str] = &["createdAt", "modifiedAt", "deletedAt", "expiresAt"];
+
 /// Strips from one entity every attribute the grants do not name and every attribute the
 /// endpoint hides (R9, EP-61).
 ///
@@ -31,6 +44,7 @@ pub fn project_entity(entity: &mut Value, granted: &BTreeSet<String>, hidden: &B
     };
     members.retain(|name, _| {
         STRUCTURAL.contains(&name.as_str())
+            || SYSTEM.contains(&name.as_str())
             || ((granted.is_empty() || granted.contains(name)) && !hidden.contains(name))
     });
 }

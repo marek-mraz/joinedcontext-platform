@@ -13,6 +13,7 @@
 
 use crate::auth::accounts::ServiceAccounts;
 use crate::auth::token::{self, Claims, Verifier};
+use crate::federation::{Federations, Member};
 use crate::handlers::{endpoint_surface, schema, space_surface};
 use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::evaluator::{Constraints, Subject, Verdict};
@@ -68,6 +69,9 @@ pub struct Gateway {
     /// The service accounts a token's `azp` can name; swapped whole when the repository
     /// changes, so a withdrawn credential stops resolving without a restart (R48).
     accounts: ArcSwap<ServiceAccounts>,
+    /// The registrations of every space, swapped whole like the accounts are. Empty is the
+    /// ordinary case: a space with no registration federates nothing (EP-70).
+    federation: ArcSwap<Federations>,
     /// The gateway's public base URL, when the deployment names one.
     pub public_url: Option<String>,
     /// One token bucket per endpoint and caller (EP-20).
@@ -84,6 +88,7 @@ impl Gateway {
             org_domain: org_domain.into(),
             verifier: None,
             accounts: ArcSwap::from_pointee(ServiceAccounts::new()),
+            federation: ArcSwap::from_pointee(Federations::new()),
             public_url: None,
             rate_limiter: RateLimiter::new(),
         }
@@ -109,6 +114,27 @@ impl Gateway {
             audiences.push(format!("{base}{}", endpoint.base_path));
         }
         audiences
+    }
+
+    /// Replaces the federation table, the same way the accounts are replaced (EP-70).
+    pub fn replace_federation(&self, federations: Federations) {
+        self.federation.store(Arc::new(federations));
+    }
+
+    /// The registrations of one space, for a surface that lists what an endpoint federates.
+    /// Names only: an address never leaves the platform (EP-71).
+    pub fn members_of(&self, project: &str, space: &str) -> Vec<Member> {
+        self.federation.load().members(project, space).to_vec()
+    }
+
+    /// The registrations of one space that ask for the caller's own identity (PF-48).
+    fn caller_identity_members(&self, project: &str, space: &str) -> Vec<String> {
+        self.federation
+            .load()
+            .needing_caller_identity(project, space)
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Replaces the service account table (R48, PF-46).
@@ -390,6 +416,30 @@ async fn serve_ngsi_ld(
     let Verdict::Rewrite(constraints) = verdict else {
         return refused(operation, &path);
     };
+
+    // PF-48: a registration asking for `caller` identity needs the caller's own token
+    // rewritten for the member's audience, which is an RFC 8693 exchange this platform does
+    // not have yet. Forwarding as the hub's own service account instead would answer with data
+    // the caller was never granted on that member, so the read stops here.
+    //
+    // After the decision, not before it: a caller who may not use this endpoint at all learns
+    // that it is refused, never that it federates (EP-03, EP-23).
+    let waiting = gateway.caller_identity_members(&endpoint.project, &endpoint.space);
+    if !waiting.is_empty() {
+        tracing::warn!(
+            slug = %endpoint.slug,
+            space = %endpoint.space,
+            registrations = %waiting.join(", "),
+            "caller identity is registered but token exchange is not implemented"
+        );
+        return ProblemDetails::new(501, "federation-identity-unavailable", "Not Implemented")
+            .with_detail(
+                "a source registered on this space forwards the caller's own token, which \
+                 needs an RFC 8693 token exchange this deployment does not have yet; \
+                 spec.federation.identity: serviceAccount is served today",
+            )
+            .into_response();
+    }
 
     // The caller asked for a period no grant reaches. The request was well formed and its
     // answer is genuinely nothing, so it is answered here: forwarding it without a
