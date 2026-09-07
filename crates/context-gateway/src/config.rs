@@ -29,6 +29,11 @@ pub struct Config {
     /// The gateway's own public base URL (`JC_GATEWAY_PUBLIC_URL`), which makes the full
     /// RFC 8707 resource URI an acceptable token audience alongside the endpoint slug.
     pub public_url: Option<String>,
+    /// The base a rewritten `notification.endpoint.uri` carries
+    /// (`JC_GATEWAY_EGRESS_URL`), which is the address the broker dials to deliver; the
+    /// public URL when the deployment names none. An in-cluster Service URL keeps the
+    /// delivery hop inside the cluster, where a NetworkPolicy governs it (R46).
+    pub egress_url: Option<String>,
     /// A PEM file of extra trust anchors the notification egress trusts on top of the
     /// public roots (`JC_GATEWAY_EGRESS_CA_BUNDLE`), for subscribers behind the
     /// installation's own CA (R46).
@@ -89,6 +94,9 @@ impl Config {
             oidc_issuer,
             oidc_jwks_url,
             public_url: std::env::var("JC_GATEWAY_PUBLIC_URL")
+                .ok()
+                .map(|url| url.trim_end_matches('/').to_owned()),
+            egress_url: std::env::var("JC_GATEWAY_EGRESS_URL")
                 .ok()
                 .map(|url| url.trim_end_matches('/').to_owned()),
             egress_ca_bundle: std::env::var("JC_GATEWAY_EGRESS_CA_BUNDLE")

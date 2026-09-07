@@ -28,6 +28,10 @@ const PROJECT: &str = "banskabystrica";
 const SPACE: &str = "ovzdusie";
 const DOMAIN: &str = "banskabystrica.sk";
 const PUBLIC_URL: &str = "https://gw.banskabystrica.sk";
+
+/// The in-cluster Service a deployment points `JC_GATEWAY_EGRESS_URL` at, so a delivery
+/// never leaves the cluster and reaches the gateway from the broker rather than the edge.
+const EGRESS: &str = "http://context-gateway.jc-context-gateway.svc.cluster.local:8080";
 const SUBSCRIPTION: &str = "urn:ngsi-ld:Subscription:ovzdusie:senzory";
 const SENSOR: &str = "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:senzor-01";
 const OTHER: &str = "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:senzor-02";
@@ -261,15 +265,13 @@ fn endpoint(hidden: &[&str]) -> Endpoint {
     }
 }
 
-fn gateway(upstream: String, hidden: &[&str]) -> Arc<Gateway> {
-    gateway_with(upstream, hidden, None, policy())
-}
-
-/// The same gateway, trusting `authority` on top of the public roots and serving `policy`.
+/// The same gateway, trusting `authority` on top of the public roots, handing the broker
+/// `egress` as the base of a rewritten endpoint, and serving `policy`.
 fn gateway_with(
     upstream: String,
     hidden: &[&str],
     authority: Option<&[u8]>,
+    egress: Option<&str>,
     policy: PolicySpec,
 ) -> Arc<Gateway> {
     let broker = match authority {
@@ -284,6 +286,7 @@ fn gateway_with(
                 ServiceAccounts::new(),
                 Some(PUBLIC_URL.to_owned()),
             )
+            .deliver_through(egress.map(str::to_owned))
             .serve([Endpoint {
                 policies: vec![policy],
                 ..endpoint(hidden)
@@ -332,11 +335,15 @@ fn sensor(id: &str) -> Value {
 
 /// Creates a subscription through the gateway and hands back what the broker was told.
 async fn create(subscription: Value) -> (StatusCode, Vec<Value>) {
-    create_under(subscription, policy()).await
+    create_under(subscription, policy(), None).await
 }
 
-/// The same, under a policy the test chose.
-async fn create_under(subscription: Value, policy: PolicySpec) -> (StatusCode, Vec<Value>) {
+/// The same, under a policy the test chose and through the egress base it named.
+async fn create_under(
+    subscription: Value,
+    policy: PolicySpec,
+    egress: Option<&str>,
+) -> (StatusCode, Vec<Value>) {
     let (upstream, forwarded) = broker(BrokerState {
         stored: None,
         matching: Vec::new(),
@@ -344,7 +351,7 @@ async fn create_under(subscription: Value, policy: PolicySpec) -> (StatusCode, V
     })
     .await;
 
-    let response = router(gateway_with(upstream, &[], None, policy))
+    let response = router(gateway_with(upstream, &[], None, egress, policy))
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -369,6 +376,19 @@ async fn deliver(
     hidden: &[&str],
     to: &str,
 ) -> (StatusCode, Vec<Value>) {
+    deliver_via(subscription, matching, entities, hidden, to, None).await
+}
+
+/// The same, against a gateway that hands the broker `egress` as the base of a rewritten
+/// endpoint. What was stored under the old base still has to arrive (R46).
+async fn deliver_via(
+    subscription: Option<Value>,
+    matching: Vec<String>,
+    entities: Vec<Value>,
+    hidden: &[&str],
+    to: &str,
+    egress: Option<&str>,
+) -> (StatusCode, Vec<Value>) {
     let (upstream, _) = broker(BrokerState {
         stored: subscription,
         matching,
@@ -376,7 +396,7 @@ async fn deliver(
     })
     .await;
 
-    let response = router(gateway(upstream, hidden))
+    let response = router(gateway_with(upstream, hidden, None, egress, policy()))
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -745,17 +765,23 @@ async fn a_subscriber_behind_tls_is_delivered_to_over_tls() {
     })
     .await;
 
-    let response = router(gateway_with(upstream, &[], Some(&authority), policy()))
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri(format!("/api/endpoint/{SLUG}/egress/notifications"))
-                .header("content-type", "application/json")
-                .body(Body::from(notification(vec![sensor(SENSOR)]).to_string()))
-                .expect("a request"),
-        )
-        .await
-        .expect("the gateway answers");
+    let response = router(gateway_with(
+        upstream,
+        &[],
+        Some(&authority),
+        None,
+        policy(),
+    ))
+    .oneshot(
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/endpoint/{SLUG}/egress/notifications"))
+            .header("content-type", "application/json")
+            .body(Body::from(notification(vec![sensor(SENSOR)]).to_string()))
+            .expect("a request"),
+    )
+    .await
+    .expect("the gateway answers");
 
     assert!(
         response.status().is_success(),
@@ -776,6 +802,7 @@ async fn a_grant_with_a_geographic_condition_stores_the_subscription_with_its_ar
             "notification": { "endpoint": { "uri": "http://mesto.example/hooks/x" } }
         }),
         geo_policy(),
+        None,
     )
     .await;
 
@@ -806,7 +833,7 @@ async fn an_entity_outside_the_granted_area_is_not_delivered() {
     })
     .await;
 
-    let response = router(gateway_with(upstream, &[], None, geo_policy()))
+    let response = router(gateway_with(upstream, &[], None, None, geo_policy()))
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -845,7 +872,7 @@ async fn an_entity_the_gateway_cannot_place_is_not_delivered_under_a_geo_grant()
     })
     .await;
 
-    let response = router(gateway_with(upstream, &[], None, geo_policy()))
+    let response = router(gateway_with(upstream, &[], None, None, geo_policy()))
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -863,5 +890,66 @@ async fn an_entity_the_gateway_cannot_place_is_not_delivered_under_a_geo_grant()
     assert!(
         seen.lock().expect("the delivery log").is_empty(),
         "nothing left the platform"
+    );
+}
+
+/// Where the broker delivers is not where a caller's token is audience-bound (R46, PF-45).
+#[tokio::test]
+async fn a_deployment_that_names_an_egress_url_has_the_broker_deliver_there() {
+    let (status, forwarded) = create_under(
+        json!({
+            "type": "Subscription",
+            "entities": [{ "type": "AirQualityObserved" }],
+            "notification": { "endpoint": { "uri": "http://mesto.internal/hooks/ovzdusie" } }
+        }),
+        policy(),
+        Some(EGRESS),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    let uri = forwarded[0]["notification"]["endpoint"]["uri"]
+        .as_str()
+        .expect("a rewritten uri");
+    assert!(
+        uri.starts_with(&format!(
+            "{EGRESS}/api/endpoint/{SLUG}/egress/notifications?to="
+        )),
+        "the broker is handed the in-cluster address: {uri}"
+    );
+    assert!(
+        !uri.starts_with(PUBLIC_URL),
+        "and not the public one, which would send the delivery out through the edge: {uri}"
+    );
+    assert!(
+        uri.ends_with(&percent("http://mesto.internal/hooks/ovzdusie")),
+        "the subscriber's own endpoint still travels with it: {uri}"
+    );
+}
+
+/// A deployment that adds the variable does not orphan what it already stored: the target is
+/// read back out of the stored subscription by its path, not by the base in front of it.
+#[tokio::test]
+async fn a_subscription_stored_under_the_public_url_is_delivered_after_the_egress_url_arrives() {
+    let (webhook, seen, _) = sink().await;
+    let (status, _) = deliver_via(
+        Some(stored(
+            &webhook,
+            json!(["temperature"]),
+            "((temperature<100))",
+        )),
+        vec![SENSOR.to_owned()],
+        vec![sensor(SENSOR)],
+        &[],
+        &webhook,
+        Some(EGRESS),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        seen.lock().expect("the delivery log").len(),
+        1,
+        "a subscription written under the old base is still delivered"
     );
 }

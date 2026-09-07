@@ -234,8 +234,8 @@ fn route(
     }
     if base_url.is_empty() {
         return Err(Box::new(unsupported(
-            "this gateway does not know its own public URL, so it cannot route a notification \
-             back through itself; set JC_GATEWAY_PUBLIC_URL",
+            "this gateway does not know an address to route a notification back through \
+             itself; set JC_GATEWAY_EGRESS_URL or JC_GATEWAY_PUBLIC_URL",
         )));
     }
     let mut routed = format!(

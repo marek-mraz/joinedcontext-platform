@@ -81,6 +81,8 @@ pub struct Gateway {
     agreements: ArcSwap<Agreements>,
     /// The gateway's public base URL, when the deployment names one.
     pub public_url: Option<String>,
+    /// The base a rewritten notification endpoint carries, when it is not the public one.
+    pub egress_url: Option<String>,
     /// One token bucket per endpoint and caller (EP-20).
     pub rate_limiter: RateLimiter,
 }
@@ -98,6 +100,7 @@ impl Gateway {
             federation: ArcSwap::from_pointee(Federations::new()),
             agreements: ArcSwap::from_pointee(Agreements::new()),
             public_url: None,
+            egress_url: None,
             rate_limiter: RateLimiter::new(),
         }
     }
@@ -112,6 +115,18 @@ impl Gateway {
         self.verifier = Some(verifier);
         self.accounts.store(Arc::new(accounts));
         self.public_url = public_url;
+        self
+    }
+
+    /// Hands the broker `egress_url` as the base of every rewritten notification endpoint,
+    /// instead of the public URL (R46).
+    ///
+    /// The two are separate because they answer to different readers. The public URL is what
+    /// a caller's token may name as its audience (PF-45); this is what the broker dials to
+    /// deliver, and pointing it at the in-cluster Service is what keeps that hop off the
+    /// public edge, where it would arrive indistinguishable from any request off the internet.
+    pub fn deliver_through(mut self, egress_url: Option<String>) -> Self {
+        self.egress_url = egress_url;
         self
     }
 
@@ -177,6 +192,14 @@ impl Gateway {
     /// The gateway's public base URL, or the empty string when none is configured.
     fn base_url(&self) -> &str {
         self.public_url.as_deref().unwrap_or_default()
+    }
+
+    /// The base a rewritten notification endpoint carries: the egress URL where the
+    /// deployment names one, and the public URL otherwise (R46).
+    fn egress_base(&self) -> &str {
+        self.egress_url
+            .as_deref()
+            .unwrap_or_else(|| self.base_url())
     }
 }
 
@@ -546,7 +569,7 @@ async fn serve_ngsi_ld(
             &sent,
             &constraints,
             &endpoint,
-            gateway.base_url(),
+            gateway.egress_base(),
             operation,
         ) {
             Ok(narrowed) => sent = narrowed,
