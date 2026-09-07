@@ -220,15 +220,41 @@ async fn the_access_surface_refuses_the_same_way_the_data_surface_does() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-/// EP-58: the ODRL and UCAST representations are separate tasks; a caller that asks for
-/// one by name is told so rather than handed JSON that is not what it asked for.
+/// EP-57, EP-58: a caller that names a representation gets that one, never JSON wearing
+/// somebody else's media type. The documents themselves are asserted in their own suites
+/// (`access_odrl_tests`, `access_ucast_tests`); what this one holds is the negotiation.
 #[tokio::test]
-async fn a_representation_that_is_not_served_yet_is_not_silently_substituted() {
-    let request = Request::builder()
-        .uri(format!("/api/endpoint/{SLUG}/access"))
-        .header("accept", "application/odrl+json")
-        .body(Body::empty())
-        .expect("a request");
-    let (status, _) = call(request).await;
-    assert_eq!(status, StatusCode::NOT_ACCEPTABLE);
+async fn a_named_representation_is_the_one_that_comes_back() {
+    for (accept, media_type) in [
+        ("application/odrl+json", "application/odrl+json"),
+        ("text/turtle", "text/turtle"),
+        (
+            "application/vnd.joinedcontext.grant-ast+json",
+            "application/vnd.joinedcontext.grant-ast+json",
+        ),
+        ("application/json", "application/json"),
+        ("*/*", "application/json"),
+        // Read in the caller's order of preference, not ours.
+        ("text/turtle, application/json", "text/turtle"),
+        // A type this surface does not serve falls through to the default document rather
+        // than to a 406: the access surface always has an answer, and a refusal here tells
+        // a caller nothing it could act on.
+        ("text/csv", "application/json"),
+    ] {
+        let request = Request::builder()
+            .uri(format!("/api/endpoint/{SLUG}/access"))
+            .header("accept", accept)
+            .body(Body::empty())
+            .expect("a request");
+        let response = app().oneshot(request).await.expect("the gateway answers");
+        assert_eq!(response.status(), StatusCode::OK, "for {accept}");
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some(media_type),
+            "for {accept}"
+        );
+    }
 }

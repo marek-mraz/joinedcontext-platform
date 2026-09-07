@@ -921,27 +921,82 @@ async fn access(
         Err(problem) => return *problem,
     };
 
-    // The ODRL and UCAST representations are T-0164 and T-0165; a caller that asks for one
-    // by name is told it is not served rather than handed something else (EP-58).
     let accept = request
         .headers()
         .get(axum::http::header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("*/*");
-    if accept.contains("odrl") || accept.contains("grant-ast") {
-        return (
-            StatusCode::NOT_ACCEPTABLE,
-            ProblemDetails::new(406, "not-acceptable", "Representation Not Served")
-                .with_detail("this endpoint serves the access surface as application/json"),
-        )
-            .into_response();
-    }
+        .and_then(|value| value.to_str().ok());
+    let now = crate::pdp::now();
 
-    json_response(&handlers::access::permissions(
-        &subject,
-        &endpoint,
-        crate::pdp::now(),
-    ))
+    // The same grants in whichever language the caller reads (EP-56, EP-57, EP-58). The
+    // document is computed once per representation from the same PDP answer; a second
+    // implementation of "what may this caller do" is the thing EP-60 forbids.
+    match access_format(accept) {
+        AccessFormat::AuthZen => {
+            json_response(&handlers::access::permissions(&subject, &endpoint, now))
+        }
+        AccessFormat::Odrl => {
+            let document = handlers::access_odrl::policy(
+                &subject,
+                &endpoint,
+                now,
+                gateway.base_url(),
+                sha256_hex,
+            );
+            typed_json_response(&document, handlers::access_odrl::ODRL_JSON)
+        }
+        AccessFormat::Turtle => {
+            let document = handlers::access_odrl::policy(
+                &subject,
+                &endpoint,
+                now,
+                gateway.base_url(),
+                sha256_hex,
+            );
+            text_response(
+                handlers::access_odrl::turtle(&document),
+                handlers::access_odrl::TURTLE,
+            )
+        }
+        AccessFormat::GrantAst => {
+            let document = handlers::access_ucast::grant_ast(&subject, &endpoint, now);
+            typed_json_response(&document, handlers::access_ucast::GRANT_AST_JSON)
+        }
+    }
+}
+
+/// Which representation of the access surface the caller asked for (EP-56, EP-57, EP-58).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccessFormat {
+    /// The AuthZEN resource-search document, and the default.
+    AuthZen,
+    /// ODRL 2.2 in the `ngsi-ld:` profile, as JSON-LD.
+    Odrl,
+    /// The same ODRL policy as RDF.
+    Turtle,
+    /// The residual as a UCAST condition tree.
+    GrantAst,
+}
+
+/// The first representation the `Accept` header names that this surface serves.
+///
+/// Read in the order the caller wrote them, so a client that prefers Turtle and will settle
+/// for JSON gets Turtle. Anything else, including no header at all, is the default document:
+/// the access surface always has an answer, and a 406 here would tell a caller nothing it
+/// could act on.
+fn access_format(accept: Option<&str>) -> AccessFormat {
+    let Some(accept) = accept else {
+        return AccessFormat::AuthZen;
+    };
+    for offer in accept.split(',') {
+        match offer.split(';').next().unwrap_or_default().trim() {
+            handlers::access_odrl::ODRL_JSON => return AccessFormat::Odrl,
+            handlers::access_odrl::TURTLE => return AccessFormat::Turtle,
+            handlers::access_ucast::GRANT_AST_JSON => return AccessFormat::GrantAst,
+            "application/json" | "application/ld+json" => return AccessFormat::AuthZen,
+            _ => {}
+        }
+    }
+    AccessFormat::AuthZen
 }
 
 /// One prospective request, answered yes or no (T-0163, R51).
@@ -1783,6 +1838,36 @@ async fn paged_entities(
 }
 
 /// A JSON body, serialized once.
+/// A JSON body under a media type of its own, for the representations that have one.
+fn typed_json_response(payload: &Value, media_type: &'static str) -> Response<Body> {
+    match serde_json::to_vec(payload) {
+        Ok(bytes) => (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static(media_type),
+            )],
+            bytes,
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!(%error, "the answer does not serialize");
+            ProblemDetails::internal().into_response()
+        }
+    }
+}
+
+/// A text body under its own media type.
+fn text_response(body: String, media_type: &'static str) -> Response<Body> {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static(media_type),
+        )],
+        body,
+    )
+        .into_response()
+}
+
 fn json_response(payload: &Value) -> Response<Body> {
     match serde_json::to_vec(payload) {
         Ok(bytes) => (
