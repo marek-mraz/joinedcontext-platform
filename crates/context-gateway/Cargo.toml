@@ -34,6 +34,15 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 jsonschema = { version = "0.54", default-features = false }
 
+# A notification is delivered to a subscriber outside the cluster, so the outbound client
+# speaks TLS (R46). `ring` rather than the default aws-lc-rs: the crate already links ring for
+# the schema surface's ETags, and this adds no second C toolchain to the image build. The roots
+# are compiled in, so the image needs no CA bundle of its own.
+hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
+webpki-roots = "1"
+rustls-pemfile = "2"
+
 [dev-dependencies]
 serde_norway = "0.9"
 # `oneshot`, so the tenancy middleware is tested through a real tower stack.
@@ -43,3 +52,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # `test-util` pauses the clock, so the reaper's five-second bound is measured
 # without a test that actually sleeps for five seconds.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
+# The TLS sink of the egress tests: a certificate minted per run, because a test key in the
+# repository is a finding for the secret scanner and an expiry date waiting to happen.
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+hyper = { version = "1", features = ["http1", "server"] }

@@ -10,6 +10,16 @@ use context_gateway::store;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+/// The one outbound client: the broker hop and every notification delivery (R46).
+fn broker_of(config: &Config) -> Result<Broker, String> {
+    let Some(path) = config.egress_ca_bundle.as_ref() else {
+        return Ok(Broker::new(config.broker_url.clone()));
+    };
+    let bundle = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    Broker::trusting(config.broker_url.clone(), &bundle)
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -27,11 +37,16 @@ async fn main() -> ExitCode {
         }
     };
 
-    let gateway = Gateway::new(
-        Broker::new(config.broker_url.clone()),
-        Box::new(PolicyPdp),
-        config.org_domain.clone(),
-    );
+    let broker = match broker_of(&config) {
+        Ok(broker) => broker,
+        Err(error) => {
+            // An unusable trust bundle is a deployment fault, and starting without it would
+            // deliver notifications to a peer nobody verified (R46).
+            tracing::error!(%error, "cannot build the outbound client");
+            return ExitCode::FAILURE;
+        }
+    };
+    let gateway = Gateway::new(broker, Box::new(PolicyPdp), config.org_domain.clone());
     let (endpoints, spaces, accounts, federations, agreements) = match &config.repo_dir {
         None => (
             Vec::new(),

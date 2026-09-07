@@ -12,11 +12,13 @@
 //!
 //! The stored subscription is the authority for both the projection and the target. That is
 //! what makes the delivery path safe to leave unauthenticated, which it has to be: the
-//! broker calling it holds no token of its own.
+//! broker calling it holds no token of its own. The granted areas travel in that same
+//! rewritten URI, because `geoQ` holds one geometry and a caller may hold several grants
+//! (T-0428, GW11).
 
 use crate::app::Gateway;
 use crate::pdp::evaluator::{conjoin, narrow, Constraints};
-use crate::pdp::projection;
+use crate::pdp::{geo, projection};
 use crate::proxy::Broker;
 use crate::query;
 use crate::resolver::Endpoint;
@@ -35,6 +37,9 @@ pub const EGRESS_PATH: &str = "/egress/notifications";
 
 /// The parameter carrying the endpoint the subscriber actually asked for.
 const TARGET: &str = "to";
+
+/// The parameter carrying one granted area, repeated once per grant (GW11).
+const AREA: &str = "area";
 
 /// The tenant header the gateway pins on the internal hop (GW20).
 const TENANT: &str = "NGSILD-Tenant";
@@ -64,19 +69,9 @@ pub fn narrow_subscription(
         ));
     };
 
-    // A geo or scope condition cannot be folded into a stored subscription faithfully yet,
-    // and a subscription stored half-narrowed would deliver what the grant does not cover.
-    if constraints.geo_q.is_some()
-        || !constraints.geo_grants.is_empty()
-        || constraints.granted_scopes.is_some()
-    {
-        return Err(Box::new(unsupported(
-            "a grant with a geographic or scope condition cannot be narrowed into a stored \
-             subscription yet; the notifications it would produce cannot be shown to stay \
-             inside the grant, so the subscription is refused rather than stored (R46, GW27)",
-        )));
-    }
-
+    // A scope grant needs nothing here: `policy_filter` folds each policy's scopes into that
+    // policy's own `q` term before the constraints are built (R13), so they arrive with the
+    // `q` that `narrow_filter` conjoins below and no `scopeQ` is ever stored.
     narrow_selectors(members, constraints, is_create)?;
     narrow_filter(members, constraints, is_create);
     narrow_names(
@@ -133,7 +128,12 @@ pub fn narrow_subscription(
             false => Ok(()),
         };
     };
-    let routed = route(uri, base_url, &endpoint.base_path)?;
+    let routed = route(
+        uri,
+        base_url,
+        &endpoint.base_path,
+        &granted_areas(constraints),
+    )?;
     endpoint_of.insert("uri".to_owned(), Value::String(routed));
     Ok(())
 }
@@ -176,7 +176,7 @@ pub async fn deliver(
         Ok(None) => return ProblemDetails::not_found().into_response(),
         Err(problem) => return problem.into_response(),
     };
-    let Some(target) = original_uri(&stored) else {
+    let Some((target, areas)) = delivery_of(&stored) else {
         tracing::warn!(
             subscription = %subscription_id,
             "a delivery names a subscription whose notification endpoint does not route \
@@ -195,6 +195,11 @@ pub async fn deliver(
                 return problem.into_response();
             }
         }
+        // The areas the grants drew, applied the way a read applies them to an answer: an
+        // entity the gateway cannot place is not delivered (GW11).
+        if let Some((areas, entities)) = geo::Areas::of(&areas, None).zip(data.as_array_mut()) {
+            entities.retain(|entity| areas.admits(entity));
+        }
     }
 
     if notification
@@ -206,20 +211,20 @@ pub async fn deliver(
         // or was projected away entirely. Nothing leaves the platform.
         return StatusCode::NO_CONTENT.into_response();
     }
-    dispatch(&target, &parts.headers, &notification).await
+    dispatch(&gateway.broker, &target, &parts.headers, &notification).await
 }
 
-/// Rewrites one notification endpoint to point back at this gateway.
-fn route(uri: &str, base_url: &str, base_path: &str) -> Result<String, Box<ProblemDetails>> {
-    if uri.starts_with("https://") {
-        return Err(Box::new(unsupported(
-            "the gateway's egress dispatcher speaks HTTP only, so a notification endpoint \
-             it cannot reach is refused rather than stored and silently never delivered",
-        )));
-    }
-    if !uri.starts_with("http://") {
+/// Rewrites one notification endpoint to point back at this gateway, carrying the areas the
+/// delivery path filters with (R46, GW11).
+fn route(
+    uri: &str,
+    base_url: &str,
+    base_path: &str,
+    areas: &[String],
+) -> Result<String, Box<ProblemDetails>> {
+    if !(uri.starts_with("http://") || uri.starts_with("https://")) {
         return Err(Box::new(ProblemDetails::bad_request().with_detail(
-            "a notification endpoint the gateway delivers to has to be an HTTP URL",
+            "a notification endpoint the gateway delivers to has to be an HTTP or HTTPS URL",
         )));
     }
     if uri.contains(EGRESS_PATH) {
@@ -233,28 +238,56 @@ fn route(uri: &str, base_url: &str, base_path: &str) -> Result<String, Box<Probl
              back through itself; set JC_GATEWAY_PUBLIC_URL",
         )));
     }
-    Ok(format!(
+    let mut routed = format!(
         "{base_url}{base_path}{EGRESS_PATH}?{TARGET}={}",
         query::encode(uri)
-    ))
+    );
+    for area in areas {
+        routed.push_str(&format!("&{AREA}={}", query::encode(area)));
+    }
+    Ok(routed)
 }
 
-/// The endpoint the subscriber asked for, read back out of a stored subscription.
+/// The granted areas a delivery is filtered against (GW11).
+///
+/// `geo_grants` where the intersection left the areas to the gateway, and otherwise the
+/// `geoQ` the broker would have been given, which is then the grant's own area: a
+/// subscription write carries no `geoQ` in its query string, because a subscription's own
+/// geometry lives in its body. Where a request did carry one, filtering against it is
+/// narrower than the grant, so this stays fail-closed either way.
+fn granted_areas(constraints: &Constraints) -> Vec<String> {
+    match constraints.geo_grants.is_empty() {
+        false => constraints.geo_grants.clone(),
+        true => constraints.geo_q.clone().into_iter().collect(),
+    }
+}
+
+/// The endpoint the subscriber asked for and the areas its grants drew, read back out of a
+/// stored subscription.
 ///
 /// `None` for a subscription this gateway did not route, which is the answer for one
 /// created directly on the broker: the gateway delivers nothing it did not narrow.
-fn original_uri(stored: &Value) -> Option<String> {
+fn delivery_of(stored: &Value) -> Option<(String, Vec<String>)> {
     let uri = stored
         .get("notification")?
         .get("endpoint")?
         .get("uri")?
         .as_str()?;
-    let (path, target) = uri.split_once(&format!("?{TARGET}="))?;
+    let (path, query) = uri.split_once('?')?;
     if !path.ends_with(EGRESS_PATH) {
         return None;
     }
-    let decoded = query::decode(target);
-    decoded.starts_with("http://").then_some(decoded)
+    let params = query::parse(query);
+    let target = query::first(&params, TARGET)?.to_owned();
+    if !(target.starts_with("http://") || target.starts_with("https://")) {
+        return None;
+    }
+    let areas = params
+        .iter()
+        .filter(|(name, _)| name == AREA)
+        .map(|(_, area)| area.clone())
+        .collect();
+    Some((target, areas))
 }
 
 /// The attributes a stored subscription was narrowed to; empty is a subscription over
@@ -385,7 +418,12 @@ async fn read(
 ///
 /// The broker's own headers are relayed, so the `receiverInfo` a secured subscription
 /// carries reaches the receiver that expects it (ADR 009, R27).
-async fn dispatch(target: &str, from: &HeaderMap, notification: &Value) -> Response<Body> {
+async fn dispatch(
+    broker: &Broker,
+    target: &str,
+    from: &HeaderMap,
+    notification: &Value,
+) -> Response<Body> {
     let Some((origin, path)) = split(target) else {
         tracing::error!("a stored subscription carries an endpoint the gateway cannot address");
         return ProblemDetails::internal().into_response();
@@ -402,10 +440,10 @@ async fn dispatch(target: &str, from: &HeaderMap, notification: &Value) -> Respo
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(CONTENT_LENGTH, HeaderValue::from(body.len() as u64));
 
-    // ponytail: one connection pool per delivery. A shared client is worth it when the
-    // delivery rate makes it measurable; the correctness of the projection does not depend
-    // on it, and the proxy already handles the hop-by-hop rules and the error mapping.
-    match Broker::new(origin)
+    // The gateway's own client, aimed at the subscriber: one connection pool for every
+    // delivery, and the trust anchors the deployment configured (R46).
+    match broker
+        .aimed_at(origin)
         .send(Method::POST, &path, headers, Body::from(body))
         .await
     {
@@ -417,16 +455,18 @@ async fn dispatch(target: &str, from: &HeaderMap, notification: &Value) -> Respo
     }
 }
 
-/// Splits an HTTP URL into the origin the proxy takes and the path it forwards.
+/// Splits an HTTP or HTTPS URL into the origin the proxy takes and the path it forwards.
 fn split(url: &str) -> Option<(String, String)> {
-    let rest = url.strip_prefix("http://")?;
+    let (scheme, rest) = ["https://", "http://"]
+        .into_iter()
+        .find_map(|scheme| url.strip_prefix(scheme).map(|rest| (scheme, rest)))?;
     Some(match rest.split_once('/') {
         Some((authority, path)) if !authority.is_empty() => {
-            (format!("http://{authority}"), format!("/{path}"))
+            (format!("{scheme}{authority}"), format!("/{path}"))
         }
         Some(_) => return None,
         None if rest.is_empty() => return None,
-        None => (format!("http://{rest}"), "/".to_owned()),
+        None => (format!("{scheme}{rest}"), "/".to_owned()),
     })
 }
 

@@ -29,6 +29,10 @@ pub struct Config {
     /// The gateway's own public base URL (`JC_GATEWAY_PUBLIC_URL`), which makes the full
     /// RFC 8707 resource URI an acceptable token audience alongside the endpoint slug.
     pub public_url: Option<String>,
+    /// A PEM file of extra trust anchors the notification egress trusts on top of the
+    /// public roots (`JC_GATEWAY_EGRESS_CA_BUNDLE`), for subscribers behind the
+    /// installation's own CA (R46).
+    pub egress_ca_bundle: Option<PathBuf>,
 }
 
 /// Why the environment does not describe a runnable gateway.
@@ -87,6 +91,10 @@ impl Config {
             public_url: std::env::var("JC_GATEWAY_PUBLIC_URL")
                 .ok()
                 .map(|url| url.trim_end_matches('/').to_owned()),
+            egress_ca_bundle: std::env::var("JC_GATEWAY_EGRESS_CA_BUNDLE")
+                .ok()
+                .filter(|path| !path.trim().is_empty())
+                .map(PathBuf::from),
         })
     }
 }

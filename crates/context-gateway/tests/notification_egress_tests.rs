@@ -21,7 +21,7 @@ use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, PolicySpec, Representation};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
-use tower::ServiceExt;
+use tower::{Service, ServiceExt};
 
 const SLUG: &str = "n4t8xq2vhm6zc9wrb5sdj3kfp7";
 const PROJECT: &str = "banskabystrica";
@@ -52,7 +52,86 @@ async fn sink() -> (String, Seen, Headers) {
         headers: Arc::new(Mutex::new(Vec::new())),
     };
     let (seen, headers) = (Arc::clone(&state.seen), Arc::clone(&state.headers));
-    let app = Router::new()
+    (serve(recorder(state)).await, seen, headers)
+}
+
+/// The same webhook behind TLS, and the CA the gateway has to be given to reach it (T-0426).
+///
+/// The certificate is minted per run rather than committed: a test key in the repository is
+/// a finding for the secret scanner and an expiry date waiting to happen.
+async fn tls_sink() -> (String, Seen, Vec<u8>) {
+    let authority_key = rcgen::KeyPair::generate().expect("a CA key");
+    let mut authority = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA params");
+    authority.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    authority.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::CrlSign,
+    ];
+    authority
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "joinedcontext egress test CA");
+    let certificate_authority = authority
+        .self_signed(&authority_key)
+        .expect("a self-signed CA");
+    let issuer = rcgen::Issuer::new(authority, authority_key);
+
+    // The address, not a name: the delivery connects to 127.0.0.1 and nothing in the test
+    // depends on how this machine resolves `localhost`.
+    let key = rcgen::KeyPair::generate().expect("a server key");
+    let certificate = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()])
+        .expect("the SAN")
+        .signed_by(&key, &issuer)
+        .expect("a signed certificate");
+
+    let tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![
+                certificate.der().clone(),
+                certificate_authority.der().clone(),
+            ],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+        )
+        .expect("the certificate matches the key");
+
+    let state = Sink {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        headers: Arc::new(Mutex::new(Vec::new())),
+    };
+    let seen = Arc::clone(&state.seen);
+    let app = recorder(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let address = listener.local_addr().expect("the bound address");
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let (acceptor, app) = (acceptor.clone(), app.clone());
+            tokio::spawn(async move {
+                let Ok(stream) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let service = hyper::service::service_fn(move |request: hyper::Request<_>| {
+                    let mut app = app.clone();
+                    async move { app.call(request.map(Body::new)).await }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    (
+        format!("https://{address}"),
+        seen,
+        certificate_authority.pem().into_bytes(),
+    )
+}
+
+/// The server both sinks are: it records the body and the headers of everything it is sent.
+fn recorder(state: Sink) -> Router {
+    Router::new()
         .fallback(any(
             |State(sink): State<Sink>, request: Request| async move {
                 sink.headers.lock().expect("the header log").extend(
@@ -70,8 +149,7 @@ async fn sink() -> (String, Seen, Headers) {
                 StatusCode::NO_CONTENT
             },
         ))
-        .with_state(state);
-    (serve(app).await, seen, headers)
+        .with_state(state)
 }
 
 #[derive(Clone)]
@@ -184,15 +262,32 @@ fn endpoint(hidden: &[&str]) -> Endpoint {
 }
 
 fn gateway(upstream: String, hidden: &[&str]) -> Arc<Gateway> {
+    gateway_with(upstream, hidden, None, policy())
+}
+
+/// The same gateway, trusting `authority` on top of the public roots and serving `policy`.
+fn gateway_with(
+    upstream: String,
+    hidden: &[&str],
+    authority: Option<&[u8]>,
+    policy: PolicySpec,
+) -> Arc<Gateway> {
+    let broker = match authority {
+        None => Broker::new(upstream),
+        Some(pem) => Broker::trusting(upstream, pem).expect("the test CA is usable"),
+    };
     let realm = common::Realm::new();
     Arc::new(
-        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
+        Gateway::new(broker, Box::new(PolicyPdp), DOMAIN)
             .authenticate(
                 Arc::new(realm.verifier()),
                 ServiceAccounts::new(),
                 Some(PUBLIC_URL.to_owned()),
             )
-            .serve([endpoint(hidden)]),
+            .serve([Endpoint {
+                policies: vec![policy],
+                ..endpoint(hidden)
+            }]),
     )
 }
 
@@ -237,6 +332,11 @@ fn sensor(id: &str) -> Value {
 
 /// Creates a subscription through the gateway and hands back what the broker was told.
 async fn create(subscription: Value) -> (StatusCode, Vec<Value>) {
+    create_under(subscription, policy()).await
+}
+
+/// The same, under a policy the test chose.
+async fn create_under(subscription: Value, policy: PolicySpec) -> (StatusCode, Vec<Value>) {
     let (upstream, forwarded) = broker(BrokerState {
         stored: None,
         matching: Vec::new(),
@@ -244,7 +344,7 @@ async fn create(subscription: Value) -> (StatusCode, Vec<Value>) {
     })
     .await;
 
-    let response = router(gateway(upstream, &[]))
+    let response = router(gateway_with(upstream, &[], None, policy))
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -374,8 +474,10 @@ async fn a_subscription_asking_for_an_ungranted_attribute_keeps_only_the_granted
 
 /// The gateway's dispatcher speaks HTTP, so a subscription it could never deliver is
 /// refused at creation rather than stored and silently dropped later.
+/// T-0426 changed this test rather than adding one: an `https://` endpoint used to be the
+/// `501` this asserted, because the gateway had no TLS client to deliver with.
 #[tokio::test]
-async fn an_endpoint_the_gateway_cannot_reach_is_refused_at_creation() {
+async fn an_endpoint_behind_tls_is_accepted_at_creation_and_routed_like_any_other() {
     let (status, forwarded) = create(json!({
         "type": "Subscription",
         "entities": [{ "type": "AirQualityObserved" }],
@@ -383,7 +485,29 @@ async fn an_endpoint_the_gateway_cannot_reach_is_refused_at_creation() {
     }))
     .await;
 
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(status, StatusCode::CREATED);
+    let uri = forwarded[0]["notification"]["endpoint"]["uri"]
+        .as_str()
+        .expect("the stored subscription carries a rewritten endpoint");
+    assert_eq!(
+        uri,
+        format!(
+            "{PUBLIC_URL}/api/endpoint/{SLUG}/egress/notifications?to={}",
+            percent("https://mesto.example/hooks/x")
+        )
+    );
+}
+
+#[tokio::test]
+async fn an_endpoint_that_is_neither_http_nor_https_is_refused_at_creation() {
+    let (status, forwarded) = create(json!({
+        "type": "Subscription",
+        "entities": [{ "type": "AirQualityObserved" }],
+        "notification": { "endpoint": { "uri": "mqtt://mesto.example:1883/hooks" } }
+    }))
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(forwarded.is_empty(), "nothing was stored: {forwarded:?}");
 }
 
@@ -567,5 +691,177 @@ async fn the_target_comes_from_the_stored_subscription_and_not_from_the_request(
     assert!(
         forged.lock().expect("the delivery log").is_empty(),
         "the one the request named did not"
+    );
+}
+
+/// The area a geo-conditioned grant draws: the city, as a policy would put it on a map.
+const CITY: &str = "georel=within;geometry=Polygon;coordinates=\
+[[[19.0,48.6],[19.4,48.6],[19.4,48.9],[19.0,48.9],[19.0,48.6]]]";
+
+/// The same grant, with a geographic condition on it (GW11).
+fn geo_policy() -> PolicySpec {
+    PolicySpec {
+        geo_q: Some(CITY.to_owned()),
+        ..policy()
+    }
+}
+
+/// A sensor that says where it is, which is what a geo grant is decided on.
+fn placed(id: &str, longitude: f64, latitude: f64) -> Value {
+    let mut entity = sensor(id);
+    entity["location"] = json!({
+        "type": "GeoProperty",
+        "value": { "type": "Point", "coordinates": [longitude, latitude] }
+    });
+    entity
+}
+
+/// The stored subscription of a caller whose grants drew `areas`.
+fn stored_in(to: &str, attributes: Value, q: &str, areas: &[&str]) -> Value {
+    let mut subscription = stored(to, attributes, q);
+    let uri = subscription["notification"]["endpoint"]["uri"]
+        .as_str()
+        .expect("the stored endpoint")
+        .to_owned();
+    subscription["notification"]["endpoint"]["uri"] = Value::String(
+        areas
+            .iter()
+            .fold(uri, |uri, area| format!("{uri}&area={}", percent(area))),
+    );
+    subscription
+}
+
+#[tokio::test]
+async fn a_subscriber_behind_tls_is_delivered_to_over_tls() {
+    let (webhook, seen, authority) = tls_sink().await;
+    let (upstream, _) = broker(BrokerState {
+        stored: Some(stored(
+            &webhook,
+            json!(["temperature"]),
+            "((temperature<100))",
+        )),
+        matching: vec![SENSOR.to_owned()],
+        forwarded: Arc::new(Mutex::new(Vec::new())),
+    })
+    .await;
+
+    let response = router(gateway_with(upstream, &[], Some(&authority), policy()))
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/endpoint/{SLUG}/egress/notifications"))
+                .header("content-type", "application/json")
+                .body(Body::from(notification(vec![sensor(SENSOR)]).to_string()))
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+
+    assert!(
+        response.status().is_success(),
+        "the delivery failed: {}",
+        response.status()
+    );
+    let delivered = seen.lock().expect("the delivery log").clone();
+    assert_eq!(delivered.len(), 1, "delivered over TLS: {delivered:?}");
+    assert_eq!(delivered[0]["data"][0]["id"], json!(SENSOR));
+}
+
+#[tokio::test]
+async fn a_grant_with_a_geographic_condition_stores_the_subscription_with_its_area() {
+    let (status, forwarded) = create_under(
+        json!({
+            "type": "Subscription",
+            "entities": [{ "type": "AirQualityObserved" }],
+            "notification": { "endpoint": { "uri": "http://mesto.example/hooks/x" } }
+        }),
+        geo_policy(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED, "the subscription is stored");
+    let uri = forwarded[0]["notification"]["endpoint"]["uri"]
+        .as_str()
+        .expect("the stored subscription carries a rewritten endpoint");
+    assert!(
+        uri.contains(&format!("&area={}", percent(CITY))),
+        "the granted area travels with the delivery: {uri}"
+    );
+}
+
+#[tokio::test]
+async fn an_entity_outside_the_granted_area_is_not_delivered() {
+    let (webhook, seen, _) = sink().await;
+    let inside = placed(SENSOR, 19.15, 48.73);
+    let outside = placed(OTHER, 21.24, 48.72);
+    let (upstream, _) = broker(BrokerState {
+        stored: Some(stored_in(
+            &webhook,
+            json!(["location", "temperature"]),
+            "((temperature<100))",
+            &[CITY],
+        )),
+        matching: vec![SENSOR.to_owned(), OTHER.to_owned()],
+        forwarded: Arc::new(Mutex::new(Vec::new())),
+    })
+    .await;
+
+    let response = router(gateway_with(upstream, &[], None, geo_policy()))
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/endpoint/{SLUG}/egress/notifications"))
+                .header("content-type", "application/json")
+                .body(Body::from(notification(vec![inside, outside]).to_string()))
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+
+    assert!(response.status().is_success(), "{}", response.status());
+    let delivered = seen.lock().expect("the delivery log").clone();
+    assert_eq!(delivered.len(), 1, "one delivery: {delivered:?}");
+    let entities = delivered[0]["data"].as_array().expect("the entities");
+    assert_eq!(
+        entities.len(),
+        1,
+        "only the one inside the area: {entities:?}"
+    );
+    assert_eq!(entities[0]["id"], json!(SENSOR));
+}
+
+#[tokio::test]
+async fn an_entity_the_gateway_cannot_place_is_not_delivered_under_a_geo_grant() {
+    let (webhook, seen, _) = sink().await;
+    let (upstream, _) = broker(BrokerState {
+        stored: Some(stored_in(
+            &webhook,
+            json!(["location", "temperature"]),
+            "((temperature<100))",
+            &[CITY],
+        )),
+        matching: vec![SENSOR.to_owned()],
+        forwarded: Arc::new(Mutex::new(Vec::new())),
+    })
+    .await;
+
+    let response = router(gateway_with(upstream, &[], None, geo_policy()))
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/endpoint/{SLUG}/egress/notifications"))
+                .header("content-type", "application/json")
+                // No `location`: an entity that cannot be placed cannot be shown to be
+                // inside the grant, which is the answer a spatial read gives too.
+                .body(Body::from(notification(vec![sensor(SENSOR)]).to_string()))
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        seen.lock().expect("the delivery log").is_empty(),
+        "nothing left the platform"
     );
 }
