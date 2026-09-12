@@ -109,7 +109,7 @@
     },
     "AgentProfileSpec": {
       "additionalProperties": false,
-      "description": "Specification for an [`AgentProfile`] resource (AG-47..AG-50).",
+      "description": "Specification for a `kind: AgentProfile` resource (AG-47…AG-50).",
       "properties": {
         "egress": {
           "allOf": [
