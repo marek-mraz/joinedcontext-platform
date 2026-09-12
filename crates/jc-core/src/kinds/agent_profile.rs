@@ -117,7 +117,7 @@ pub struct AgentWorkspace {
     pub ephemeral_storage: String,
 }
 
-/// Specification for an [`AgentProfile`] resource (AG-47..AG-50).
+/// Specification for a `kind: AgentProfile` resource (AG-47…AG-50).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentProfileSpec {
