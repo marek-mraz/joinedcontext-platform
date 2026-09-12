@@ -198,3 +198,60 @@ fn config_debug_redacts_credentials() {
     assert!(!debug_str.contains("secret-oidc"));
     assert!(debug_str.contains("[redacted]"));
 }
+
+#[tokio::test]
+async fn the_ticket_is_accepted_as_a_bearer_token() {
+    // An OpenAI-compatible model client sends nothing but `Authorization: Bearer <key>`, so the
+    // ticket travels there as `jcr_<run>.<ticket>`. Anything past authentication is proof it was
+    // read: this run is read-only, so a write is refused with 403 rather than 401.
+    let app = router(test_state(sample_run(false, "building")));
+    let req = Request::builder()
+        .method("PATCH")
+        .uri("/v1/data/ngsi-ld/v1/entities/some-id/attrs")
+        .header(
+            "authorization",
+            "Bearer jcr_e3b0c442-98fc-1c14-9afb-4c7b2756a120.secret-ticket-123",
+        )
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_bearer_with_the_wrong_ticket_is_refused() {
+    let app = router(test_state(sample_run(false, "building")));
+    for token in [
+        "Bearer jcr_e3b0c442-98fc-1c14-9afb-4c7b2756a120.wrong-ticket",
+        // No prefix, no separator, an empty half: none of these is a credential.
+        "Bearer e3b0c442-98fc-1c14-9afb-4c7b2756a120.secret-ticket-123",
+        "Bearer jcr_e3b0c442-98fc-1c14-9afb-4c7b2756a120",
+        "Bearer jcr_.secret-ticket-123",
+        "Bearer sk-or-v1-a-model-provider-key",
+    ] {
+        let req = Request::builder()
+            .uri("/v1/data/ngsi-ld/v1/entities")
+            .header("authorization", token)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "accepted a bad bearer: {token}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_inbox_needs_a_ticket_like_every_other_route() {
+    let app = router(test_state(sample_run(false, "interviewing")));
+    let req = Request::builder()
+        .uri("/v1/runs/inbox?after=0")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
