@@ -93,6 +93,9 @@ pub fn lane_of(change: &ResourceChange) -> LaneVerdict {
             reason: "public exposure of an endpoint is red (CC-63)",
         };
     }
+    if change.id.kind == "AgentProfile" {
+        return lane_of_agent_profile(change);
+    }
     if let Some(reason) = green_reason(change) {
         return LaneVerdict {
             lane: Lane::Green,
@@ -102,6 +105,30 @@ pub fn lane_of(change: &ResourceChange) -> LaneVerdict {
     LaneVerdict {
         lane: Lane::Yellow,
         reason: "an additive change to published configuration needs one domain approver (CC-63)",
+    }
+}
+
+fn lane_of_agent_profile(change: &ResourceChange) -> LaneVerdict {
+    if change.action == Action::Update {
+        let touches_egress = change
+            .diff
+            .iter()
+            .any(|d| d.path.starts_with("spec.egress"));
+        let touches_limits = change
+            .diff
+            .iter()
+            .any(|d| d.path.starts_with("spec.limits"));
+        if touches_egress || touches_limits {
+            return LaneVerdict {
+                lane: Lane::Red,
+                reason:
+                    "raising limits or widening egress of an agent profile is red (CC-70, AG-47)",
+            };
+        }
+    }
+    LaneVerdict {
+        lane: Lane::Yellow,
+        reason: "agent profile changes require domain approval (CC-63, AG-47)",
     }
 }
 

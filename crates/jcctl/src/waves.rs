@@ -32,6 +32,7 @@ const ORDER: &[(u8, &str)] = &[
     (WAVE_ROOTS, "RoleBinding"),
     (WAVE_ROOTS, "Project"),
     (WAVE_ROOTS, "DataSpaceParticipant"),
+    (WAVE_ROOTS, "AgentProfile"),
     (WAVE_SPACES, "ContextSpace"),
     (WAVE_SPACES, "DataModel"),
     (WAVE_SPACES, "Mapping"),

@@ -1,5 +1,6 @@
 //! The manifest kinds of `apiVersion: joinedcontext.com/v1alpha1` (MF-01, Architecture/06).
 
+pub mod agent_profile;
 pub mod app;
 pub mod blueprint;
 pub mod ckan;
@@ -19,6 +20,10 @@ pub mod space;
 pub mod sync;
 pub mod ui_schema;
 
+pub use agent_profile::{
+    AgentEgress, AgentLimits, AgentModel, AgentProfileRole, AgentProfileSpec, AgentRuntime,
+    AgentTool, AgentWorkspace, ModelProvider,
+};
 pub use app::{
     AppBuild, AppClass, AppLifecycle, AppLimits, AppSource, AppSpec, AppVisibility,
     ContentSecurityPolicy, DataNeed, GeoConstraint, GeoWithin, GitSource, TemporalConstraint,
@@ -99,6 +104,8 @@ pub type App = crate::envelope::ResourceEnvelope<AppSpec>;
 pub type CkanInstance = crate::envelope::ResourceEnvelope<CkanInstanceSpec>;
 /// `kind: Blueprint` as a whole manifest.
 pub type Blueprint = crate::envelope::ResourceEnvelope<BlueprintSpec>;
+/// `kind: AgentProfile` as a whole manifest.
+pub type AgentProfile = crate::envelope::ResourceEnvelope<AgentProfileSpec>;
 /// `kind: SyncSource` as a whole manifest.
 pub type SyncSource = crate::envelope::ResourceEnvelope<SyncSourceSpec>;
 /// `kind: Bundle` as a whole manifest.
