@@ -26,6 +26,11 @@ RUN python -m venv /opt/venv \
            /opt/venv/bin/pip /opt/venv/bin/pip3 /opt/venv/bin/pip3.11
 
 FROM python:3.11-slim-bookworm
+# The interpreter image lags Debian's security updates by days (pcre2, T-0574): the runtime
+# stage takes them itself, so the scan judges what is shipped rather than what was published.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 # Nothing in this image is written to at runtime: Model Tools reads a LinkML document and
 # answers with artifacts, and the only state it holds is the catalogue cache in memory (DM-12).
 COPY --from=build /opt/venv /opt/venv
