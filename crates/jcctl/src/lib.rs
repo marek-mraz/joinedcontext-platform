@@ -13,6 +13,7 @@ pub mod foreign_models;
 pub mod lanes;
 pub mod loader;
 pub mod model;
+pub mod pipeline_test;
 pub mod pipelines;
 pub mod pipelines_derived;
 pub mod platform;

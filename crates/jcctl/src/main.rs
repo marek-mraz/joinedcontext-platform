@@ -12,7 +12,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -48,6 +48,10 @@ fn main() -> ExitCode {
         ["model", verb, rest @ ..] => match (model_mode(verb), model_options(rest)) {
             (Some(mode), Some((dir, url))) => model(&dir, url, mode),
             _ => usage(),
+        },
+        ["pipeline", "test", rest @ ..] => match pipeline_test_options(rest) {
+            Some(options) => pipeline_test(&options),
+            None => usage(),
         },
         ["publish", "ckan", rest @ ..] => match publish_ckan_options(rest) {
             Some(options) => publish_ckan(&options),
@@ -718,6 +722,92 @@ fn fail(message: &str) -> ExitCode {
 }
 
 /// Parses the single `--out <dir>` option; `None` on anything else.
+/// `jcctl pipeline test`: the manifest, the sample file, its format and where the harness posts.
+#[derive(Debug, PartialEq, Eq)]
+struct PipelineTestOptions {
+    pipeline: PathBuf,
+    sample: PathBuf,
+    format: jcctl::pipeline_test::SampleFormat,
+    capture: String,
+}
+
+fn pipeline_test_options(args: &[&str]) -> Option<PipelineTestOptions> {
+    use jcctl::pipeline_test::SampleFormat;
+    let (mut pipeline, mut sample, mut format, mut capture) = (None, None, None, None);
+    let mut rest = args;
+    while let [flag, value, tail @ ..] = rest {
+        match *flag {
+            "--pipeline" => pipeline = Some(PathBuf::from(value)),
+            "--sample" => sample = Some(PathBuf::from(value)),
+            "--format" => {
+                format = Some(match *value {
+                    "csv" => SampleFormat::Csv,
+                    "json" => SampleFormat::Json,
+                    "text" => SampleFormat::Text,
+                    _ => return None,
+                })
+            }
+            "--capture" => capture = Some((*value).to_owned()),
+            _ => return None,
+        }
+        rest = tail;
+    }
+    if !rest.is_empty() {
+        return None;
+    }
+    let sample = sample?;
+    let format = format.unwrap_or_else(|| match sample.extension().and_then(|e| e.to_str()) {
+        Some("csv") => SampleFormat::Csv,
+        Some("json") => SampleFormat::Json,
+        _ => SampleFormat::Text,
+    });
+    Some(PipelineTestOptions {
+        pipeline: pipeline?,
+        sample,
+        format,
+        capture: capture
+            .unwrap_or_else(|| "http://localhost:9090/internal/pipeline-tests/local".to_owned()),
+    })
+}
+
+/// Prints the harness the runner would be handed (PL-43, MF-38): the Portal creates it as an
+/// ephemeral stream and reads the trace back; from the command line the harness is the
+/// reviewable artifact, and `bento lint` takes it as it is (PL-03).
+fn pipeline_test(options: &PipelineTestOptions) -> ExitCode {
+    use jc_core::envelope::ResourceEnvelope;
+    use jc_core::kinds::PipelineSpec;
+    let manifest = match std::fs::read_to_string(&options.pipeline) {
+        Ok(text) => text,
+        Err(err) => return fail(&format!("{}: {err}", options.pipeline.display())),
+    };
+    let envelope = match ResourceEnvelope::<PipelineSpec>::from_yaml(&manifest) {
+        Ok(envelope) => envelope,
+        Err(err) => return fail(&format!("{}: {err}", options.pipeline.display())),
+    };
+    if let Err(err) = envelope.validate() {
+        return fail(&format!("{}: {err}", options.pipeline.display()));
+    }
+    let text = match std::fs::read_to_string(&options.sample) {
+        Ok(text) => text,
+        Err(err) => return fail(&format!("{}: {err}", options.sample.display())),
+    };
+    let sample = jcctl::pipeline_test::Sample {
+        text: Some(text),
+        url: None,
+        format: options.format,
+    };
+    match jcctl::pipeline_test::harness(&envelope.spec, &sample, &options.capture) {
+        Ok(harness) => match serde_json::to_string_pretty(&harness) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => fail(&err.to_string()),
+        },
+        Err(err) => fail(&err.to_string()),
+    }
+}
+
 fn out_dir(args: &[&str]) -> Option<PathBuf> {
     match args {
         [] => Some(PathBuf::from("schemas/kinds")),
@@ -761,6 +851,48 @@ mod tests {
         assert_eq!(export_options(&["--out-dir", "/tmp/x"]), None, "no space");
         assert_eq!(export_options(&["--space"]), None, "no value");
         assert_eq!(export_options(&["--repo-dir", "x", "--space", "y"]), None);
+    }
+
+    #[test]
+    fn pipeline_test_options_parsing() {
+        use jcctl::pipeline_test::SampleFormat;
+        let parsed =
+            pipeline_test_options(&["--pipeline", "p.yaml", "--sample", "s.csv"]).expect("parses");
+        assert_eq!(
+            parsed.format,
+            SampleFormat::Csv,
+            "the extension picks the format"
+        );
+        assert!(parsed.capture.starts_with("http://localhost:9090/"));
+        let explicit = pipeline_test_options(&[
+            "--pipeline",
+            "p.yaml",
+            "--sample",
+            "s.txt",
+            "--format",
+            "json",
+            "--capture",
+            "http://portal/c",
+        ])
+        .expect("parses");
+        assert_eq!(explicit.format, SampleFormat::Json);
+        assert_eq!(explicit.capture, "http://portal/c");
+        assert_eq!(pipeline_test_options(&["--sample", "s.csv"]), None);
+        assert_eq!(
+            pipeline_test_options(&[
+                "--pipeline",
+                "p.yaml",
+                "--sample",
+                "s.csv",
+                "--format",
+                "xml"
+            ]),
+            None
+        );
+        assert_eq!(
+            pipeline_test_options(&["--pipeline", "p.yaml", "--sample"]),
+            None
+        );
     }
 
     #[test]
