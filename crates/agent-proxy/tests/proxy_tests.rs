@@ -299,3 +299,43 @@ async fn a_data_read_carries_its_query_string_to_the_gateway() {
     assert_eq!(resp.status(), StatusCode::OK);
     gateway.verify().await;
 }
+
+#[tokio::test]
+async fn diagnostics_refuses_an_unknown_component_before_asking_anyone() {
+    let app = router(test_state(sample_run(false, "building")));
+    let req = Request::builder()
+        .uri("/v1/diagnostics/database/main")
+        .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+        .header("x-jc-ticket", "secret-ticket-123")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn diagnostics_refuses_an_id_that_is_not_a_name() {
+    let app = router(test_state(sample_run(false, "building")));
+    let req = Request::builder()
+        .uri("/v1/diagnostics/pipeline/Hsl%20Bikes")
+        .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+        .header("x-jc-ticket", "secret-ticket-123")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn diagnostics_needs_the_run_ticket_like_every_door() {
+    let app = router(test_state(sample_run(false, "building")));
+    let req = Request::builder()
+        .uri("/v1/diagnostics/pipeline/hsl-bikes")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

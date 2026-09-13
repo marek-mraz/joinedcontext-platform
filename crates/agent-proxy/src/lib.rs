@@ -37,6 +37,10 @@ pub fn router(state: Arc<ProxyState>) -> Router {
             "/v1/packages/{host}/{*rest}",
             get(routes::packages::handler),
         )
+        .route(
+            "/v1/diagnostics/{component}/{id}",
+            get(routes::diagnostics::handler),
+        )
         .route("/v1/runs/events", post(routes::events::handler))
         .route("/v1/runs/inbox", get(routes::inbox::handler))
         .fallback(|| async {

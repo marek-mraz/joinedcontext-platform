@@ -17,6 +17,7 @@ bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 futures = "0.3"
 http-body-util = "0.1"
+regex = "1"
 # Native roots, like `jcctl`: `rustls-tls` would bundle `webpki-roots`, whose Mozilla root data
 # carries CDLA-Permissive-2.0 and is not on this workspace's licence allow-list. The distroless
 # base carries the system trust store the proxy needs for the model provider.
