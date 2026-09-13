@@ -133,6 +133,15 @@ pub fn harness(
     )}));
     // The envelope replaces the failed message, so the flag must not follow it to the output.
     processors.push(json!({ "catch": [] }));
+    // A mapping that yields an array is one entity per element (PL-48), the same split the
+    // reconciler renders for a live stream (PL-47); capped so a feed of thousands answers in
+    // the same three seconds. A failed message has no array and passes through whole.
+    processors.push(json!({ "mapping": format!(concat!(
+        "root = if this.output.type() == \"array\" {{ ",
+        "this.output.slice(0, {}).map_each(o -> {{ \"input\": this.input, \"output\": o, \"error\": null }}) ",
+        "}} else {{ [this] }}"
+    ), MAX_MESSAGES) }));
+    processors.push(json!({ "unarchive": { "format": "json_array" } }));
 
     Ok(json!({
         "input": input,
@@ -355,7 +364,12 @@ mod tests {
             .is_some_and(|m| m.contains("parse_csv")));
         assert_eq!(processors[1]["unarchive"]["format"], "json_array");
         assert_eq!(processors[3]["mapping"], "root.id = this.station_id");
-        assert_eq!(processors.last().expect("catch")["catch"], json!([]));
+        let n = processors.len();
+        assert_eq!(processors[n - 3]["catch"], json!([]));
+        assert!(processors[n - 2]["mapping"].as_str().is_some_and(|m| m
+            .contains("this.output.type() == \"array\"")
+            && m.contains("slice(0, 20)")));
+        assert_eq!(processors[n - 1]["unarchive"]["format"], "json_array");
         assert_eq!(
             config["output"]["http_client"]["url"],
             "http://portal:9090/internal/pipeline-tests/abc"
@@ -384,8 +398,8 @@ mod tests {
             .expect("processors");
         assert_eq!(
             processors.len(),
-            3,
-            "capture, envelope, catch: nothing else"
+            5,
+            "capture, envelope, catch, the array split and its unarchive: nothing else (PL-48)"
         );
     }
 
