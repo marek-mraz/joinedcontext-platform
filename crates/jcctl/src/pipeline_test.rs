@@ -38,10 +38,13 @@ pub enum SampleFormat {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sample {
+    /// The sample inline, at most `MAX_SAMPLE_BYTES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// An http(s) URL the runner fetches the sample from instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// How the sample is split into messages.
     #[serde(default)]
     pub format: SampleFormat,
 }
@@ -49,14 +52,19 @@ pub struct Sample {
 /// Why a harness cannot be built from this manifest and sample.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HarnessError {
+    /// Neither `text` nor `url` was given.
     #[error("sample: give either text or url")]
     NoSample,
+    /// Both `text` and `url` were given.
     #[error("sample: text and url together; give one")]
     TwoSamples,
+    /// The inline sample is past `MAX_SAMPLE_BYTES`.
     #[error("sample: {0} bytes is over the {MAX_SAMPLE_BYTES} byte limit")]
     TooLarge(usize),
+    /// The sample URL is not http or https.
     #[error("sample: url '{0}' is not http or https")]
     BadUrl(String),
+    /// The pipeline's compute stage is not a Bento processor this harness can run.
     #[error("compute kind {0} is not tested as a Bento processor")]
     NotABentoProcessor(ComputeKind),
 }
@@ -143,10 +151,13 @@ pub fn harness(
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Captured {
+    /// The raw input message, as text.
     #[serde(default)]
     pub input: Option<String>,
+    /// What the mapping produced, when it succeeded.
     #[serde(default)]
     pub output: Option<Value>,
+    /// The processor error, when it failed.
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -154,8 +165,11 @@ pub struct Captured {
 /// The input stage of the trace: what the runner read and the first message as data.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InputStage {
+    /// Messages the runner read from the sample.
     pub events: usize,
+    /// Their size in bytes, summed.
     pub bytes: usize,
+    /// The first message as data, or as text when it is not JSON.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample: Option<Value>,
 }
@@ -163,8 +177,11 @@ pub struct InputStage {
 /// Whether one mapped message is an NGSI-LD entity the platform would accept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Validation {
+    /// Which mapped message, in capture order.
     pub index: usize,
+    /// Whether the message is an entity the platform would accept.
     pub ok: bool,
+    /// Why not, one line each.
     pub problems: Vec<String>,
 }
 
@@ -173,17 +190,23 @@ pub struct Validation {
 pub struct TestError {
     /// `lint` (the runner refused the harness), `mapping` (a processor failed) or `runner`.
     pub stage: String,
+    /// The Bloblang line the runner named, when it named one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
+    /// The runner's message, as it wrote it.
     pub message: String,
 }
 
 /// The trace of one test (Architecture/08 §7).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TestTrace {
+    /// What the runner read.
     pub input: InputStage,
+    /// Every mapped message, in capture order.
     pub mapping: Vec<Value>,
+    /// One verdict per mapped message.
     pub validation: Vec<Validation>,
+    /// What went wrong, at the stage it went wrong.
     pub errors: Vec<TestError>,
 }
 
@@ -440,7 +463,11 @@ mod tests {
         ];
         let trace = trace(&captured);
         assert_eq!(trace.input.events, 3);
-        assert_eq!(trace.input.bytes, 34 + 17 + 7);
+        let expected: usize = captured
+            .iter()
+            .map(|c| c.input.as_deref().unwrap_or_default().len())
+            .sum();
+        assert_eq!(trace.input.bytes, expected);
         assert_eq!(
             trace.input.sample,
             Some(json!({ "station_id": "01", "pm10": "18.2" }))

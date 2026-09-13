@@ -13,6 +13,7 @@ the Smart Data Models organisation and nothing else (DM-10, DM-18).
 | `src/gen_context.py` | JSON-LD `@context` with bound IRIs, `@type: @id` for Relationships, `@container: @language` for LanguageProperties | DM-04, DM-05, DM-16 |
 | `src/gen_rdf_artifacts.py` | closed SHACL shapes and the OWL ontology, both Turtle | DM-28, DM-43, DM-46 |
 | `src/import_sdm.py` | a LinkML model from a Smart Data Models catalogue identifier, with provenance | DM-07…DM-11 |
+| `src/infer_schema.py` | a draft LinkML model and the editor operations that build it, from a sample file parsed in memory | DM-54, DM-55 |
 
 `models/ngsi-ld-core.linkml.yaml` is the shared import: a model writes `imports:
 [ngsi-ld-core]` and `is_a: Entity`, and inherits `id`, `type`, `location` and `observedAt`
@@ -39,10 +40,12 @@ caller and it proxies the browser.
 | `GET /catalog?refresh=true` | — | the Smart Data Models index, cached daily (DM-12) |
 | `POST /generate` | `{"source"}` | `jsonSchema`, `context`, `shacl`, `owl`, `generatorVersion`, `errors` |
 | `POST /import-sdm` | `{"model"}` | the same, plus the `linkml` the import produced and its `example` |
+| `POST /infer-schema` | `{"name", "content" (base64), "format"?}` | a draft model from a CSV, XLSX, JSON or PDF sample: `linkml`, `operations`, `detectedTypes`, `matches`, `untyped`, `rows` (DM-54) |
 
 A source that does not compile is `200` with `errors` and no artifacts: a half-written model is
-the normal state of an editor. A body past 512 KiB is `413`, and an identifier that is not
-`dataModel.<Subject>/<Model>` is `400`, refused before a socket exists (DM-10, DM-18).
+the normal state of an editor. A body past 512 KiB is `413` (`/infer-schema` takes a 10 MiB
+sample, DM-55), and an identifier that is not `dataModel.<Subject>/<Model>` is `400`, refused
+before a socket exists (DM-10, DM-18).
 
 ```bash
 MODEL_TOOLS_PORT=8080 python3 src/service.py

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
 import jsonschema
+import pytest
 
 from common import ModelError, load
 from gen_context import compile_context
@@ -112,3 +111,38 @@ def test_a_model_with_no_entity_class_is_refused(tmp_path):
 def test_the_first_entity_class_is_the_one_the_example_is_of(senzor):
     """One example file per model (DM-02); the Markdown page documents every class."""
     assert entity_class(load(senzor)).name == "AirQualityObserved"
+
+
+def test_a_bound_or_a_simple_pattern_shapes_the_example(tmp_path):
+    """DM-21: a slot with `minimum_value` or a pattern gets an example inside them, so a model
+    the editor or inference constrained still validates against its own schema."""
+    source = tmp_path / "bounded.linkml.yaml"
+    source.write_text(
+        """
+id: https://example.org/models/Bounded
+name: Bounded
+prefixes: {linkml: https://w3id.org/linkml/}
+default_range: string
+imports: [linkml:types, ngsi-ld-core]
+classes:
+  Reading:
+    is_a: Entity
+    slots: [pm10, share, plate]
+slots:
+  pm10: {range: integer, minimum_value: 12, maximum_value: 40}
+  share: {range: float, maximum_value: -1.5}
+  plate: {range: string, pattern: '^[A-Z]{2}[0-9]{3}[A-Z]{2}$'}
+"""
+    )
+
+    example = compile_example(source)
+
+    assert example["pm10"] == 12
+    assert example["share"] == -1.5
+    assert example["plate"] == "AA000AA"
+
+    # A pattern the generator cannot spell is the author's to give an example for, and the
+    # refusal names the slot.
+    source.write_text(source.read_text().replace("slots: [pm10, share, plate]", "slots: [free]") + "  free: {range: string, pattern: '^(a|b)+$'}\n")
+    with pytest.raises(ModelError, match="free"):
+        compile_example(source)

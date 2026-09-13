@@ -12,7 +12,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -43,6 +43,10 @@ fn main() -> ExitCode {
         },
         ["model", "import", id, rest @ ..] => match import_options(rest) {
             Some((out, url)) => model_import(id, &out, url),
+            None => usage(),
+        },
+        ["model", "infer", rest @ ..] => match infer_options(rest) {
+            Some((file, url)) => model_infer(&file, url),
             None => usage(),
         },
         ["model", verb, rest @ ..] => match (model_mode(verb), model_options(rest)) {
@@ -305,6 +309,36 @@ fn model_import(id: &str, out: &Path, url: Option<String>) -> ExitCode {
     }
 }
 
+/// `jcctl model infer --file <sample>`: a draft model from one sample, printed as the JSON
+/// answer of Model Tools (DM-54, DM-32). Nothing is written: the draft is for a person or an
+/// agent to hand to the editor.
+fn model_infer(file: &Path, url: Option<String>) -> ExitCode {
+    let url = match url.or_else(|| std::env::var(model::URL_ENV).ok()) {
+        Some(url) => url,
+        None => {
+            return fail(&format!(
+                "no Model Tools URL: pass --url or set {} (API/03 section 4)",
+                model::URL_ENV
+            ))
+        }
+    };
+    let content = match std::fs::read(file) {
+        Ok(content) => content,
+        Err(err) => return fail(&format!("cannot read {}: {err}", file.display())),
+    };
+    let name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("sample");
+    match model::ModelTools::new(url).infer(name, &content) {
+        Ok(answer) => {
+            println!("{}", json(&answer));
+            ExitCode::SUCCESS
+        }
+        Err(err) => fail(&err.to_string()),
+    }
+}
+
 /// What `jcctl publish ckan` was asked to do.
 struct PublishCkanOptions {
     repo_dir: PathBuf,
@@ -502,6 +536,25 @@ fn import_options(args: &[&str]) -> Option<(PathBuf, Option<String>)> {
     }
     if rest.is_empty() {
         out.map(|out| (out, url))
+    } else {
+        None
+    }
+}
+
+/// Parses `--file` and the optional `--url`, in any order.
+fn infer_options(args: &[&str]) -> Option<(PathBuf, Option<String>)> {
+    let (mut file, mut url) = (None, None);
+    let mut rest = args;
+    while let [flag, value, tail @ ..] = rest {
+        match *flag {
+            "--file" => file = Some(PathBuf::from(value)),
+            "--url" => url = Some((*value).to_owned()),
+            _ => return None,
+        }
+        rest = tail;
+    }
+    if rest.is_empty() {
+        file.map(|file| (file, url))
     } else {
         None
     }
@@ -859,6 +912,21 @@ mod tests {
     }
 
     #[test]
+    fn infer_options_take_the_file_and_an_optional_url() {
+        let (file, url) = infer_options(&["--file", "s.csv"]).expect("parses");
+        assert_eq!(file, PathBuf::from("s.csv"));
+        assert_eq!(url, None);
+        let (_, url) =
+            infer_options(&["--url", "http://mt:8080", "--file", "s.xlsx"]).expect("parses");
+        assert_eq!(url.as_deref(), Some("http://mt:8080"));
+        assert!(
+            infer_options(&["--url", "http://mt:8080"]).is_none(),
+            "the file is required"
+        );
+        assert!(infer_options(&["--file", "s.csv", "--out", "x"]).is_none());
+    }
+
+    #[test]
     fn pipeline_test_options_parsing() {
         use jcctl::pipeline_test::SampleFormat;
         let parsed =
@@ -914,7 +982,9 @@ mod tests {
         let dir = std::env::temp_dir().join("jcctl-schema-export-test");
         let _ = std::fs::remove_dir_all(&dir);
         let count = export_schemas(&dir).expect("export succeeds");
-        assert_eq!(count, jc_core::registry::KINDS.len());
+        // Every registered kind, plus the KeyPerformanceIndicator entity schema (PF-54).
+        assert_eq!(count, jc_core::registry::KINDS.len() + 1);
+        assert!(dir.join("KeyPerformanceIndicator.json").exists());
 
         for info in jc_core::registry::KINDS {
             let text = std::fs::read_to_string(dir.join(format!("{}.json", info.kind)))

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -104,10 +105,41 @@ def _scalar(view: SchemaView, slot: SlotDefinition, name: str) -> Any:
             break
         base = declared.typeof or base
     if base in SCALARS:
-        return SCALARS[base]
-    if base in ("uri", "uriorcurie", "curie", "ncname", "str", "string"):
-        return slot.alias or slot.name
+        value = SCALARS[base]
+        # A bound the slot declares is what the JSON Schema checks the example against (DM-21):
+        # the lowest permitted value is always inside it.
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if slot.minimum_value is not None:
+                return type(value)(slot.minimum_value)
+            if slot.maximum_value is not None:
+                return type(value)(slot.maximum_value)
+        return value
+    if slot.pattern:
+        return _from_pattern(slot.pattern) or (slot.alias or slot.name)
     return slot.alias or slot.name
+
+
+#: The pattern atoms an example can be spelled from: one character class, with or without a
+#: count, or a literal. A pattern written any other way keeps the slot name as its example.
+PATTERN_ATOM = re.compile(r"\[([A-Za-z0-9])-([A-Za-z0-9])\](?:\{(\d+)\})?|\\(.)|([^\\\[\]{}()|*+?^$])")
+
+
+def _from_pattern(pattern: str) -> str | None:
+    """A string matching a simple pattern, `^[A-Z]{2}[0-9]{3}$` and the like; None otherwise."""
+    body = pattern.removeprefix("^").removesuffix("$")
+    out, position = "", 0
+    for atom in PATTERN_ATOM.finditer(body):
+        if atom.start() != position:
+            return None
+        low, high, count, escaped, literal = atom.groups()
+        if low is not None:
+            out += low * int(count or 1)
+        else:
+            out += escaped if escaped is not None else literal
+        position = atom.end()
+    if position != len(body) or not re.fullmatch(pattern, out):
+        return None
+    return out
 
 
 def _value(view: SchemaView, slot: SlotDefinition, domain: str, depth: int) -> Any:

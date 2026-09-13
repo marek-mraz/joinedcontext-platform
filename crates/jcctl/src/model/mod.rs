@@ -253,6 +253,30 @@ impl ModelTools {
         Answer::parse(&self.call("/import-sdm", Some(&body))?)
     }
 
+    /// `POST /infer-schema`: a draft model from one sample file (DM-54, DM-55).
+    ///
+    /// The bytes travel base64 in JSON; Model Tools parses them in memory and writes nothing.
+    /// The answer is the draft as it is, `linkml`, `operations` and the rest of API/01 §11.
+    pub fn infer(&self, name: &str, content: &[u8]) -> Result<Value, Error> {
+        use base64::Engine as _;
+        let body = serde_json::json!({
+            "name": name,
+            "content": base64::engine::general_purpose::STANDARD.encode(content),
+        })
+        .to_string();
+        let raw = self.call("/infer-schema", Some(&body))?;
+        serde_json::from_str::<Value>(&raw)
+            .ok()
+            .filter(Value::is_object)
+            .ok_or_else(|| {
+                http::HttpError::Protocol(format!(
+                    "an infer-schema answer that is not a JSON object: {}",
+                    truncate(&raw)
+                ))
+                .into()
+            })
+    }
+
     fn call(&self, path: &str, body: Option<&str>) -> Result<String, Error> {
         let response = http::request(&self.url, path, body)?;
         if response.status == 200 {

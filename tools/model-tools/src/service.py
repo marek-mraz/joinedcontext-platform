@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
+import binascii
 import json
 import os
 import socketserver
@@ -41,6 +43,7 @@ from gen_docs import compile_docs
 from gen_example import compile_example
 from gen_json_schema import compile_schema
 from gen_rdf_artifacts import compile_owl, compile_shacl
+from infer_schema import MAX_SAMPLE_BYTES, SampleError, infer
 from import_sdm import (
     RAW_BASE,
     SCHEMA_FILE,
@@ -57,6 +60,8 @@ from import_sdm import (
 #: Model Tools is shared and stateless, so it refuses an oversized source itself rather than
 #: trusting that the only caller already did.
 MAX_BODY_BYTES = 512 * 1024
+#: `/infer-schema` carries a sample of up to 10 MiB (DM-55), base64 in JSON: a third more.
+MAX_INFER_BODY_BYTES = MAX_SAMPLE_BYTES * 4 // 3 + 4096
 
 #: Largest catalogue document accepted from upstream. The index is a few megabytes and grows
 #: slowly; a response far past that is a mirror gone wrong, not a catalogue.
@@ -163,6 +168,32 @@ def import_sdm(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     return 200, artifacts(source, linkml=source, example=fetched["example"])
 
 
+def infer_schema(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """`POST /infer-schema`: a draft model from one sample (T-0598, DM-54, DM-55).
+
+    The body is `{"name": "<file name>", "content": "<base64>", "format"?: csv|xlsx|json|pdf}`.
+    The sample is parsed in memory and nothing leaves the process: the catalogue alignment reads
+    the attribute names this replica already holds and fetches none.
+    """
+    name = body.get("name")
+    content = body.get("content")
+    fmt = body.get("format")
+    if not isinstance(name, str) or not isinstance(content, str):
+        return 400, {"errors": ["'name' and 'content' (base64) are required"]}
+    if fmt is not None and not isinstance(fmt, str):
+        return 400, {"errors": ["'format' must be csv, xlsx, json or pdf"]}
+    try:
+        raw = base64.b64decode(content, validate=True)
+    except (ValueError, binascii.Error):
+        return 400, {"errors": ["'content' is not base64"]}
+    try:
+        answer = infer(name, raw, fmt, CATALOGUE.attribute_index())
+    except SampleError as err:
+        return 400, {"errors": [str(err)]}
+    answer["generatorVersion"] = generator_version()
+    return 200, answer
+
+
 class Catalogue:
     """The Smart Data Models index, cached with a daily refresh (DM-12).
 
@@ -200,6 +231,17 @@ class Catalogue:
                 "refreshedAt": self._refreshed_at,
                 "stale": self._stale or self._subjects is None,
             }
+
+    def attribute_index(self) -> dict[str, list[str]]:
+        """Every attribute name this replica has seen, to the catalogue models declaring it.
+        Read-only: inference must not turn into a fetch (DM-55)."""
+        with self._lock:
+            index: dict[str, list[str]] = {}
+            for subject, models in self._attributes.items():
+                for model, names in models.items():
+                    for name in names:
+                        index.setdefault(name, []).append(f"{subject}/{model}")
+            return index
 
     def _fill(self) -> None:
         try:
@@ -360,13 +402,13 @@ def healthz() -> tuple[int, dict[str, Any]]:
     return 200, {"status": "ok", "generatorVersion": generator_version()}
 
 
-def _read_body(environ: dict[str, Any]) -> dict[str, Any]:
+def _read_body(environ: dict[str, Any], cap: int = MAX_BODY_BYTES) -> dict[str, Any]:
     """The request body as JSON, refusing one past the cap before it is read (DM-18)."""
     declared = environ.get("CONTENT_LENGTH") or "0"
     length = int(declared) if declared.isdigit() else 0
-    if length > MAX_BODY_BYTES:
+    if length > cap:
         raise ValueError("body larger than the payload limit")
-    raw = environ["wsgi.input"].read(min(length, MAX_BODY_BYTES))
+    raw = environ["wsgi.input"].read(min(length, cap))
     body = json.loads(raw or b"{}")
     if not isinstance(body, dict):
         raise ValueError("the body must be a JSON object")
@@ -392,6 +434,8 @@ def application(environ: dict[str, Any], start_response: Callable[..., Any]) -> 
             status, payload = generate(_read_body(environ))
         elif method == "POST" and path == "/import-sdm":
             status, payload = import_sdm(_read_body(environ))
+        elif method == "POST" and path == "/infer-schema":
+            status, payload = infer_schema(_read_body(environ, MAX_INFER_BODY_BYTES))
         else:
             status, payload = 404, {"errors": [f"{method} {path} is not a Model Tools route"]}
     except ValueError as err:
