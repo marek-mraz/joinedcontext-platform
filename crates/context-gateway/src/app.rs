@@ -132,11 +132,11 @@ impl Gateway {
 
     /// Every value that names this endpoint as an RFC 8707 resource.
     fn audiences_for(&self, endpoint: &Endpoint) -> Vec<String> {
-        let mut audiences = vec![endpoint.slug.clone()];
-        if let Some(base) = &self.public_url {
-            audiences.push(format!("{base}{}", endpoint.base_path));
-        }
-        audiences
+        audiences_of(
+            &endpoint.slug,
+            &endpoint.base_path,
+            self.public_url.as_deref(),
+        )
     }
 
     /// Replaces the federation table, the same way the accounts are replaced (EP-70).
@@ -912,6 +912,21 @@ fn authenticate(
         .map_err(|rejected| Box::new(ProblemDetails::from(rejected)))?;
 
     subject_of(&claims, endpoint, gateway)
+}
+
+/// The audience of a person signed in at the edge (ADR-N-019): the gateway's own name, accepted
+/// on every endpoint, because a session cannot name an endpoint approved after the login. The
+/// Policy decision stays per endpoint (PF-46).
+pub const EDGE_AUDIENCE: &str = "context-gateway";
+
+/// The slug, the public resource URI when the deployment names one, and the edge audience.
+fn audiences_of(slug: &str, base_path: &str, public_url: Option<&str>) -> Vec<String> {
+    let mut audiences = vec![slug.to_owned()];
+    if let Some(base) = public_url {
+        audiences.push(format!("{base}{base_path}"));
+    }
+    audiences.push(EDGE_AUDIENCE.to_owned());
+    audiences
 }
 
 /// Turns verified claims into the subject the PDP evaluates.
@@ -2946,6 +2961,34 @@ mod tests {
             roles_on(Audience::ProjectList, Vec::new()),
             BTreeSet::new(),
             "no audience but public hands out a role the token did not assert"
+        );
+    }
+
+    #[test]
+    fn a_token_names_the_slug_the_public_resource_or_the_edge_audience() {
+        assert_eq!(
+            audiences_of(
+                "k4y7pq2mzt6vhx3nbwrs5cjd8f",
+                "/api/endpoint/k4y7pq2mzt6vhx3nbwrs5cjd8f",
+                Some("https://hel.fi")
+            ),
+            vec![
+                "k4y7pq2mzt6vhx3nbwrs5cjd8f".to_owned(),
+                "https://hel.fi/api/endpoint/k4y7pq2mzt6vhx3nbwrs5cjd8f".to_owned(),
+                EDGE_AUDIENCE.to_owned(),
+            ]
+        );
+        assert_eq!(
+            audiences_of(
+                "k4y7pq2mzt6vhx3nbwrs5cjd8f",
+                "/api/endpoint/k4y7pq2mzt6vhx3nbwrs5cjd8f",
+                None
+            ),
+            vec![
+                "k4y7pq2mzt6vhx3nbwrs5cjd8f".to_owned(),
+                EDGE_AUDIENCE.to_owned()
+            ],
+            "no public URL, no resource URI, the edge audience stays"
         );
     }
 }
