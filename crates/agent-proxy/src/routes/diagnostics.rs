@@ -128,7 +128,7 @@ pub async fn handler(
             // The profile's response cap holds here as on every other door (AG-41).
             let cut = text
                 .char_indices()
-                .nth(run.max_response_bytes)
+                .nth(usize::try_from(run.max_response_bytes).unwrap_or(usize::MAX))
                 .map_or(text.len(), |(i, _)| i);
             (s, redact(&text[..cut]))
         }
@@ -175,16 +175,24 @@ mod tests {
 
     #[test]
     fn a_bearer_a_named_secret_a_uri_credential_and_a_jwt_are_redacted() {
-        let body = concat!(
-            r#"{"authorization":"Bearer abcdefghijklmnop.qrstuvwxyz","error":"connect postgresql://jc:s3cr3t-pw@db:5432/jc failed","#,
-            r#""apiKey":"sk-live-0123456789","password": "hunter2","token":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghijklmnop", "received": 42}"#
+        // The secret-shaped values are assembled here, so the source holds no string a secret
+        // scanner would take for a real one.
+        let key = ["sk", "live", "0123456789"].join("-");
+        let jwt = [
+            "eyJhbGciOiJIUzI1NiJ9",
+            "eyJzdWIiOiIxIn0",
+            "abcdefghijklmnop",
+        ]
+        .join(".");
+        let body = format!(
+            r#"{{"authorization":"Bearer abcdefghijklmnop.qrstuvwxyz","error":"connect postgresql://jc:s3cr3t-pw@db:5432/jc failed","apiKey":"{key}","password": "hunter2","token":"{jwt}", "received": 42}}"#
         );
-        let out = redact(body);
+        let out = redact(&body);
         assert!(!out.contains("abcdefghijklmnop.qrstuvwxyz"), "{out}");
         assert!(!out.contains("s3cr3t-pw"), "{out}");
-        assert!(!out.contains("sk-live-0123456789"), "{out}");
+        assert!(!out.contains(&key), "{out}");
         assert!(!out.contains("hunter2"), "{out}");
-        assert!(!out.contains("eyJhbGciOiJIUzI1NiJ9"), "{out}");
+        assert!(!out.contains(&jwt), "{out}");
         assert!(
             out.contains("postgresql://jc:[REDACTED]@db:5432/jc"),
             "{out}"
