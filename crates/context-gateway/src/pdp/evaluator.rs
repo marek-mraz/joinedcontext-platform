@@ -233,10 +233,21 @@ fn intersect(
         .iter()
         .flat_map(|policy| granted_types(&policy.information))
         .collect();
-    let granted_attrs: BTreeSet<String> = grants
+    // A grant that names no attribute grants the whole entity, so beside it no other
+    // grant's list may narrow the answer: a steward who may also set `status` still reads
+    // everything the public reads (EP-16). The union of the lists holds only when every
+    // grant has one.
+    let granted_attrs: BTreeSet<String> = if grants
         .iter()
-        .flat_map(|policy| granted_attrs(&policy.information))
-        .collect();
+        .any(|policy| granted_attrs(&policy.information).is_empty())
+    {
+        BTreeSet::new()
+    } else {
+        grants
+            .iter()
+            .flat_map(|policy| granted_attrs(&policy.information))
+            .collect()
+    };
 
     let types = narrow(&request.types, &granted_types);
     let attrs = narrow(&request.attrs, &granted_attrs);

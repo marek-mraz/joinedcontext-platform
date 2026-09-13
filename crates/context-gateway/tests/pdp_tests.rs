@@ -284,6 +284,88 @@ fn asking_for_more_than_the_grant_covers_narrows_to_the_grant() {
     );
 }
 
+/// EP-16: a signed-in person on a public endpoint is never granted less than an anonymous
+/// one. The steward's own grant names `status` only; beside the public grant, which names
+/// no attribute, it must not narrow the read to `status`.
+#[test]
+fn a_grant_without_an_attribute_list_is_not_narrowed_by_a_sibling_with_one() {
+    let public_everything = policy(
+        r#"contextSpaceRef: helsinki
+assigner: did:web:hel.fi
+assignee: { kind: role, id: public }
+operations: [queryEntity, retrieveEntity]
+information:
+  - entities:
+      - type: BikeHireDockingStation
+"#,
+    );
+    let steward_status = policy(
+        r#"contextSpaceRef: helsinki
+assigner: did:web:hel.fi
+assignee: { kind: user, id: demo.steward@hel.fi }
+operations: [queryEntity, retrieveEntity, updateAttrs]
+information:
+  - entities:
+      - type: BikeHireDockingStation
+    propertyNames: [status]
+"#,
+    );
+    let steward = Subject {
+        user: Some("demo.steward@hel.fi".to_owned()),
+        roles: BTreeSet::from(["public".to_owned()]),
+        ..Subject::default()
+    };
+    let policies = [public_everything, steward_status];
+
+    let verdict = evaluate(
+        &steward,
+        Operation::QueryEntity,
+        &Request::default(),
+        "helsinki",
+        &policies,
+        now(),
+    );
+    let constraints = verdict.constraints().expect("a rewrite");
+    assert!(
+        constraints.attrs.is_empty(),
+        "the public grant names every attribute; got {:?}",
+        constraints.attrs
+    );
+
+    let asked = Request {
+        attrs: set(&["availableBikeNumber"]),
+        ..Request::default()
+    };
+    let verdict = evaluate(
+        &steward,
+        Operation::QueryEntity,
+        &asked,
+        "helsinki",
+        &policies,
+        now(),
+    );
+    assert_eq!(
+        verdict.constraints().expect("a rewrite").attrs,
+        set(&["availableBikeNumber"]),
+        "what the public may read, the steward may read"
+    );
+
+    // Alone, the steward's grant still narrows to what it names.
+    let verdict = evaluate(
+        &steward,
+        Operation::QueryEntity,
+        &asked,
+        "helsinki",
+        &policies[1..],
+        now(),
+    );
+    assert_ne!(
+        verdict.constraints().map(|c| c.attrs.clone()),
+        Some(set(&["availableBikeNumber"])),
+        "without the public grant the list applies"
+    );
+}
+
 /// ADR 006: the caller's filter must never be able to reach outside itself and regroup
 /// what follows it. An unbalanced filter is dropped, leaving the grants alone in force.
 #[test]
