@@ -14,7 +14,7 @@ use crate::resolver::{Endpoint, Model, Space};
 use crate::translators::view_mapping::ViewMapping;
 use jc_core::kinds::{
     Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
-    PolicySpec, Representation,
+    ModelProjectionSpec, PolicySpec, Representation,
 };
 use jc_core::Urn;
 use jcctl::loader::{RawManifest, Repository};
@@ -64,6 +64,7 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
     let policies = policies_by_space(repo);
     let models = models_by_space(repo, root);
     let views = view_mappings(repo, root);
+    let projections = projections(repo);
 
     let mut endpoints = Vec::new();
     for (id, resource) in repo.iter() {
@@ -81,6 +82,38 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
             Some(policy_ref) => bound_policy(&id.name, policy_ref, &space, named),
             None => named.iter().map(|(_, spec)| spec.clone()).collect(),
         };
+        let projection = spec.projection_ref.as_ref().and_then(|reference| {
+            let named = (
+                reference
+                    .namespace
+                    .clone()
+                    .unwrap_or_else(|| project.clone()),
+                reference.name.clone(),
+            );
+            match projections.get(&named) {
+                Some(projection) if projection.context_space_ref == space => {
+                    Some(Arc::clone(projection))
+                }
+                Some(_) => {
+                    // A projection of another space's model would describe entities this
+                    // endpoint never serves: the endpoint stays, unprojected, and says so.
+                    tracing::warn!(
+                        endpoint = %id.name,
+                        projection = %reference.name,
+                        "the projection belongs to another space and is not applied"
+                    );
+                    None
+                }
+                None => {
+                    tracing::warn!(
+                        endpoint = %id.name,
+                        projection = %reference.name,
+                        "projectionRef names no ModelProjection; the endpoint is not narrowed by it"
+                    );
+                    None
+                }
+            }
+        });
         endpoints.push(Endpoint {
             slug: spec.slug.to_string(),
             title: language_map(&resource.manifest.metadata.rest, "title"),
@@ -98,6 +131,7 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
                 .projection
                 .map(|projection| projection.hidden_attributes.into_iter().collect())
                 .unwrap_or_default(),
+            projection,
             base_path: format!("/api/endpoint/{}", spec.slug),
             view_mapping: spec.view_mapping_ref.and_then(|view| {
                 let named = (
@@ -123,6 +157,23 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
         });
     }
     endpoints
+}
+
+/// Every `ModelProjection` of the repository, by project and name (MP-01).
+fn projections(repo: &Repository) -> BTreeMap<(String, String), Arc<ModelProjectionSpec>> {
+    let mut projections = BTreeMap::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "ModelProjection" {
+            continue;
+        }
+        if let Some(spec) = spec_of::<ModelProjectionSpec>(&resource.manifest) {
+            projections.insert(
+                (id.namespace.clone().unwrap_or_default(), id.name.clone()),
+                Arc::new(spec),
+            );
+        }
+    }
+    projections
 }
 
 /// The compiled mapping IR of every Mapping that carries one, by project and name (DM-52).
@@ -199,6 +250,7 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
                 // A space is the whole space: narrowing is a decision of a published
                 // endpoint, and the canonical surface publishes nothing of its own.
                 hidden_attributes: BTreeSet::new(),
+                projection: None,
                 policies: policies
                     .get(&key)
                     .map(|named| named.iter().map(|(_, spec)| spec.clone()).collect())

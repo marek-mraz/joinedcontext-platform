@@ -34,6 +34,7 @@ fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
         rate_limit,
         file_limits: None,
         hidden_attributes: Default::default(),
+        projection: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         view_mapping: None,

@@ -18,6 +18,7 @@ metadata:
   name: partner-view
   namespace: helsinki
 spec:
+  contextSpaceRef: fleet
   dataModelRef: { kind: DataModel, name: fleet, version: "3" }
   classes:
     - name: Vehicle

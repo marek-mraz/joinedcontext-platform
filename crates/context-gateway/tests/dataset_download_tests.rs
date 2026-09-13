@@ -48,6 +48,7 @@ fn unrestricted_endpoint() -> Endpoint {
         // Nothing narrows what the anonymous caller reads, which is the whole point of this
         // fixture: the endpoint hides no attribute either (EP-61).
         hidden_attributes: BTreeSet::new(),
+        projection: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         view_mapping: None,

@@ -67,6 +67,7 @@ fn hub_endpoint() -> Endpoint {
         rate_limit: None,
         file_limits: None,
         hidden_attributes: [HIDDEN.to_owned()].into_iter().collect(),
+        projection: None,
         base_path: format!("/api/endpoint/{HUB_SLUG}"),
         models: Vec::new(),
         view_mapping: None,

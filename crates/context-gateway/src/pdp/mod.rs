@@ -13,6 +13,7 @@ use crate::resolver::Endpoint;
 use chrono::{DateTime, Utc};
 use evaluator::{Request, Subject, Verdict};
 use jc_core::kinds::Operation;
+use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// What decides. Every request passes it before anything is forwarded (GW1, ADR-N-003).
@@ -58,15 +59,70 @@ impl Pdp for PolicyPdp {
         // EP-61: the endpoint's own publication narrowing, folded into the one decision
         // every representation reads, so no encoder can forget it and no new
         // representation has to remember it.
-        match verdict {
+        let verdict = match verdict {
             Verdict::Rewrite(mut constraints) if !endpoint.hidden_attributes.is_empty() => {
                 constraints.hidden = endpoint.hidden_attributes.clone();
                 constraints.restricted = true;
                 Verdict::Rewrite(constraints)
             }
             verdict => verdict,
+        };
+
+        // MP-02: the endpoint's projection, intersected into the same decision. Types and
+        // attributes narrow like a grant's; the residual filter is conjoined like a REWRITE
+        // constraint; nothing here can add what a policy did not give.
+        match (verdict, &endpoint.projection) {
+            (Verdict::Rewrite(constraints), Some(projection)) => {
+                project_constraints(*constraints, projection)
+            }
+            (verdict, _) => verdict,
         }
     }
+}
+
+/// The constraints of one decision, narrowed to a projection (MP-02).
+///
+/// A request type outside the projection is a refusal rather than an empty answer: an
+/// empty `types` set means "no type filter" downstream, and the broker would be asked for
+/// every type instead of none (the same rule the evaluator applies to grants, GW10).
+fn project_constraints(
+    mut constraints: evaluator::Constraints,
+    projection: &jc_core::kinds::ModelProjectionSpec,
+) -> Verdict {
+    let classes: BTreeSet<String> = projection
+        .classes
+        .iter()
+        .map(|class| class.name.clone())
+        .collect();
+    let types = evaluator::narrow(&constraints.types, &classes);
+    if types.is_empty() {
+        return Verdict::Deny;
+    }
+    // ponytail: the slots of every effective type in one set, not per type. Two projected
+    // classes sharing a slot name expose it on both; per-type attribute sets need the R9
+    // projection to look at `type`, which it does not yet.
+    let slots: BTreeSet<String> = types
+        .iter()
+        .filter_map(|class| projection.attributes_of(class))
+        .flatten()
+        .collect();
+    constraints.attrs = evaluator::narrow(&constraints.attrs, &slots);
+    constraints.types = types;
+    if let Some(filter) = &projection.filter {
+        if let Some(q) = &filter.q {
+            constraints.q = evaluator::conjoin(constraints.q.as_deref(), std::slice::from_ref(q));
+        }
+        // A filter the constraint set has no slot to conjoin with applies when the grants
+        // set none; a grant's own geo or temporal clamp is narrower by construction (GW11).
+        if constraints.geo_q.is_none() {
+            constraints.geo_q = filter.geo_q.clone();
+        }
+        if constraints.temporal_q.is_none() {
+            constraints.temporal_q = filter.temporal_q.clone();
+        }
+    }
+    constraints.restricted = true;
+    Verdict::Rewrite(Box::new(constraints))
 }
 
 /// The wall clock, as a `chrono` instant.

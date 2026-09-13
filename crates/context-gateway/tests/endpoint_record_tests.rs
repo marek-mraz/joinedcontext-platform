@@ -78,6 +78,7 @@ fn endpoint(audience: Audience) -> Endpoint {
         rate_limit: None,
         file_limits: None,
         hidden_attributes: Default::default(),
+        projection: None,
         view_mapping: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![air_quality()],

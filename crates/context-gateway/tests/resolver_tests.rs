@@ -18,6 +18,7 @@ fn endpoint(slug: &str, space: &str) -> Endpoint {
         rate_limit: None,
         file_limits: None,
         hidden_attributes: Default::default(),
+        projection: None,
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         view_mapping: None,

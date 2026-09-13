@@ -80,6 +80,10 @@
           },
           "type": "array"
         },
+        "contextSpaceRef": {
+          "description": "DNS-1123 label of the owning Context Space; with `metadata.namespace` it derives the repository path (MF-06).",
+          "type": "string"
+        },
         "dataModelRef": {
           "allOf": [
             {
@@ -102,6 +106,7 @@
       },
       "required": [
         "classes",
+        "contextSpaceRef",
         "dataModelRef"
       ],
       "type": "object"

@@ -156,6 +156,7 @@ fn endpoint(condition: Option<&str>) -> Endpoint {
         rate_limit: None,
         file_limits: None,
         hidden_attributes: Default::default(),
+        projection: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         view_mapping: None,

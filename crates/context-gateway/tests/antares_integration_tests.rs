@@ -148,6 +148,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         rate_limit: None,
         file_limits: None,
         hidden_attributes: Default::default(),
+        projection: None,
         models: Vec::new(),
         view_mapping: None,
         policies: vec![public_grant()],
@@ -492,6 +493,7 @@ async fn a_service_account_writes_only_what_its_own_manifest_grants() {
         rate_limit: None,
         file_limits: None,
         hidden_attributes: Default::default(),
+        projection: None,
         models: Vec::new(),
         view_mapping: None,
         policies: vec![serde_norway::from_str(

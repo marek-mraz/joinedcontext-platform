@@ -144,6 +144,7 @@ fn endpoint(view: Option<ViewMapping>) -> Endpoint {
         rate_limit: None,
         file_limits: None,
         hidden_attributes: Default::default(),
+        projection: None,
         view_mapping: view.map(Arc::new),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),

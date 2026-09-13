@@ -88,6 +88,7 @@ fn endpoint(
         rate_limit: None,
         file_limits: None,
         hidden_attributes: hidden.iter().map(|name| (*name).to_owned()).collect(),
+        projection: None,
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         view_mapping: None,

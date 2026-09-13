@@ -75,6 +75,7 @@ fn space(name: &str, policies: Vec<PolicySpec>) -> Space {
             rate_limit: None,
             file_limits: None,
             hidden_attributes: Default::default(),
+            projection: None,
             base_path: format!("/cs/{name}"),
             models: Vec::new(),
             view_mapping: None,

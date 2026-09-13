@@ -11,7 +11,7 @@
 //! visible rather than mysterious (EP-47).
 
 use super::formalisms;
-use crate::pdp::evaluator::{effective, granted_attrs, granted_types, Subject};
+use crate::pdp::evaluator::{effective, granted_attrs, granted_types, narrow, Subject};
 use crate::resolver::{Endpoint, Model};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
@@ -235,6 +235,23 @@ pub fn visible(subject: &Subject, endpoint: &Endpoint, now: DateTime<Utc>) -> Vi
     visible
         .denied_attrs
         .extend(endpoint.hidden_attributes.iter().cloned());
+    // MP-03: the projection's classes and slots, intersected the same way, so the served
+    // model is the projected model and its ETag moves when the projection does.
+    if let Some(projection) = &endpoint.projection {
+        let classes: BTreeSet<String> = projection
+            .classes
+            .iter()
+            .map(|class| class.name.clone())
+            .collect();
+        visible.types = narrow(&visible.types, &classes);
+        let slots: BTreeSet<String> = projection
+            .classes
+            .iter()
+            .filter_map(|class| projection.attributes_of(&class.name))
+            .flatten()
+            .collect();
+        visible.attrs = narrow(&visible.attrs, &slots);
+    }
     visible
 }
 

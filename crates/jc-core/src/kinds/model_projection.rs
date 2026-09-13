@@ -87,6 +87,9 @@ impl ProjectionFilter {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ModelProjectionSpec {
+    /// DNS-1123 label of the owning Context Space; with `metadata.namespace` it derives the
+    /// repository path (MF-06).
+    pub context_space_ref: String,
     /// The model this is a subset of: one DataModel of the space at one served major (DM-22).
     pub data_model_ref: DataModelRef,
     /// The exposed classes. A class not listed is not exposed.
@@ -106,12 +109,17 @@ impl Kind for ModelProjectionSpec {
         names::validate_dns1123_label(&meta.name)?;
         self.validate()
     }
+
+    fn context_space(&self) -> Option<&str> {
+        Some(&self.context_space_ref)
+    }
 }
 
 impl ModelProjectionSpec {
     /// Validates the shape alone: names well formed, nothing listed twice, no empty filter.
     /// Whether the names exist in the model is [`Self::check_against`].
     pub fn validate(&self) -> Result<()> {
+        names::validate_dns1123_label(&self.context_space_ref)?;
         self.data_model_ref.validate("spec.dataModelRef")?;
         if self.classes.is_empty() {
             // A projection of nothing is an Endpoint that exposes nothing and looks like one
@@ -225,6 +233,7 @@ impl ModelProjectionSpec {
             (Some(a), Some(b)) => Some(a.intersect(b)),
         };
         Self {
+            context_space_ref: self.context_space_ref.clone(),
             data_model_ref: self.data_model_ref.clone(),
             classes,
             filter,
