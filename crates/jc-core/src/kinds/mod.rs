@@ -11,6 +11,7 @@ pub mod data_source;
 pub mod dataspace;
 pub mod endpoint;
 pub mod mapping;
+pub mod model_projection;
 pub mod organization;
 pub mod pipeline;
 pub mod policy;
@@ -54,6 +55,7 @@ pub use mapping::{
     DataModelRef, MappingArtifacts, MappingSpec, MappingTest, NativeBlock, NativeLanguage,
     VocabularyAlignment,
 };
+pub use model_projection::{ModelProjectionSpec, ProjectedClass, ProjectionFilter};
 pub use organization::{Contact, ContactRole, OrganizationSpec};
 pub use pipeline::{
     Compute, ComputeKind, Output, OutputMode, PipelineClass, PipelineQuotas, PipelineSource,

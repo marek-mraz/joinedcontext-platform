@@ -269,6 +269,11 @@ pub struct EndpointSpec {
     /// Optional publication narrowing applied to every representation (EP-61).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection: Option<Projection>,
+    /// The named subset of the space's model this Endpoint reads (MP-02): a
+    /// `ModelProjection` of the same space, intersected with the caller's grants by the
+    /// gateway, so it narrows and never widens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_ref: Option<TypedRef>,
     /// Where this Endpoint is published beside its own surface: an open-data catalogue so
     /// far (EP-62).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -349,6 +354,23 @@ impl EndpointSpec {
                 Error::Name { reason, .. } => Error::Name {
                     field: "spec.viewMappingRef.name",
                     value: view.name.clone(),
+                    reason,
+                },
+                other => other,
+            })?;
+        }
+
+        if let Some(projection) = &self.projection_ref {
+            if projection.kind != "ModelProjection" {
+                return Err(Error::Kind {
+                    expected: "ModelProjection",
+                    got: projection.kind.clone(),
+                });
+            }
+            names::validate_dns1123_label(&projection.name).map_err(|e| match e {
+                Error::Name { reason, .. } => Error::Name {
+                    field: "spec.projectionRef.name",
+                    value: projection.name.clone(),
                     reason,
                 },
                 other => other,

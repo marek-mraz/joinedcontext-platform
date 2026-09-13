@@ -71,6 +71,7 @@ catalogue!(
     crate::kinds::PolicySpec,
     crate::kinds::ScopeDefinitionSpec,
     crate::kinds::EndpointSpec,
+    crate::kinds::ModelProjectionSpec,
     crate::kinds::SharedSpaceReferenceSpec,
     crate::kinds::ContextSourceRegistrationSpec,
     crate::kinds::ServiceAccountSpec,

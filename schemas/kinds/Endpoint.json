@@ -257,6 +257,17 @@
           ],
           "description": "Optional publication narrowing applied to every representation (EP-61)."
         },
+        "projectionRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TypedRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The named subset of the space's model this Endpoint reads (MP-02): a `ModelProjection` of the same space, intersected with the caller's grants by the gateway, so it narrows and never widens."
+        },
         "publish": {
           "anyOf": [
             {
