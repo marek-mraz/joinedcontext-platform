@@ -40,8 +40,14 @@ fn sample_run(allows_write: bool, status: &str) -> RunContext {
 }
 
 fn test_state(run: RunContext) -> Arc<ProxyState> {
+    test_state_with_gateway(run, "http://context-gateway:8080")
+}
+
+fn test_state_with_gateway(run: RunContext, gateway: &str) -> Arc<ProxyState> {
+    let gateway = gateway.to_string();
     let config = Config::from_lookup(|k| match k {
         "JC_PROXY_BIND" => Some("127.0.0.1:0".to_string()),
+        "JC_GATEWAY_BASE" => Some(gateway.clone()),
         "JC_MODEL_KEY" => Some("mock-model-key".to_string()),
         "JC_FORGE_TOKEN" => Some("mock-forge-token".to_string()),
         _ => None,
@@ -254,4 +260,42 @@ async fn the_inbox_needs_a_ticket_like_every_other_route() {
 
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// A data read reaches the gateway with its query string: the type, the attributes, the page
+/// and `options=keyValues` are the read itself, and a proxy that dropped them would hand every
+/// caller the first page of everything, normalized.
+#[tokio::test]
+async fn a_data_read_carries_its_query_string_to_the_gateway() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let gateway = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/api/endpoint/scsd2eehkx42n53z2zyd6vshfh7s7irf/ngsi-ld/v1/entities",
+        ))
+        .and(query_param("type", "BikeHireDockingStation"))
+        .and(query_param("options", "keyValues"))
+        .and(query_param("offset", "500"))
+        .and(query_param("attrs", "name,location"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&gateway)
+        .await;
+
+    let app = router(test_state_with_gateway(
+        sample_run(false, "building"),
+        &gateway.uri(),
+    ));
+    let req = Request::builder()
+        .uri("/v1/data/ngsi-ld/v1/entities?type=BikeHireDockingStation&options=keyValues&limit=500&offset=500&attrs=name,location")
+        .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+        .header("x-jc-ticket", "secret-ticket-123")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    gateway.verify().await;
 }

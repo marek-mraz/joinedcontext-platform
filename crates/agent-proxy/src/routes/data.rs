@@ -66,11 +66,18 @@ pub async fn handler(
         Err(e) => return jc_core::ProblemDetails::internal_opaque(&e).into_response(),
     };
 
+    // The query string travels with the path: `type`, `attrs`, `q`, `limit`, `offset` and
+    // `options=keyValues` are the read, not decoration on it. Without them every page is the
+    // first page and every entity is normalized.
     let target_url = format!(
-        "{}/api/endpoint/{}/{}",
+        "{}/api/endpoint/{}/{}{}",
         state.config.gateway_base.as_str().trim_end_matches('/'),
         run.endpoint_slug,
-        rest.trim_start_matches('/')
+        rest.trim_start_matches('/'),
+        req.uri()
+            .query()
+            .map(|query| format!("?{query}"))
+            .unwrap_or_default()
     );
 
     let body_bytes = match req.into_body().collect().await {
