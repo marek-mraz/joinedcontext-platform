@@ -950,7 +950,10 @@ fn subject_of(
             return Ok(Subject {
                 user: None,
                 service_account: Some(account.name.clone()),
-                roles: account.roles_in(&account.project, &endpoint.space),
+                roles: roles_on(
+                    endpoint.audience,
+                    account.roles_in(&account.project, &endpoint.space),
+                ),
                 groups,
                 did: None,
                 agreement: None,
@@ -979,11 +982,22 @@ fn subject_of(
     Ok(Subject {
         user: Some(user),
         service_account: None,
-        roles: claims.roles().iter().cloned().collect(),
+        roles: roles_on(endpoint.audience, claims.roles().iter().cloned()),
         groups,
         did: None,
         agreement: None,
     })
+}
+
+/// The roles a caller holds on this endpoint: what the token asserts and, on a public
+/// endpoint, the synthetic `public` role as well. A signed-in person is a member of the
+/// public too, so a login never grants less than no login does (EP-16, GW22).
+fn roles_on(audience: Audience, asserted: impl IntoIterator<Item = String>) -> BTreeSet<String> {
+    let mut roles: BTreeSet<String> = asserted.into_iter().collect();
+    if audience == Audience::Public {
+        roles.insert("public".to_owned());
+    }
+    roles
 }
 
 /// The principal, as one string for the audit log.
@@ -2910,5 +2924,28 @@ fn json_response(payload: &Value) -> Response<Body> {
             tracing::error!(%error, "the answer does not serialize");
             ProblemDetails::internal().into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_signed_in_caller_on_a_public_endpoint_holds_the_public_role_too() {
+        let asserted = || ["steward".to_owned()];
+        assert_eq!(
+            roles_on(Audience::Public, asserted()),
+            BTreeSet::from(["public".to_owned(), "steward".to_owned()])
+        );
+        assert_eq!(
+            roles_on(Audience::Organization, asserted()),
+            BTreeSet::from(["steward".to_owned()])
+        );
+        assert_eq!(
+            roles_on(Audience::ProjectList, Vec::new()),
+            BTreeSet::new(),
+            "no audience but public hands out a role the token did not assert"
+        );
     }
 }
