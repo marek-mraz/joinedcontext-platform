@@ -12,6 +12,7 @@ pub mod envelope;
 pub mod error;
 pub mod i18n;
 pub mod kinds;
+pub mod kpi;
 pub mod names;
 pub mod registry;
 pub mod urn;

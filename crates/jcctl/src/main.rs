@@ -826,7 +826,12 @@ fn export_schemas(out: &std::path::Path) -> std::io::Result<usize> {
         json.push('\n');
         std::fs::write(out.join(format!("{}.json", info.kind)), json)?;
     }
-    Ok(jc_core::registry::KINDS.len())
+    // The one entity type the platform defines itself (PF-54): data, not a manifest kind, but
+    // a schema a writer and a form read the same way.
+    let mut kpi = serde_json::to_string_pretty(&jc_core::kpi::schema())?;
+    kpi.push('\n');
+    std::fs::write(out.join(format!("{}.json", jc_core::kpi::KPI_TYPE)), kpi)?;
+    Ok(jc_core::registry::KINDS.len() + 1)
 }
 
 #[cfg(test)]
