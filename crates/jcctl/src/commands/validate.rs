@@ -7,7 +7,9 @@
 //! must sit at the path its kind prescribes (MF-06).
 
 use crate::loader::{LoadError, Repository};
+use jc_core::kinds::{DataModelSpec, ModelProjectionSpec};
 use jc_core::registry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -116,6 +118,15 @@ pub fn run(repo_dir: &Path) -> Report {
         });
     }
 
+    for (location, message) in stale_projections(repo_dir, &repo) {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
     for (id, actual, expected) in repo.misplaced() {
         let resource = repo.get(&id).expect("misplaced reports loaded resources");
         report.findings.push(Finding {
@@ -177,6 +188,101 @@ fn dangling_data_sources(repo: &Repository) -> Vec<(String, Location, String)> {
         }
     }
     dangling
+}
+
+/// Every `ModelProjection` that names a class or a slot the referenced DataModel version does
+/// not have, every offending name at once (MP-01). The names come from the model's LinkML
+/// source beside its manifest, so a typo fails here and not as an endpoint that serves nothing.
+fn stale_projections(repo_dir: &Path, repo: &Repository) -> Vec<(Location, String)> {
+    let mut stale = Vec::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "ModelProjection" {
+            continue;
+        }
+        // A projection the typed parse refused is already a finding above.
+        let Ok(projection) =
+            serde_json::from_value::<ModelProjectionSpec>(resource.manifest.spec.clone())
+        else {
+            continue;
+        };
+        let wanted = &projection.data_model_ref;
+        let model = repo
+            .iter()
+            .find(|(model, _)| {
+                model.kind == "DataModel"
+                    && model.namespace == id.namespace
+                    && model.name == wanted.name
+            })
+            .and_then(|(_, model)| {
+                serde_json::from_value::<DataModelSpec>(model.manifest.spec.clone())
+                    .ok()
+                    .map(|spec| (spec, model.path.clone()))
+            });
+        let message = match model {
+            None => format!(
+                "{id} references DataModel `{}`, which no manifest of this project declares (MP-01)",
+                wanted.name
+            ),
+            Some((spec, _)) if spec.version.major().to_string() != wanted.version => format!(
+                "{id} references version {} of DataModel `{}`, which is at {} (MP-01)",
+                wanted.version, wanted.name, spec.version
+            ),
+            Some((spec, model_path)) => {
+                let linkml = repo_dir
+                    .join(&model_path)
+                    .parent()
+                    .map(|dir| dir.join(&spec.linkml))
+                    .unwrap_or_else(|| repo_dir.join(&spec.linkml));
+                match linkml_classes(&linkml) {
+                    Err(err) => format!(
+                        "{id}: the LinkML source of DataModel `{}` cannot be read at `{}`: {err}",
+                        wanted.name,
+                        linkml.display()
+                    ),
+                    Ok(classes) => match projection.check_against(&classes) {
+                        Ok(()) => continue,
+                        Err(err) => format!("{id}: {err}"),
+                    },
+                }
+            }
+        };
+        stale.push((
+            (resource.path.clone(), resource.document, resource.line),
+            message,
+        ));
+    }
+    stale
+}
+
+/// The classes of a LinkML schema with the slots each one carries: its `slots` list and its
+/// `attributes` keys, plus the `id` and `type` every entity has.
+// ponytail: no `is_a` inheritance; slots inherited from a parent class need listing again on
+// the child until a projection of an inherited slot is wanted.
+fn linkml_classes(path: &Path) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+    let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+    let schema: serde_norway::Value =
+        serde_norway::from_str(&text).map_err(|err| err.to_string())?;
+    let mut classes = BTreeMap::new();
+    let Some(declared) = schema.get("classes").and_then(|c| c.as_mapping()) else {
+        return Ok(classes);
+    };
+    for (name, class) in declared {
+        let Some(name) = name.as_str() else { continue };
+        let mut slots: BTreeSet<String> = ["id", "type"].map(str::to_owned).into();
+        if let Some(listed) = class.get("slots").and_then(|s| s.as_sequence()) {
+            slots.extend(listed.iter().filter_map(|s| s.as_str()).map(str::to_owned));
+        }
+        if let Some(attributes) = class.get("attributes").and_then(|a| a.as_mapping()) {
+            slots.extend(
+                attributes
+                    .keys()
+                    .filter_map(|k| k.as_str())
+                    .map(str::to_owned),
+            );
+        }
+        classes.insert(name.to_owned(), slots);
+    }
+    Ok(classes)
 }
 
 /// Turns the error that stopped the walk into a finding, keeping whatever location it

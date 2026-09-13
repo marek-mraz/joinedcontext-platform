@@ -35,6 +35,8 @@ const ORDER: &[(u8, &str)] = &[
     (WAVE_ROOTS, "AgentProfile"),
     (WAVE_SPACES, "ContextSpace"),
     (WAVE_SPACES, "DataModel"),
+    // A projection is checked against its model, so the model converges first (MP-01).
+    (WAVE_SPACES, "ModelProjection"),
     (WAVE_SPACES, "Mapping"),
     (WAVE_SPACES, "ServiceAccount"),
     (WAVE_ACCESS, "ScopeDefinition"),
