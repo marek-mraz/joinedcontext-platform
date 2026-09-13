@@ -165,7 +165,7 @@ mod tests {
             "Hsl",
             "-a",
             "a-",
-            "chg-xyz",
+            "chg-XYZ",
             "chg-0000000A0",
             "a b",
         ] {
