@@ -544,8 +544,9 @@ fn managed_resources(resources: Option<&Value>) -> Vec<Value> {
                         "format": resource.get("format"),
                         "mimetype": resource.get("mimetype"),
                         // A regenerated model keeps its file names and changes its digest;
-                        // without this a stale hash would sit in CKAN as "unchanged".
-                        "hash": resource.get("hash"),
+                        // without this a stale hash would sit in CKAN as "unchanged". CKAN
+                        // answers `""` for a resource that has none, which is no hash either.
+                        "hash": resource.get("hash").filter(|hash| hash.as_str() != Some("")),
                     })
                 })
                 .collect()
@@ -677,6 +678,14 @@ impl CkanApi for InMemoryCkan {
                 let mut stored = payload.clone();
                 // CKAN mints an id on creation and keeps it for the life of the dataset.
                 stored["id"] = json!(format!("pkg-{key}"));
+                // and answers an empty `hash` for every resource that was given none.
+                if let Some(resources) = stored["resources"].as_array_mut() {
+                    for resource in resources {
+                        if resource.get("hash").is_none() {
+                            resource["hash"] = json!("");
+                        }
+                    }
+                }
                 self.packages.insert(key, stored);
                 Ok(json!({}))
             }
