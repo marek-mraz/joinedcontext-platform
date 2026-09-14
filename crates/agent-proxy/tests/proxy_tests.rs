@@ -25,6 +25,7 @@ fn sample_run(allows_write: bool, status: &str) -> RunContext {
         project: "helsinki".to_string(),
         app_name: "bikes".to_string(),
         endpoint_slug: "scsd2eehkx42n53z2zyd6vshfh7s7irf".to_string(),
+        endpoint_slugs: vec![],
         allows_write,
         branch: "agent/app-bikes/e3b0c442-98fc-1c14-9afb-4c7b2756a120".to_string(),
         path_prefix: "projects/helsinki/apps/bikes/".to_string(),
@@ -305,6 +306,159 @@ async fn a_data_read_carries_its_query_string_to_the_gateway() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     gateway.verify().await;
+}
+
+/// The second endpoint of a run (AP-44, AG-75): its slug in the run context.
+const KPIS: &str = "q3mzkq2v7w5ayxcbn4ltdj6hof2repgu";
+
+fn two_endpoint_run(allows_write: bool) -> RunContext {
+    let mut run = sample_run(allows_write, "building");
+    run.endpoint_slugs = vec![run.endpoint_slug.clone(), KPIS.to_string()];
+    run
+}
+
+fn ticketed(method: &str, uri: &str, body: Body) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+        .header("x-jc-ticket", "secret-ticket-123")
+        .header("content-type", "application/json")
+        .body(body)
+        .unwrap()
+}
+
+/// A read and an MCP call under the run's second endpoint reach that endpoint on the gateway,
+/// each with a token minted for that endpoint's audience and not the primary's.
+#[tokio::test]
+async fn a_second_endpoint_of_the_run_is_reached_with_its_own_token() {
+    use wiremock::matchers::{body_partial_json, header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let gateway = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/endpoint/{KPIS}/ngsi-ld/v1/entities")))
+        .and(query_param("type", "KeyPerformanceIndicator"))
+        .and(header(
+            "authorization",
+            format!("Bearer mock-token-for-{KPIS}").as_str(),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&gateway)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/endpoint/{KPIS}/mcp")))
+        .and(header(
+            "authorization",
+            format!("Bearer mock-token-for-{KPIS}").as_str(),
+        ))
+        .and(body_partial_json(
+            serde_json::json!({ "method": "tools/call" }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": { "content": [] } }),
+        ))
+        .expect(1)
+        .mount(&gateway)
+        .await;
+
+    let state = test_state_with_gateway(two_endpoint_run(false), &gateway.uri());
+    let read = router(state.clone())
+        .oneshot(ticketed(
+            "GET",
+            &format!("/v1/data/endpoints/{KPIS}/ngsi-ld/v1/entities?type=KeyPerformanceIndicator"),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::OK);
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "query_entities", "arguments": { "type": "KeyPerformanceIndicator" } }
+    });
+    let mcp = router(state)
+        .oneshot(ticketed(
+            "POST",
+            &format!("/v1/data/endpoints/{KPIS}/mcp"),
+            Body::from(call.to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(mcp.status(), StatusCode::OK);
+    gateway.verify().await;
+}
+
+/// A slug the run does not name is refused, and nothing reaches the gateway.
+#[tokio::test]
+async fn an_endpoint_outside_the_run_is_refused() {
+    use wiremock::MockServer;
+
+    let gateway = MockServer::start().await;
+    let app = router(test_state_with_gateway(
+        two_endpoint_run(false),
+        &gateway.uri(),
+    ));
+    let resp = app
+        .oneshot(ticketed(
+            "GET",
+            "/v1/data/endpoints/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz/ngsi-ld/v1/entities",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(gateway
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .is_empty());
+
+    // A run whose Portal sends no slug list may address its primary endpoint alone.
+    let app = router(test_state_with_gateway(
+        sample_run(false, "building"),
+        &gateway.uri(),
+    ));
+    let resp = app
+        .oneshot(ticketed(
+            "GET",
+            &format!("/v1/data/endpoints/{KPIS}/ngsi-ld/v1/entities"),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+/// A write tool of the MCP façade stays refused on a read-only run under a second endpoint.
+#[tokio::test]
+async fn a_write_tool_under_a_second_endpoint_is_refused_on_a_read_only_run() {
+    use wiremock::MockServer;
+
+    let gateway = MockServer::start().await;
+    let app = router(test_state_with_gateway(
+        two_endpoint_run(false),
+        &gateway.uri(),
+    ));
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "upsert_entity", "arguments": {} }
+    });
+    let resp = app
+        .oneshot(ticketed(
+            "POST",
+            &format!("/v1/data/endpoints/{KPIS}/mcp"),
+            Body::from(call.to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(gateway
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .is_empty());
 }
 
 /// AG-72: the profile's reasoning effort reaches the model provider on a call whose body names

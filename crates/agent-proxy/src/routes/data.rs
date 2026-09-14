@@ -21,11 +21,36 @@ const FORBIDDEN_CLIENT_HEADERS: &[&str] = &[
     "x-consumer-identity",
 ];
 
+/// `/v1/data/{*rest}`: the run's primary endpoint.
 pub async fn handler(
     State(state): State<ProxyState>,
     method: Method,
     headers: HeaderMap,
     Path(rest): Path<String>,
+    req: Request<Body>,
+) -> Response {
+    forward(state, method, headers, None, rest, req).await
+}
+
+/// `/v1/data/endpoints/{slug}/{*rest}`: any endpoint of the run by its slug, with a token for
+/// that endpoint and no other (AP-44, AG-75). A slug the run does not name is refused before a
+/// token is asked for.
+pub async fn endpoint_handler(
+    State(state): State<ProxyState>,
+    method: Method,
+    headers: HeaderMap,
+    Path((slug, rest)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Response {
+    forward(state, method, headers, Some(slug), rest, req).await
+}
+
+async fn forward(
+    state: ProxyState,
+    method: Method,
+    headers: HeaderMap,
+    slug: Option<String>,
+    rest: String,
     req: Request<Body>,
 ) -> Response {
     let start = Instant::now();
@@ -39,6 +64,16 @@ pub async fn handler(
             .with_detail("path traversal not permitted")
             .into_response();
     }
+
+    let slug = match slug {
+        None => run.endpoint_slug.clone(),
+        Some(slug) if run.slugs().contains(&slug.as_str()) => slug,
+        Some(slug) => {
+            return jc_core::ProblemDetails::forbidden()
+                .with_detail(format!("endpoint '{slug}' is not an endpoint of this run"))
+                .into_response()
+        }
+    };
 
     if !run.allows_write {
         if matches!(method, Method::PATCH | Method::PUT | Method::DELETE) {
@@ -57,11 +92,13 @@ pub async fn handler(
         }
     }
 
-    let token = match state
-        .credentials
-        .get_endpoint_token(&run.endpoint_slug)
-        .await
-    {
+    let audit_path = if slug == run.endpoint_slug {
+        rest.clone()
+    } else {
+        format!("endpoints/{slug}/{rest}")
+    };
+
+    let token = match state.credentials.get_endpoint_token(&slug).await {
         Ok(t) => t,
         Err(e) => return jc_core::ProblemDetails::internal_opaque(&e).into_response(),
     };
@@ -72,7 +109,7 @@ pub async fn handler(
     let target_url = format!(
         "{}/api/endpoint/{}/{}{}",
         state.config.gateway_base.as_str().trim_end_matches('/'),
-        run.endpoint_slug,
+        slug,
         rest.trim_start_matches('/'),
         req.uri()
             .query()
@@ -141,7 +178,7 @@ pub async fn handler(
         user: &run.created_by,
         upstream: "context-gateway",
         method: method.as_str(),
-        path: &rest,
+        path: &audit_path,
         status: status.as_u16(),
         bytes: resp_bytes.len(),
         duration_ms: start.elapsed().as_millis(),

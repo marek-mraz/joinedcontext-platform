@@ -25,6 +25,10 @@ pub fn router(state: Arc<ProxyState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route(
+            "/v1/data/endpoints/{slug}/{*rest}",
+            axum::routing::any(routes::data::endpoint_handler),
+        )
+        .route(
             "/v1/data/{*rest}",
             axum::routing::any(routes::data::handler),
         )

@@ -13,6 +13,10 @@ pub struct RunContext {
     pub project: String,
     pub app_name: String,
     pub endpoint_slug: String,
+    /// Every endpoint slug of the run, the primary first (AP-44): what
+    /// `/v1/data/endpoints/{slug}/…` may address. A Portal that sends none means the primary alone.
+    #[serde(default)]
+    pub endpoint_slugs: Vec<String>,
     pub allows_write: bool,
     pub branch: String,
     pub path_prefix: String,
@@ -27,6 +31,16 @@ pub struct RunContext {
     /// The profile's `model.reasoningEffort`, absent when it names none (AG-72).
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+}
+
+impl RunContext {
+    /// The endpoints this run may read through the proxy, the primary first.
+    pub fn slugs(&self) -> Vec<&str> {
+        if self.endpoint_slugs.is_empty() {
+            return vec![self.endpoint_slug.as_str()];
+        }
+        self.endpoint_slugs.iter().map(String::as_str).collect()
+    }
 }
 
 /// Run records the proxy has fetched, with the moment each was fetched.
