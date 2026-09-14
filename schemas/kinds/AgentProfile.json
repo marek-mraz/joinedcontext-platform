@@ -2,6 +2,34 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AgentAccess": {
+      "additionalProperties": false,
+      "description": "The most an agent of this profile may reach; the starting person's own permissions narrow it further at every call, and nothing here widens them (AG-70, MF-40).",
+      "properties": {
+        "endpoints": {
+          "description": "Endpoints the agent may read or write through.",
+          "items": {
+            "$ref": "#/definitions/EndpointGrant"
+          },
+          "type": "array"
+        },
+        "kinds": {
+          "description": "Kinds the agent may read or propose changes to.",
+          "items": {
+            "$ref": "#/definitions/KindGrant"
+          },
+          "type": "array"
+        },
+        "operations": {
+          "description": "Registry operation names (`jc_…`) the agent may call.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "AgentEgress": {
       "additionalProperties": false,
       "description": "Network egress allow-listing for package registries and documentation (AG-50).",
@@ -111,6 +139,17 @@
       "additionalProperties": false,
       "description": "Specification for a `kind: AgentProfile` resource (AG-47…AG-50).",
       "properties": {
+        "access": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentAccess"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What an agent of this profile may reach. Absent: read-only operations and nothing else (AG-70)."
+        },
         "egress": {
           "allOf": [
             {
@@ -300,6 +339,88 @@
         "type"
       ],
       "type": "object"
+    },
+    "EndpointGrant": {
+      "additionalProperties": false,
+      "description": "One endpoint an agent may reach, and how.",
+      "properties": {
+        "name": {
+          "description": "The endpoint's manifest name, a DNS-1123 label.",
+          "type": "string"
+        },
+        "verbs": {
+          "description": "At least one verb.",
+          "items": {
+            "$ref": "#/definitions/EndpointVerb"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "verbs"
+      ],
+      "type": "object"
+    },
+    "EndpointVerb": {
+      "description": "What an agent may do through an endpoint (AG-70).",
+      "oneOf": [
+        {
+          "description": "Read entities through the endpoint.",
+          "enum": [
+            "read"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Write entities through the endpoint, under its policy.",
+          "enum": [
+            "write"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "KindGrant": {
+      "additionalProperties": false,
+      "description": "One kind an agent may reach, and how.",
+      "properties": {
+        "kind": {
+          "description": "A manifest kind of the catalogue, e.g. `Endpoint`.",
+          "type": "string"
+        },
+        "verbs": {
+          "description": "At least one verb.",
+          "items": {
+            "$ref": "#/definitions/KindVerb"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "verbs"
+      ],
+      "type": "object"
+    },
+    "KindVerb": {
+      "description": "What an agent may do to a kind of manifest (AG-70).",
+      "oneOf": [
+        {
+          "description": "Read manifests of the kind.",
+          "enum": [
+            "read"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Propose a change to a manifest of the kind; a person still approves it.",
+          "enum": [
+            "propose"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "ModelProvider": {
       "description": "Model provider choice.",

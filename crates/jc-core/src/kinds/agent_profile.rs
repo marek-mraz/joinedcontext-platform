@@ -105,6 +105,135 @@ pub enum AgentTool {
     Playwright,
 }
 
+static OPERATION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^jc_[a-z0-9_]+$").expect("valid regex"));
+
+/// What an agent may do to a kind of manifest (AG-70).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum KindVerb {
+    /// Read manifests of the kind.
+    Read,
+    /// Propose a change to a manifest of the kind; a person still approves it.
+    Propose,
+}
+
+/// What an agent may do through an endpoint (AG-70).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum EndpointVerb {
+    /// Read entities through the endpoint.
+    Read,
+    /// Write entities through the endpoint, under its policy.
+    Write,
+}
+
+/// One kind an agent may reach, and how.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct KindGrant {
+    /// A manifest kind of the catalogue, e.g. `Endpoint`.
+    pub kind: String,
+    /// At least one verb.
+    pub verbs: Vec<KindVerb>,
+}
+
+/// One endpoint an agent may reach, and how.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EndpointGrant {
+    /// The endpoint's manifest name, a DNS-1123 label.
+    pub name: String,
+    /// At least one verb.
+    pub verbs: Vec<EndpointVerb>,
+}
+
+/// The most an agent of this profile may reach; the starting person's own permissions narrow
+/// it further at every call, and nothing here widens them (AG-70, MF-40).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentAccess {
+    /// Registry operation names (`jc_…`) the agent may call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<String>,
+    /// Kinds the agent may read or propose changes to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<KindGrant>,
+    /// Endpoints the agent may read or write through.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<EndpointGrant>,
+}
+
+impl AgentAccess {
+    /// The shape MF-40 asks of the block. Whether an operation is registered is the Portal's
+    /// check at admission: the registry lives there.
+    pub fn validate(&self) -> Result<()> {
+        let mut seen = std::collections::BTreeSet::new();
+        for operation in &self.operations {
+            if !OPERATION_RE.is_match(operation) {
+                return Err(Error::Name {
+                    field: "access.operations",
+                    value: operation.clone(),
+                    reason: "an operation name must match ^jc_[a-z0-9_]+$ (MF-40)",
+                });
+            }
+            if !seen.insert(operation.as_str()) {
+                return Err(Error::Name {
+                    field: "access.operations",
+                    value: operation.clone(),
+                    reason: "an operation is listed once",
+                });
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for grant in &self.kinds {
+            if !crate::registry::KINDS
+                .iter()
+                .any(|info| info.kind == grant.kind)
+            {
+                return Err(Error::Name {
+                    field: "access.kinds",
+                    value: grant.kind.clone(),
+                    reason: "not a manifest kind of the catalogue (MF-40)",
+                });
+            }
+            if !seen.insert(grant.kind.as_str()) {
+                return Err(Error::Name {
+                    field: "access.kinds",
+                    value: grant.kind.clone(),
+                    reason: "a kind is listed once",
+                });
+            }
+            if grant.verbs.is_empty() {
+                return Err(Error::Name {
+                    field: "access.kinds.verbs",
+                    value: grant.kind.clone(),
+                    reason: "a kind grant names at least one verb",
+                });
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for grant in &self.endpoints {
+            names::validate_dns1123_label(&grant.name)?;
+            if !seen.insert(grant.name.as_str()) {
+                return Err(Error::Name {
+                    field: "access.endpoints",
+                    value: grant.name.clone(),
+                    reason: "an endpoint is listed once",
+                });
+            }
+            if grant.verbs.is_empty() {
+                return Err(Error::Name {
+                    field: "access.endpoints.verbs",
+                    value: grant.name.clone(),
+                    reason: "an endpoint grant names at least one verb",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Workspace hardware resource allocations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -136,6 +265,10 @@ pub struct AgentProfileSpec {
     pub tools: Vec<AgentTool>,
     /// Resources the workspace container gets.
     pub workspace: AgentWorkspace,
+    /// What an agent of this profile may reach. Absent: read-only operations and nothing else
+    /// (AG-70).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<AgentAccess>,
 }
 
 impl Kind for AgentProfileSpec {
@@ -267,6 +400,10 @@ impl AgentProfileSpec {
                     });
                 }
             }
+        }
+
+        if let Some(access) = &self.access {
+            access.validate()?;
         }
 
         if self.workspace.cpu.trim().is_empty() || self.workspace.memory.trim().is_empty() {

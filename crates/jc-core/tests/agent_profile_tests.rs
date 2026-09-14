@@ -1,6 +1,8 @@
 //! Tests for `kind: AgentProfile` (AG-26, AG-47..AG-50).
 
-use jc_core::kinds::agent_profile::{AgentProfileRole, AgentTool, ModelProvider};
+use jc_core::kinds::agent_profile::{
+    AgentProfileRole, AgentTool, EndpointVerb, KindVerb, ModelProvider,
+};
 use jc_core::kinds::AgentProfile;
 
 const VALID_YAML: &str = r#"
@@ -131,4 +133,90 @@ fn steward_profile_rules() {
         .replace("tools:\n    - shell\n    - cargo\n    - pnpm\n    - git\n    - playwright", "tools: []");
     let profile3 = AgentProfile::from_yaml(&valid_steward).expect("parses");
     profile3.validate().expect("valid steward profile");
+}
+
+/// The access block of AG-70 appended to the valid profile.
+fn with_access(block: &str) -> String {
+    format!("{VALID_YAML}  access:\n{block}")
+}
+
+#[test]
+fn an_access_block_parses_validates_and_roundtrips() {
+    let yaml = with_access(
+        "    operations: [jc_catalog_search, jc_endpoint_propose]\n    kinds:\n      - kind: ContextSpace\n        verbs: [read]\n      - kind: Endpoint\n        verbs: [read, propose]\n    endpoints:\n      - name: helsinki-bikes\n        verbs: [read]\n",
+    );
+    let profile = AgentProfile::from_yaml(&yaml).expect("parses");
+    profile.validate().expect("valid access block");
+    let access = profile.spec.access.as_ref().expect("access present");
+    assert_eq!(
+        access.operations,
+        ["jc_catalog_search", "jc_endpoint_propose"]
+    );
+    assert_eq!(access.kinds[1].verbs, [KindVerb::Read, KindVerb::Propose]);
+    assert_eq!(access.endpoints[0].verbs, [EndpointVerb::Read]);
+    let serialized = profile.to_yaml().expect("serialize");
+    assert_eq!(
+        profile,
+        AgentProfile::from_yaml(&serialized).expect("re-import")
+    );
+}
+
+#[test]
+fn a_profile_without_access_has_none() {
+    let profile = AgentProfile::from_yaml(VALID_YAML).expect("parses");
+    assert!(
+        profile.spec.access.is_none(),
+        "absent means the read-only default (AG-70)"
+    );
+}
+
+#[test]
+fn an_access_block_outside_mf_40_is_refused() {
+    for (block, why) in [
+        (
+            "    operations: [catalog_search]\n",
+            "an operation without the jc_ prefix",
+        ),
+        ("    operations: [\"jc_*\"]\n", "a wildcard operation"),
+        ("    operations: [jc_a, jc_a]\n", "a repeated operation"),
+        (
+            "    kinds:\n      - kind: Spaceship\n        verbs: [read]\n",
+            "an unknown kind",
+        ),
+        (
+            "    kinds:\n      - kind: \"*\"\n        verbs: [read]\n",
+            "a wildcard kind",
+        ),
+        (
+            "    kinds:\n      - kind: Endpoint\n        verbs: []\n",
+            "a kind grant without verbs",
+        ),
+        (
+            "    endpoints:\n      - name: Helsinki_Bikes\n        verbs: [read]\n",
+            "an endpoint name that is not DNS-1123",
+        ),
+        (
+            "    endpoints:\n      - name: \"*\"\n        verbs: [write]\n",
+            "a wildcard endpoint",
+        ),
+    ] {
+        let profile = AgentProfile::from_yaml(&with_access(block)).expect("parses");
+        assert!(profile.validate().is_err(), "{why} must be refused");
+    }
+    for (block, why) in [
+        (
+            "    kinds:\n      - kind: Endpoint\n        verbs: [write]\n",
+            "a kind verb other than read or propose",
+        ),
+        (
+            "    endpoints:\n      - name: bikes\n        verbs: [propose]\n",
+            "an endpoint verb other than read or write",
+        ),
+        ("    hosts: [example.org]\n", "an unknown member"),
+    ] {
+        assert!(
+            AgentProfile::from_yaml(&with_access(block)).is_err(),
+            "{why} must not parse"
+        );
+    }
 }
