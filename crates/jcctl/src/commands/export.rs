@@ -131,6 +131,7 @@ pub fn collect(
 
     for (path, mut manifest) in found {
         strip_system_metadata(&mut manifest.metadata.rest);
+        manifest.metadata.collapse_language_maps();
         let mut dropped = Vec::new();
         redact(&mut manifest.spec, &mut dropped);
         report.redactions.extend(
@@ -156,6 +157,7 @@ pub fn collect(
 pub fn adopt(live: &RawManifest) -> (RawManifest, Vec<String>) {
     let mut manifest = live.clone();
     strip_system_metadata(&mut manifest.metadata.rest);
+    manifest.metadata.collapse_language_maps();
     let mut dropped = Vec::new();
     redact(&mut manifest.spec, &mut dropped);
     (manifest, dropped)

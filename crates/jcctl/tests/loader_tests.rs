@@ -1,4 +1,5 @@
-use jcctl::loader::{LoadError, Repository, ResourceId};
+use jcctl::loader::{LoadError, RawMetadata, Repository, ResourceId};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 
 fn unique_temp_dir(test_name: &str) -> PathBuf {
@@ -688,4 +689,31 @@ spec:
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// UI-50: the legacy `{locale: text}` title collapses to one string on the way out: `en`,
+/// then the first non-empty value; a map of nothing goes, a malformed map stays for
+/// validation to refuse, and a plain string is left alone.
+#[test]
+fn a_legacy_language_map_collapses_to_one_string() {
+    let collapsed = |title: serde_json::Value| {
+        let mut metadata: RawMetadata =
+            serde_json::from_value(json!({ "name": "air", "title": title })).expect("metadata");
+        metadata.collapse_language_maps();
+        metadata.rest.get("title").cloned()
+    };
+    assert_eq!(
+        collapsed(json!({ "sk": "Ovzdušie", "en": "Air" })),
+        Some(json!("Air"))
+    );
+    assert_eq!(
+        collapsed(json!({ "cs": "", "en": "", "sk": "Ovzdušie" })),
+        Some(json!("Ovzdušie"))
+    );
+    assert_eq!(collapsed(json!({ "en": "" })), None);
+    assert_eq!(
+        collapsed(json!({ "en": { "nested": true } })),
+        Some(json!({ "en": { "nested": true } }))
+    );
+    assert_eq!(collapsed(json!("Air")), Some(json!("Air")));
 }

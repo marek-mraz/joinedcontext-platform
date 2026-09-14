@@ -113,6 +113,32 @@ fn every_imported_manifest_says_where_it_came_from() {
 }
 
 #[test]
+fn an_imported_legacy_title_map_is_written_as_one_string() {
+    // UI-50: jcctl rewrites the map form on the next write of a manifest it touches.
+    let source = bundle("import-title-src");
+    write_file(
+        &source,
+        "projects/vzduch/spaces/vzduch/space.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: vzduch\n  namespace: vzduch\n  title: { sk: Vzduch, en: Air }\nspec:\n  isSandbox: false\n",
+    );
+    let dest = destination("import-title-dest");
+
+    let report = collect(&source, &dest, &options("ovzdusie")).expect("import collects");
+    let space = report
+        .imported
+        .iter()
+        .find(|resource| resource.manifest.kind == "ContextSpace")
+        .expect("the space is imported");
+    assert_eq!(
+        space.manifest.metadata.rest["title"],
+        serde_json::json!("Air")
+    );
+
+    let _ = std::fs::remove_dir_all(&source);
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
 fn the_organisation_domain_of_every_entity_urn_is_rewritten() {
     // PF-22: a duplicated project keeps its shape and stops claiming the other city's ids.
     let source = bundle("import-urn-src");

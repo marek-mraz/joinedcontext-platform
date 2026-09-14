@@ -48,6 +48,41 @@ pub struct RawMetadata {
     pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
+impl RawMetadata {
+    /// Rewrites a legacy `{locale: text}` title or description as the one plain string a
+    /// manifest now carries (UI-50): `en`, then the first non-empty value. Every manifest
+    /// `jcctl` writes goes through it, so a repository converts itself over normal work.
+    /// A map holding anything but strings is left for validation to refuse.
+    pub fn collapse_language_maps(&mut self) {
+        for key in ["title", "description"] {
+            let Some(serde_json::Value::Object(map)) = self.rest.get(key) else {
+                continue;
+            };
+            let Some(texts) = map
+                .iter()
+                .map(|(locale, text)| Some((locale.as_str(), text.as_str()?)))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            let text = texts
+                .iter()
+                .find(|(locale, text)| *locale == "en" && !text.is_empty())
+                .or_else(|| texts.iter().find(|(_, text)| !text.is_empty()))
+                .map(|(_, text)| (*text).to_owned());
+            match text {
+                Some(text) => {
+                    self.rest
+                        .insert(key.to_owned(), serde_json::Value::String(text));
+                }
+                None => {
+                    self.rest.remove(key);
+                }
+            }
+        }
+    }
+}
+
 /// `(group, kind, namespace, name)`, the identity a resource is indexed by (MF-06).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResourceId {

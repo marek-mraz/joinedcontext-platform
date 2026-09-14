@@ -148,6 +148,32 @@ fn system_metadata_is_stripped_and_hand_written_metadata_survives() {
     );
 }
 
+/// UI-50: a live manifest that still carries the legacy language map comes out with the one
+/// plain string, so the repository converts itself on the next export.
+#[test]
+fn a_legacy_title_map_is_written_as_one_string() {
+    let titled = LIVE_ENDPOINT.replacen(
+        "  uid:",
+        "  title: { sk: Ovzdušie, en: Air quality }\n  description: { sk: Merania }\n  uid:",
+        1,
+    );
+    let platform = live(&[SPACE, &titled]);
+    let report = export::collect(&platform, "ovzdusie", "ovzdusie").expect("the platform answers");
+    let endpoint = exported(
+        &report,
+        "projects/ovzdusie/spaces/ovzdusie/endpoints/public-air.yaml",
+    );
+    assert_eq!(
+        endpoint.metadata.rest["title"],
+        serde_json::json!("Air quality")
+    );
+    assert_eq!(
+        endpoint.metadata.rest["description"],
+        serde_json::json!("Merania"),
+        "without en, the first non-empty value"
+    );
+}
+
 /// MF-17 and MF-24: a manifest carries a `secretRef`, never a secret. A platform that
 /// hands one back has it dropped and the operator is told, because a silent lossy export
 /// is worse than a loud one.

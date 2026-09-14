@@ -392,6 +392,7 @@ fn unacceptable(manifest: &RawManifest) -> Option<String> {
 /// Rewrites one manifest for this repository (MF-22, PF-22, MF-20).
 fn rewrite(manifest: &mut RawManifest, options: &Options, origin: &str) {
     let source_namespace = manifest.metadata.namespace.clone();
+    manifest.metadata.collapse_language_maps();
 
     if let Some(target) = &options.namespace {
         let organization_scoped =
