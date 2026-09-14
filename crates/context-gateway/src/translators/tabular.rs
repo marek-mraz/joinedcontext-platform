@@ -5,7 +5,8 @@
 //! way to read the same data, not a second set of rules (EP-06, EP-07).
 //!
 //! One entity is one row and one leaf value is one column, named by the dot-joined path
-//! that reaches it (`temperature.value`, `location.value.coordinates[0]`). The structural
+//! that reaches it (`temperature.value`, `location.value.coordinates[0]`); an array that
+//! holds arrays or objects is one cell carrying its JSON. The structural
 //! discriminator NGSI-LD puts on an attribute (`"type": "Property"`) is shape rather than
 //! data and gets no column; the `type` of a GeoJSON geometry is data and keeps one. A
 //! Relationship arrives as the target URN under `.object` (EP-08).
@@ -182,12 +183,18 @@ fn walk(path: &str, value: &Value, cells: &mut Vec<(String, Value)>) {
                 walk(&format!("{path}.{name}"), member, cells);
             }
         }
-        Value::Array(items) if !items.is_empty() => {
+        // Only an array of scalars spreads over indexed columns (a Point's two coordinates).
+        // One holding arrays or objects, such as a polygon's rings, stays one JSON cell, so
+        // no geometry widens the table past what a spreadsheet or a DataStore holds.
+        Value::Array(items)
+            if !items.is_empty()
+                && !items.iter().any(|item| item.is_array() || item.is_object()) =>
+        {
             for (index, item) in items.iter().enumerate() {
                 walk(&format!("{path}[{index}]"), item, cells);
             }
         }
-        // A scalar, an empty object or an empty array: the path ends here.
+        // A scalar, an empty object, or an array that is not all scalars: the path ends here.
         leaf => cells.push((path.to_owned(), leaf.clone())),
     }
 }

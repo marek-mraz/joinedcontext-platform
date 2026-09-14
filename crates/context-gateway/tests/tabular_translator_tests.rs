@@ -60,6 +60,56 @@ fn nested_properties_flatten_to_dot_notation() {
     assert_eq!(cells[1].0, "type");
 }
 
+/// EP-08, EP-65: a polygon's rings are one JSON cell, so a layer of polygons stays a few
+/// columns wide; a Point in the same answer keeps its two indexed coordinates.
+#[test]
+fn an_array_of_arrays_is_one_json_cell() {
+    let ring: Vec<Value> = (0..1000)
+        .map(|step| json!([24.9 + f64::from(step) * 0.0001, 60.1]))
+        .collect();
+    let area = json!({
+        "id": "urn:a", "type": "Announcement",
+        "location": { "type": "GeoProperty",
+                      "value": { "type": "Polygon", "coordinates": [ring] } },
+        "tags": { "type": "Property", "value": [{ "k": "road" }, { "k": "closure" }] }
+    });
+    let cells = flatten(&area);
+    assert!(
+        cells.len() < 10,
+        "{:?}",
+        cells.iter().map(|(key, _)| key).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        cells
+            .iter()
+            .find(|(key, _)| key == "location.value.coordinates")
+            .map(|(_, value)| value),
+        Some(&json!([ring]))
+    );
+    assert!(cells
+        .iter()
+        .any(|(key, value)| key == "tags.value" && value.is_array()));
+
+    let answer = json!([area, station()]);
+    let table = table(&answer, &Limits::default()).expect("within the limits");
+    for column in [
+        "location.value.coordinates",
+        "location.value.coordinates[0]",
+        "location.value.coordinates[1]",
+    ] {
+        assert!(
+            table.columns.iter().any(|name| name == column),
+            "{:?}",
+            table.columns
+        );
+    }
+    let text = csv(&table, &Limits::default()).expect("within the limits");
+    assert!(
+        text.contains("\"[[[24.9,60.1],"),
+        "the rings are JSON in one quoted cell"
+    );
+}
+
 /// EP-08: a relationship is its target URN, as a string a spreadsheet can read.
 #[test]
 fn a_relationship_is_the_target_urn() {

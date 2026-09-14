@@ -85,7 +85,7 @@ pub fn mirrored(publication: &CkanPublication) -> Option<Representation> {
 ///
 /// The column set comes from the answer rather than from the models, because the columns
 /// an Endpoint actually serves are shaped by the data: a `GeoProperty` flattens to
-/// `location.value.coordinates[0]` and an array to one column per index, and a table
+/// `location.value.coordinates[0]` and an array of scalars to one column per index, and a table
 /// created from predicted names would hold empty fields the rows never fill (EP-08).
 ///
 /// The models supply what they can supply reliably. A column whose attribute one of them
