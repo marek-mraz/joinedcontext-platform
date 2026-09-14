@@ -542,3 +542,62 @@ async fn diagnostics_needs_the_run_ticket_like_every_door() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// An endpoint the assistant added to the conversation after the proxy cached the run is reached
+/// on the first call: the proxy asks the Portal again before it refuses (AG-75).
+#[tokio::test]
+async fn an_endpoint_added_since_the_run_was_cached_is_reached_at_once() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let gateway = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/endpoint/{KPIS}/ngsi-ld/v1/entities")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&gateway)
+        .await;
+    let cached = sample_run(false, "interviewing");
+    let portal = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/internal/agent-runs/{}", cached.id)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": cached.id,
+            "project": cached.project,
+            "appName": cached.app_name,
+            "endpointSlug": cached.endpoint_slug,
+            "endpointSlugs": [cached.endpoint_slug, KPIS],
+            "allowsWrite": false,
+            "branch": cached.branch,
+            "pathPrefix": cached.path_prefix,
+            "status": "interviewing",
+            "ticketHash": cached.ticket_hash,
+            "maxTokens": 1000,
+            "allowedHosts": [],
+            "requestsPerMinute": 100,
+            "maxResponseBytes": 1048576,
+            "createdBy": cached.created_by,
+            "modelName": cached.model_name,
+        })))
+        .expect(1)
+        .mount(&portal)
+        .await;
+
+    let state = test_state_with_gateway(cached.clone(), &gateway.uri());
+    let state = Arc::new(ProxyState {
+        runs: RunResolver::with_cached_at(portal.uri().parse().unwrap(), cached),
+        ..(*state).clone()
+    });
+    let resp = router(state)
+        .oneshot(ticketed(
+            "GET",
+            &format!("/v1/data/endpoints/{KPIS}/ngsi-ld/v1/entities?type=KeyPerformanceIndicator"),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    gateway.verify().await;
+    portal.verify().await;
+}

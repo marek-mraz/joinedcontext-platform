@@ -91,6 +91,13 @@ impl RunResolver {
         }
     }
 
+    /// A resolver that holds `run` for an hour and asks `portal_base` when it must look past it.
+    pub fn with_cached_at(portal_base: Url, run: RunContext) -> Self {
+        let mut resolver = Self::with_cached(run);
+        resolver.portal_base = portal_base;
+        resolver
+    }
+
     pub async fn resolve(&self, run_id: &str) -> Result<Arc<RunContext>, RunError> {
         let now = Instant::now();
         {
@@ -103,6 +110,18 @@ impl RunResolver {
             }
         }
 
+        self.fetch(run_id).await
+    }
+
+    /// The run as the Portal holds it now, past the cache: a conversation gains an endpoint
+    /// between two calls, and its first call through that endpoint must not wait out the cache
+    /// (AG-75). A failure leaves the cached record as it was.
+    pub async fn resolve_fresh(&self, run_id: &str) -> Result<Arc<RunContext>, RunError> {
+        self.fetch(run_id).await
+    }
+
+    async fn fetch(&self, run_id: &str) -> Result<Arc<RunContext>, RunError> {
+        let now = Instant::now();
         let mut url = self.portal_base.clone();
         url.set_path(&format!("internal/agent-runs/{run_id}"));
 

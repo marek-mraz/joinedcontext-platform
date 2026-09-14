@@ -65,6 +65,17 @@ async fn forward(
             .into_response();
     }
 
+    // A slug the cached run does not name is checked once more against the Portal's record: the
+    // assistant adds an endpoint to a conversation and calls it at once (AG-75).
+    let run = match &slug {
+        Some(slug) if !run.slugs().contains(&slug.as_str()) => {
+            match state.runs.resolve_fresh(&run.id).await {
+                Ok(fresh) => fresh,
+                Err(_) => run,
+            }
+        }
+        _ => run,
+    };
     let slug = match slug {
         None => run.endpoint_slug.clone(),
         Some(slug) if run.slugs().contains(&slug.as_str()) => slug,
