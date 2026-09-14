@@ -2,6 +2,7 @@
 
 pub mod agent_profile;
 pub mod app;
+pub mod bento_inputs;
 pub mod blueprint;
 pub mod ckan;
 pub mod csr;
@@ -40,8 +41,8 @@ pub use data_model::{
     DataModelLifecycle, DataModelSource, DataModelSpec, GeneratedArtifacts, RemoteSource, SemVer,
 };
 pub use data_source::{
-    Authorization, DataSourceSpec, DataSourceType, GtfsFeed, GtfsRtConnection, HttpConnection,
-    MqttConnection, TlsSettings, WebSocketConnection,
+    check_class, Authorization, DataSourceSpec, DataSourceType, GtfsFeed, GtfsRtConnection,
+    HttpConnection, MqttConnection, TlsSettings, WebSocketConnection,
 };
 pub use dataspace::{
     AgreementConstraints, AgreementRole, AgreementState, ConnectorEngine, DataAgreementSpec,
@@ -58,8 +59,8 @@ pub use mapping::{
 pub use model_projection::{ModelProjectionSpec, ProjectedClass, ProjectionFilter};
 pub use organization::{Contact, ContactRole, OrganizationSpec};
 pub use pipeline::{
-    Compute, ComputeKind, Output, OutputMode, PipelineClass, PipelineQuotas, PipelineSource,
-    PipelineSpec, SourceQuery, SubscriptionTrigger, TemporalWindow, Trigger,
+    is_scheduled, Compute, ComputeKind, Output, OutputMode, PipelineClass, PipelineQuotas,
+    PipelineSource, PipelineSpec, SourceQuery, SubscriptionTrigger, TemporalWindow, Trigger,
 };
 pub use policy::{
     EntitySelector, Operation, OperationGroup, OperationRef, PolicyEffect, PolicySpec, Principal,

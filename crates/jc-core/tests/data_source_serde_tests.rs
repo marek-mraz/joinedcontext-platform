@@ -1,8 +1,9 @@
 //! T-0290: the `DataSource` kind, one connection and its references (MF-35, PL-39, CC-06).
 
 use jc_core::envelope::ResourceEnvelope;
-use jc_core::kinds::{DataSourceSpec, DataSourceType, GtfsFeed, PipelineSpec};
+use jc_core::kinds::{DataSourceSpec, DataSourceType, GtfsFeed, PipelineClass, PipelineSpec};
 use jc_core::registry;
+use serde::de::Error as _;
 
 type DataSource = ResourceEnvelope<DataSourceSpec>;
 
@@ -106,10 +107,13 @@ fn the_websocket_type_is_one_word() {
     );
 
     let kebab = WEB_SOCKET.replace("type: websocket", "type: web-socket");
-    assert!(
-        DataSource::from_yaml(&kebab).is_err(),
-        "the old kebab-case spelling is refused, not silently accepted"
-    );
+    let err = DataSource::from_yaml(&kebab)
+        .and_then(|d| {
+            d.validate()
+                .map_err(|e| serde_norway::Error::custom(e.to_string()))
+        })
+        .expect_err("the old kebab-case spelling is refused, not silently accepted");
+    assert!(err.to_string().contains("web-socket") || err.to_string().contains("type"));
 }
 
 #[test]
@@ -320,6 +324,276 @@ fn a_header_name_that_is_not_a_token_is_refused() {
         assert!(
             source.validate().is_err(),
             "{bad:?} is not a header name a manifest may write"
+        );
+    }
+}
+
+const KAFKA: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: kafka-sensors
+  namespace: bb-ovzdusie
+spec:
+  type: kafka
+  input:
+    addresses: ["kafka.banskabystrica.sk:9092"]
+    topics: ["sensors.aq"]
+    sasl:
+      password: ${DS_KAFKA_PASSWORD}
+  secrets:
+    - name: kafka-secret
+      key: password
+      envVar: DS_KAFKA_PASSWORD
+"#;
+
+#[test]
+fn runner_kafka_with_valid_interpolation_and_secrets_validates() {
+    let source = DataSource::from_yaml(KAFKA).expect("parses");
+    source.validate().expect("validates");
+    assert_eq!(
+        source.spec.source_type,
+        DataSourceType::Runner("kafka".to_string())
+    );
+
+    // Wire round-trip verifies type: kafka serializes as "kafka" string
+    let serialized = serde_norway::to_string(&source).expect("serializes");
+    assert!(serialized.contains("type: kafka"));
+    let again = DataSource::from_yaml(&serialized).expect("re-parses");
+    assert_eq!(source, again);
+
+    // secret_refs lists every entry of spec.secrets
+    let refs = source.spec.secret_refs();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].name, "kafka-secret");
+    assert_eq!(refs[0].env_var.as_deref(), Some("DS_KAFKA_PASSWORD"));
+}
+
+#[test]
+fn runner_kafka_with_literal_password_is_refused() {
+    let literal = KAFKA.replace("${DS_KAFKA_PASSWORD}", "plaintext_pass");
+    let source = DataSource::from_yaml(&literal).expect("parses");
+    let err = source.validate().expect_err("literal password refused");
+    assert!(
+        err.to_string().contains("spec.input.sasl.password"),
+        "error should name spec.input.sasl.password, got: {err}"
+    );
+}
+
+#[test]
+fn runner_client_certs_key_literal_in_element_1_is_refused() {
+    let certs_yaml = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: kafka-certs
+  namespace: bb-ovzdusie
+spec:
+  type: kafka
+  input:
+    addresses: ["kafka.banskabystrica.sk:9092"]
+    tls:
+      client_certs:
+        - key: ${DS_CERT0_KEY}
+        - key: literal_key_in_elem_1
+  secrets:
+    - name: cert-0
+      key: key
+      envVar: DS_CERT0_KEY
+"#;
+    let source = DataSource::from_yaml(certs_yaml).expect("parses");
+    let err = source
+        .validate()
+        .expect_err("literal key in element 1 refused");
+    assert!(
+        err.to_string()
+            .contains("spec.input.tls.client_certs[1].key"),
+        "error should name spec.input.tls.client_certs[1].key, got: {err}"
+    );
+}
+
+#[test]
+fn runner_input_reading_the_runners_own_environment_is_refused() {
+    for (needle, replacement) in [
+        ("kafka.banskabystrica.sk", "${JC_CLIENT_SECRET}.example"),
+        ("kafka.banskabystrica.sk", "${JC_CLIENT_SECRET:fallback}"),
+        (
+            "kafka.banskabystrica.sk",
+            "x${DS_KAFKA_PASSWORD}${JC_CLIENT_SECRET}",
+        ),
+    ] {
+        assert!(KAFKA.contains(needle), "fixture holds {needle}");
+        let leaking = KAFKA.replace(needle, replacement);
+        let source = DataSource::from_yaml(&leaking).expect("parses");
+        let err = source
+            .validate()
+            .expect_err("undeclared interpolation refused");
+        assert!(
+            err.to_string().contains("${JC_CLIENT_SECRET}"),
+            "error names the variable, got: {err}"
+        );
+    }
+    let declared = KAFKA.replace("kafka.banskabystrica.sk", "${DS_KAFKA_PASSWORD}.example");
+    DataSource::from_yaml(&declared)
+        .expect("parses")
+        .validate()
+        .expect("a declared secret may appear outside its field");
+}
+
+#[test]
+fn unknown_type_nope_is_refused_and_names_accepted_types() {
+    let nope = KAFKA.replace("type: kafka", "type: nope");
+    let source = DataSource::from_yaml(&nope).expect("parses");
+    let err = source.validate().expect_err("type nope refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("kafka") && msg.contains("mqtt"),
+        "error reason must contain kafka and mqtt, got: {msg}"
+    );
+}
+
+#[test]
+fn file_reader_paths_must_start_with_data_and_have_no_dotdot() {
+    let csv_bad_path = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: csv-feed
+  namespace: bb-ovzdusie
+spec:
+  type: csv
+  input:
+    paths: ["/tmp/x.csv"]
+"#;
+    let source = DataSource::from_yaml(csv_bad_path).expect("parses");
+    let err = source.validate().expect_err("/tmp path refused");
+    assert!(err.to_string().contains("spec.input.paths"), "{err}");
+
+    let csv_valid = csv_bad_path.replace("/tmp/x.csv", "/data/x.csv");
+    let source_ok = DataSource::from_yaml(&csv_valid).expect("parses");
+    source_ok.validate().expect("/data/x.csv accepted");
+
+    let csv_dotdot = csv_bad_path.replace("/tmp/x.csv", "/data/../x.csv");
+    let source_dotdot = DataSource::from_yaml(&csv_dotdot).expect("parses");
+    let err = source_dotdot.validate().expect_err(".. refused");
+    assert!(err.to_string().contains("spec.input.paths"), "{err}");
+}
+
+#[test]
+fn typed_mqtt_with_input_and_runner_with_tls_are_refused() {
+    let mqtt_with_input = MQTT.to_string() + "  input:\n    some: field\n";
+    let source = DataSource::from_yaml(&mqtt_with_input).expect("parses");
+    let err = source
+        .validate()
+        .expect_err("typed mqtt with input is refused");
+    assert!(err.to_string().contains("spec.input"), "{err}");
+
+    let kafka_with_tls = KAFKA.to_string() + "  tls:\n    insecureSkipVerify: false\n";
+    let source = DataSource::from_yaml(&kafka_with_tls).expect("parses");
+    let err = source
+        .validate()
+        .expect_err("runner type with tls is refused");
+    assert!(err.to_string().contains("spec.tls"), "{err}");
+}
+
+#[test]
+fn terminates_distinguishes_terminating_and_continuous_inputs() {
+    let mut ds: DataSourceSpec = serde_norway::from_str(
+        r#"type: csv
+input:
+  paths: ["/data/x.csv"]
+"#,
+    )
+    .unwrap();
+    assert!(ds.terminates(), "csv terminates");
+
+    ds.source_type = DataSourceType::Runner("sql_select".to_string());
+    assert!(ds.terminates(), "sql_select terminates");
+
+    ds.source_type = DataSourceType::Http;
+    assert!(ds.terminates(), "http terminates");
+
+    ds.source_type = DataSourceType::Runner("kafka".to_string());
+    assert!(!ds.terminates(), "kafka does not terminate");
+
+    ds.source_type = DataSourceType::Mqtt;
+    assert!(!ds.terminates(), "mqtt does not terminate");
+}
+
+#[test]
+fn check_class_enforces_resident_for_continuous_sources() {
+    let mut pipe: PipelineSpec = serde_norway::from_str(
+        r#"class: scheduled
+schedule: "0 0 * * *"
+targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:ep-air
+"#,
+    )
+    .unwrap();
+
+    let mut ds: DataSourceSpec = serde_norway::from_str(
+        r#"type: kafka
+input:
+  addresses: ["localhost:9092"]
+"#,
+    )
+    .unwrap();
+
+    // scheduled + kafka -> refused
+    assert!(jc_core::kinds::data_source::check_class(&pipe, &ds).is_err());
+
+    // scheduled + csv -> ok
+    ds.source_type = DataSourceType::Runner("csv".to_string());
+    assert!(jc_core::kinds::data_source::check_class(&pipe, &ds).is_ok());
+
+    // resident + kafka -> ok
+    pipe.class = PipelineClass::Resident;
+    pipe.schedule = None;
+    ds.source_type = DataSourceType::Runner("kafka".to_string());
+    assert!(jc_core::kinds::data_source::check_class(&pipe, &ds).is_ok());
+
+    // auto + period 5m + nats -> refused
+    pipe.class = PipelineClass::Auto;
+    pipe.period = Some("5m".to_string());
+    ds.source_type = DataSourceType::Runner("nats".to_string());
+    assert!(jc_core::kinds::data_source::check_class(&pipe, &ds).is_err());
+}
+
+#[test]
+fn datasource_schema_spec_type_is_string_with_examples_and_no_enum() {
+    let schema = registry::schema_of("DataSource").expect("schema");
+    assert_eq!(
+        schema.get("$schema").and_then(|v| v.as_str()),
+        Some("http://json-schema.org/draft-07/schema#")
+    );
+
+    let type_schema = schema
+        .pointer("/definitions/DataSourceType")
+        .or_else(|| schema.pointer("/properties/spec/properties/type"))
+        .expect("DataSourceType schema definition");
+
+    assert_eq!(
+        type_schema.get("type").and_then(|v| v.as_str()),
+        Some("string"),
+        "spec.type schema must be type: string"
+    );
+    assert!(
+        type_schema.get("enum").is_none(),
+        "spec.type must not be an enum of 69 names"
+    );
+    let examples = type_schema
+        .get("examples")
+        .and_then(|v| v.as_array())
+        .expect("spec.type must have examples");
+    assert!(examples.iter().any(|v| v == "kafka"));
+    assert!(examples.iter().any(|v| v == "mqtt"));
+
+    let schema_text = schema.to_string();
+    for disallowed in [
+        "prefixItems",
+        "dependentRequired",
+        "unevaluatedProperties",
+        "$defs",
+    ] {
+        assert!(
+            !schema_text.contains(disallowed),
+            "schema must not contain 2019-09 keyword `{disallowed}`"
         );
     }
 }

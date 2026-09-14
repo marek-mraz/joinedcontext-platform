@@ -13,6 +13,23 @@ use std::sync::LazyLock;
 static PERIOD_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^[1-9][0-9]*(ms|s|m|h)$").expect("valid regex"));
 
+/// The cadence at which a scheduled run stops being worth a pod start (PL-26).
+pub const RESIDENT_BELOW_SECONDS: u64 = 30;
+
+/// Returns whether a pipeline executes as a scheduled CronJob (PL-04, PL-26).
+///
+/// An explicit class wins; `auto` runs scheduled when `period >= 30s`.
+pub fn is_scheduled(spec: &PipelineSpec) -> bool {
+    match spec.class {
+        PipelineClass::Scheduled => true,
+        PipelineClass::Resident => false,
+        PipelineClass::Auto => match spec.period_seconds() {
+            Some(seconds) => seconds >= RESIDENT_BELOW_SECONDS,
+            None => false,
+        },
+    }
+}
+
 /// Desired specification of a [`Pipeline`][crate::kinds::Pipeline] resource (PL-01..PL-28).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -335,6 +352,11 @@ impl PipelineSpec {
             "h" => Some(count * 3600),
             _ => None,
         }
+    }
+
+    /// Returns whether this pipeline executes as a scheduled CronJob (PL-04, PL-26).
+    pub fn is_scheduled(&self) -> bool {
+        is_scheduled(self)
     }
 
     /// Validates class scheduling, target endpoint, compute engine, and resource bounds.

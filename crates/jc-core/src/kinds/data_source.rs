@@ -12,40 +12,52 @@
 
 use crate::envelope::{Kind, ObjectMeta, Scope, SecretRef};
 use crate::error::{Error, Result};
+use crate::kinds::PipelineSpec;
 use crate::names;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::LazyLock;
 
-/// Which kind of feed a [`DataSourceSpec`] connects to (MF-35).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
+use super::bento_inputs;
+
+static ENV_VAR_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^[A-Z][A-Z0-9_]*$").expect("valid regex"));
+
+/// Which kind of feed a [`DataSourceSpec`] connects to: one of the four typed feeds or any
+/// input the runner ships (MF-35, PL-50).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DataSourceType {
     /// An MQTT broker the runner subscribes to.
     Mqtt,
     /// An HTTP resource the runner polls.
     Http,
     /// A WebSocket the runner keeps open.
-    // Spelled out rather than left to `kebab-case`, which would make it `web-socket`. The
-    // documented wire value is one word (`Architecture/08 §6`) and the documentation is the
-    // contract (CC-11), so the rename lives here and the other three variants are unaffected.
-    // A plain comment, not a doc comment: this paragraph is about the code and would otherwise
-    // be published as the variant's description in `schemas/kinds/DataSource.json`.
-    #[serde(rename = "websocket")]
     WebSocket,
     /// A GTFS-realtime protobuf feed, polled over HTTP and decoded by the runner.
     GtfsRt,
+    /// Any input the pinned Bento runner ships (PL-50).
+    Runner(String),
 }
 
 impl DataSourceType {
     /// The wire name, as written in `spec.type`.
-    pub const fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Mqtt => "mqtt",
             Self::Http => "http",
             Self::WebSocket => "websocket",
             Self::GtfsRt => "gtfs-rt",
+            Self::Runner(name) => name.as_str(),
+        }
+    }
+
+    /// The runner input name if this is a runner-provided input.
+    pub fn runner_name(&self) -> Option<&str> {
+        match self {
+            Self::Runner(name) => Some(name.as_str()),
+            _ => None,
         }
     }
 }
@@ -53,6 +65,61 @@ impl DataSourceType {
 impl fmt::Display for DataSourceType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl Serialize for DataSourceType {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DataSourceType {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "mqtt" => Self::Mqtt,
+            "http" => Self::Http,
+            "websocket" => Self::WebSocket,
+            "gtfs-rt" => Self::GtfsRt,
+            _ => Self::Runner(s),
+        })
+    }
+}
+
+impl JsonSchema for DataSourceType {
+    fn schema_name() -> String {
+        "DataSourceType".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(
+                    "Which kind of feed a DataSource connects to: a typed connection or any runner input (MF-35, PL-50)."
+                        .to_string(),
+                ),
+                examples: vec![
+                    serde_json::json!("mqtt"),
+                    serde_json::json!("http"),
+                    serde_json::json!("websocket"),
+                    serde_json::json!("gtfs-rt"),
+                    serde_json::json!("kafka"),
+                    serde_json::json!("csv"),
+                    serde_json::json!("sql_select"),
+                ],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .into()
     }
 }
 
@@ -218,6 +285,12 @@ pub struct DataSourceSpec {
     /// Transport security for the connection above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsSettings>,
+    /// Verbatim input configuration document for runner-provided inputs (PL-50).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Value>,
+    /// Secret references for runner-provided inputs (PL-50, MF-35).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<SecretRef>,
 }
 
 impl Kind for DataSourceSpec {
@@ -239,6 +312,18 @@ const HTTP_SCHEMES: &[&str] = &["http://", "https://"];
 const WS_SCHEMES: &[&str] = &["ws://", "wss://"];
 
 impl DataSourceSpec {
+    /// Whether this input ends on its own once it has read what there is (PL-04, PL-50).
+    ///
+    /// Scheduled pipelines may only run terminating inputs; socket and broker inputs never
+    /// terminate and must run resident.
+    pub fn terminates(&self) -> bool {
+        match &self.source_type {
+            DataSourceType::Http | DataSourceType::GtfsRt => true,
+            DataSourceType::Mqtt | DataSourceType::WebSocket => false,
+            DataSourceType::Runner(name) => bento_inputs::TERMINATING.contains(&name.as_str()),
+        }
+    }
+
     /// Validates that exactly the declared connection is present and reachable as written.
     pub fn validate(&self) -> Result<()> {
         let present: Vec<&'static str> = [
@@ -251,21 +336,57 @@ impl DataSourceSpec {
         .flatten()
         .collect();
 
-        let expected = match self.source_type {
-            DataSourceType::Mqtt => "mqtt",
-            DataSourceType::Http => "http",
-            DataSourceType::WebSocket => "webSocket",
-            DataSourceType::GtfsRt => "gtfsRt",
-        };
-        if present != [expected] {
-            return Err(Error::Name {
-                field: "spec",
-                value: present.join(", "),
-                reason: "exactly the connection block named by `type` is present (MF-35)",
-            });
+        match &self.source_type {
+            DataSourceType::Mqtt
+            | DataSourceType::Http
+            | DataSourceType::WebSocket
+            | DataSourceType::GtfsRt => {
+                let expected = match self.source_type {
+                    DataSourceType::Mqtt => "mqtt",
+                    DataSourceType::Http => "http",
+                    DataSourceType::WebSocket => "webSocket",
+                    DataSourceType::GtfsRt => "gtfsRt",
+                    DataSourceType::Runner(_) => unreachable!(),
+                };
+                if present != [expected] {
+                    return Err(Error::Name {
+                        field: "spec",
+                        value: present.join(", "),
+                        reason: "exactly the connection block named by `type` is present (MF-35)",
+                    });
+                }
+            }
+            DataSourceType::Runner(name) => {
+                if !bento_inputs::INPUTS.contains(&name.as_str()) {
+                    let mut accepted = Vec::with_capacity(4 + bento_inputs::INPUTS.len());
+                    accepted.extend_from_slice(&["mqtt", "http", "websocket", "gtfs-rt"]);
+                    accepted.extend_from_slice(bento_inputs::INPUTS);
+                    return Err(Error::Invalid {
+                        field: "spec.type".to_string(),
+                        reason: format!(
+                            "unknown type `{name}`; accepted types are: {}",
+                            accepted.join(", ")
+                        ),
+                    });
+                }
+                if !present.is_empty() {
+                    return Err(Error::Name {
+                        field: "spec",
+                        value: present.join(", "),
+                        reason: "runner data sources do not use typed connection blocks; configure `spec.input` instead",
+                    });
+                }
+            }
         }
 
         if let Some(tls) = &self.tls {
+            if self.source_type.runner_name().is_some() {
+                return Err(Error::Name {
+                    field: "spec.tls",
+                    value: String::new(),
+                    reason: "runner data sources carry their own tls configuration inside `spec.input`, not `spec.tls`",
+                });
+            }
             if tls.insecure_skip_verify {
                 return Err(Error::Name {
                     field: "spec.tls.insecureSkipVerify",
@@ -275,9 +396,13 @@ impl DataSourceSpec {
             }
         }
 
-        match self.source_type {
-            DataSourceType::Mqtt => self.validate_mqtt(),
+        match &self.source_type {
+            DataSourceType::Mqtt => {
+                self.validate_typed_common()?;
+                self.validate_mqtt()
+            }
             DataSourceType::Http => {
+                self.validate_typed_common()?;
                 let http = self.http.as_ref().expect("checked above");
                 url(&http.url, HTTP_SCHEMES, "spec.http.url")?;
                 if let Some(authorization) = &http.authorization {
@@ -285,17 +410,157 @@ impl DataSourceSpec {
                 }
                 verb(http.verb.as_deref())
             }
-            DataSourceType::WebSocket => url(
-                &self.web_socket.as_ref().expect("checked above").url,
-                WS_SCHEMES,
-                "spec.webSocket.url",
-            ),
-            DataSourceType::GtfsRt => url(
-                &self.gtfs_rt.as_ref().expect("checked above").url,
-                HTTP_SCHEMES,
-                "spec.gtfsRt.url",
-            ),
+            DataSourceType::WebSocket => {
+                self.validate_typed_common()?;
+                url(
+                    &self.web_socket.as_ref().expect("checked above").url,
+                    WS_SCHEMES,
+                    "spec.webSocket.url",
+                )
+            }
+            DataSourceType::GtfsRt => {
+                self.validate_typed_common()?;
+                url(
+                    &self.gtfs_rt.as_ref().expect("checked above").url,
+                    HTTP_SCHEMES,
+                    "spec.gtfsRt.url",
+                )
+            }
+            DataSourceType::Runner(name) => self.validate_runner(name),
         }
+    }
+
+    fn validate_typed_common(&self) -> Result<()> {
+        if self.input.is_some() {
+            return Err(Error::Name {
+                field: "spec.input",
+                value: String::new(),
+                reason: "typed data sources do not declare `input`; use the connection block named by `type`",
+            });
+        }
+        if !self.secrets.is_empty() {
+            return Err(Error::Name {
+                field: "spec.secrets",
+                value: String::new(),
+                reason: "typed data sources do not declare `secrets`; credentials belong in the connection block",
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_runner(&self, runner_name: &str) -> Result<()> {
+        let input_obj = match &self.input {
+            Some(serde_json::Value::Object(map)) if !map.is_empty() => map,
+            _ => {
+                return Err(Error::Name {
+                    field: "spec.input",
+                    value: String::new(),
+                    reason: "`spec.input` must be present and a non-empty mapping for runner data sources",
+                });
+            }
+        };
+
+        for sref in &self.secrets {
+            names::validate_dns1123_label(&sref.name)?;
+            match &sref.env_var {
+                Some(ev) if ENV_VAR_RE.is_match(ev) => {}
+                Some(ev) => {
+                    return Err(Error::Name {
+                        field: "spec.secrets.envVar",
+                        value: ev.clone(),
+                        reason: "envVar must match [A-Z][A-Z0-9_]*",
+                    });
+                }
+                None => {
+                    return Err(Error::Name {
+                        field: "spec.secrets.envVar",
+                        value: String::new(),
+                        reason: "envVar is required for runner secrets (PL-50)",
+                    });
+                }
+            }
+        }
+
+        let known_vars: std::collections::HashSet<&str> = self
+            .secrets
+            .iter()
+            .filter_map(|s| s.env_var.as_deref())
+            .collect();
+
+        let secret_paths = bento_inputs::SECRET_FIELDS
+            .iter()
+            .find(|(n, _)| *n == runner_name)
+            .map(|(_, paths)| *paths)
+            .unwrap_or(&[]);
+
+        let input_val = self.input.as_ref().expect("checked above");
+        for path in secret_paths {
+            let segments: Vec<&str> = path.split('.').collect();
+            let mut targets = Vec::new();
+            collect_secret_targets(input_val, &segments, "", &mut targets);
+            for (concrete_path, target_val) in targets {
+                let valid = if let serde_json::Value::String(s) = target_val {
+                    if let Some(var) = is_exact_var_interpolation(s) {
+                        known_vars.contains(var)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !valid {
+                    return Err(Error::Invalid {
+                        field: format!("spec.input.{concrete_path}"),
+                        reason: "a runner-documented secret field holds a `${VAR}` interpolation naming an entry of spec.secrets, never a value (MF-35, PL-16)".to_string(),
+                    });
+                }
+            }
+        }
+
+        let mut named = Vec::new();
+        interpolated_names(input_val, &mut named);
+        if let Some(name) = named.into_iter().find(|n| !known_vars.contains(n)) {
+            return Err(Error::Invalid {
+                field: "spec.input".to_string(),
+                reason: format!(
+                    "`${{{name}}}` names no envVar of spec.secrets; the runner's own environment is not reachable from a manifest (PL-50, PL-16)"
+                ),
+            });
+        }
+
+        if bento_inputs::FILE_READERS.contains(&runner_name) {
+            let check_file_path = |field: &'static str, val: &str| -> Result<()> {
+                if !val.starts_with("/data/") || val.split('/').any(|seg| seg == "..") {
+                    return Err(Error::Name {
+                        field,
+                        value: val.to_string(),
+                        reason: "a file-reading input reads the runner's files volume under /data/",
+                    });
+                }
+                Ok(())
+            };
+
+            if let Some(paths) = input_obj.get("paths") {
+                if let Some(arr) = paths.as_array() {
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            check_file_path("spec.input.paths", s)?;
+                        }
+                    }
+                } else if let Some(s) = paths.as_str() {
+                    check_file_path("spec.input.paths", s)?;
+                }
+            }
+
+            if let Some(path) = input_obj.get("path") {
+                if let Some(s) = path.as_str() {
+                    check_file_path("spec.input.path", s)?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn validate_mqtt(&self) -> Result<()> {
@@ -334,20 +599,135 @@ impl DataSourceSpec {
     /// The reconciler resolves these and nothing else: a secret nobody references is never
     /// read, and a credential is never carried in the manifest itself (PL-15).
     pub fn secret_refs(&self) -> Vec<&SecretRef> {
-        let credential = match self.source_type {
-            DataSourceType::Mqtt => self.mqtt.as_ref().and_then(|m| m.password_ref.as_ref()),
-            DataSourceType::Http => self
-                .http
-                .as_ref()
-                .and_then(|h| h.authorization.as_ref())
-                .map(|a| &a.header_ref),
-            DataSourceType::WebSocket => None,
-            DataSourceType::GtfsRt => None,
-        };
-        let mut refs: Vec<&SecretRef> = credential.into_iter().collect();
-        refs.extend(self.tls.as_ref().and_then(|t| t.ca_cert_ref.as_ref()));
-        refs
+        match &self.source_type {
+            DataSourceType::Mqtt => {
+                let mut refs = Vec::new();
+                if let Some(m) = &self.mqtt {
+                    if let Some(p) = &m.password_ref {
+                        refs.push(p);
+                    }
+                }
+                if let Some(tls) = &self.tls {
+                    if let Some(ca) = &tls.ca_cert_ref {
+                        refs.push(ca);
+                    }
+                }
+                refs
+            }
+            DataSourceType::Http => {
+                let mut refs = Vec::new();
+                if let Some(h) = &self.http {
+                    if let Some(a) = &h.authorization {
+                        refs.push(&a.header_ref);
+                    }
+                }
+                if let Some(tls) = &self.tls {
+                    if let Some(ca) = &tls.ca_cert_ref {
+                        refs.push(ca);
+                    }
+                }
+                refs
+            }
+            DataSourceType::WebSocket | DataSourceType::GtfsRt => {
+                let mut refs = Vec::new();
+                if let Some(tls) = &self.tls {
+                    if let Some(ca) = &tls.ca_cert_ref {
+                        refs.push(ca);
+                    }
+                }
+                refs
+            }
+            DataSourceType::Runner(_) => self.secrets.iter().collect(),
+        }
     }
+}
+
+/// Validates that the pipeline's execution class is compatible with the data source (PL-04, PL-50).
+///
+/// A scheduled pipeline (explicit `class: scheduled` or `auto` with period >= 30s) must only
+/// read terminating data sources (e.g. files, queries, batch fetches). Sockets, brokers, and
+/// streams never terminate on their own and must execute as resident pipelines.
+pub fn check_class(pipeline: &PipelineSpec, source: &DataSourceSpec) -> Result<()> {
+    if pipeline.is_scheduled() && !source.terminates() {
+        return Err(Error::Invalid {
+            field: "spec.class".to_string(),
+            reason: format!(
+                "{} never ends on its own; a broker or socket input is resident (PL-04, PL-50)",
+                source.source_type
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn collect_secret_targets<'a>(
+    val: &'a serde_json::Value,
+    segments: &[&str],
+    current: &str,
+    out: &mut Vec<(String, &'a serde_json::Value)>,
+) {
+    if segments.is_empty() {
+        out.push((current.to_string(), val));
+        return;
+    }
+    let seg = segments[0];
+    let rest = &segments[1..];
+    if let Some(array_field) = seg.strip_suffix("[]") {
+        if let Some(serde_json::Value::Array(items)) = val.get(array_field) {
+            for (idx, item) in items.iter().enumerate() {
+                let next_prefix = if current.is_empty() {
+                    format!("{array_field}[{idx}]")
+                } else {
+                    format!("{current}.{array_field}[{idx}]")
+                };
+                collect_secret_targets(item, rest, &next_prefix, out);
+            }
+        }
+    } else if let Some(child) = val.get(seg) {
+        let next_prefix = if current.is_empty() {
+            seg.to_string()
+        } else {
+            format!("{current}.{seg}")
+        };
+        collect_secret_targets(child, rest, &next_prefix, out);
+    }
+}
+
+/// Every name a `${NAME}` or `${NAME:default}` in the document interpolates, keys included:
+/// the runner replaces them in the raw configuration before it parses it.
+fn interpolated_names<'a>(val: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+    fn scan<'a>(mut rest: &'a str, out: &mut Vec<&'a str>) {
+        while let Some(start) = rest.find("${") {
+            let tail = &rest[start + 2..];
+            let end = tail.find(['}', ':']).unwrap_or(tail.len());
+            out.push(&tail[..end]);
+            rest = &tail[end..];
+        }
+    }
+    match val {
+        serde_json::Value::String(s) => scan(s, out),
+        serde_json::Value::Array(items) => items.iter().for_each(|v| interpolated_names(v, out)),
+        serde_json::Value::Object(map) => map.iter().for_each(|(k, v)| {
+            scan(k, out);
+            interpolated_names(v, out);
+        }),
+        _ => {}
+    }
+}
+
+fn is_exact_var_interpolation(s: &str) -> Option<&str> {
+    if s.starts_with("${") && s.ends_with('}') && s.len() > 3 {
+        let var = &s[2..s.len() - 1];
+        if !var.is_empty()
+            && !var.contains('$')
+            && !var.contains('{')
+            && !var.contains('}')
+            && !var.contains(' ')
+        {
+            return Some(var);
+        }
+    }
+    None
 }
 
 /// The environment variable a secret reference is injected as (PL-15, PL-16).

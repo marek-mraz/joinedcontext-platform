@@ -5,7 +5,7 @@
 //! exactly as they were written.
 
 use jc_core::envelope::ResourceEnvelope;
-use jc_core::kinds::DataSourceSpec;
+use jc_core::kinds::{DataSourceSpec, PipelineSpec};
 use jcctl::bento::{input_of, render, InputContext, RenderError};
 
 fn source(yaml: &str) -> DataSourceSpec {
@@ -19,6 +19,7 @@ fn context<'a>(name: &'a str) -> InputContext<'a> {
         source: name,
         project: "bb-ovzdusie",
         pipeline: "aq-mqtt-ingest",
+        pipeline_spec: None,
     }
 }
 
@@ -250,4 +251,96 @@ fn a_credential_that_names_its_header_renders_that_header_without_a_scheme() {
         "authorization: { header: x-api-key, scheme: Token, headerRef: { name: aq-api, key: key } }",
     );
     assert!(rendered(&source(&signed), "hsl-gbfs").contains("x-api-key: Token ${DS_HSL_GBFS_KEY}"));
+}
+
+const KAFKA: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata: { name: kafka-hel, namespace: bb-ovzdusie }
+spec:
+  type: kafka
+  input:
+    addresses: ["kafka.hel.fi:9093"]
+    topics: ["sensors.air"]
+    consumer_group: jc-helsinki-air
+    tls: { enabled: true }
+    sasl:
+      mechanism: SCRAM-SHA-512
+      user: hki-collector
+      password: "${DS_KAFKA_HEL_PASSWORD}"
+  secrets:
+    - { name: kafka-hel, key: password, envVar: DS_KAFKA_HEL_PASSWORD }
+"#;
+
+const HTTP_CLIENT_RUNNER: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata: { name: http-runner, namespace: bb-ovzdusie }
+spec:
+  type: http_client
+  input:
+    url: https://example.com/feed
+    verb: GET
+"#;
+
+#[test]
+fn a_kafka_runner_source_renders_input_verbatim_with_no_prepended_processors() {
+    let src = source(KAFKA);
+    let out = render(AUTHORED, &src, &context("kafka-hel")).expect("renders");
+    assert!(out.starts_with("input:"), "{out}");
+    assert!(out.contains("kafka:"), "renders kafka input block:\n{out}");
+    assert!(
+        out.contains("${DS_KAFKA_HEL_PASSWORD}"),
+        "interpolation untouched:\n{out}"
+    );
+    assert!(out.contains("kafka.hel.fi:9093"));
+
+    let parsed: serde_norway::Value = serde_norway::from_str(&out).expect("parses");
+    let processors = parsed
+        .get("pipeline")
+        .and_then(|p| p.get("processors"))
+        .and_then(|p| p.as_sequence())
+        .expect("processors");
+    // Kafka source contributes NO prepended processor, so only the author's mapping is present.
+    assert_eq!(
+        processors.len(),
+        1,
+        "only author's mapping, no prepended decoder"
+    );
+    assert!(processors[0].get("mapping").is_some());
+}
+
+#[test]
+fn an_http_client_runner_source_renders_verbatim_not_typed_shape() {
+    let src = source(HTTP_CLIENT_RUNNER);
+    let out = rendered(&src, "http-runner");
+    assert!(out.starts_with("http_client:"), "{out}");
+    assert!(out.contains("url: https://example.com/feed"));
+    assert!(out.contains("verb: GET"));
+    assert!(
+        !out.contains("tls:"),
+        "runner input does not synthesize a tls block"
+    );
+}
+
+#[test]
+fn a_scheduled_pipeline_with_a_non_terminating_source_is_refused() {
+    let pipe: PipelineSpec = serde_norway::from_str(
+        r#"class: scheduled
+schedule: "*/15 * * * *"
+targetEndpoint: urn:ngsi-ld:Endpoint:example.org:helsinki:ep-writer
+"#,
+    )
+    .expect("valid pipeline spec");
+
+    let src = source(KAFKA);
+    let ctx = InputContext {
+        source: "kafka-hel",
+        project: "bb-ovzdusie",
+        pipeline: "aq-kafka-ingest",
+        pipeline_spec: Some(&pipe),
+    };
+    let err = render(AUTHORED, &src, &ctx).unwrap_err();
+    assert!(
+        matches!(err, RenderError::Class(_)),
+        "expected RenderError::Class, got: {err:?}"
+    );
 }

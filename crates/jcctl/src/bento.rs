@@ -9,8 +9,8 @@
 //! `bento.yaml` comes back with an `input` in front of it and everything else byte for byte,
 //! except for the decoder the GTFS-realtime type has to prepend.
 
-use jc_core::kinds::data_source::env_var_of;
-use jc_core::kinds::{DataSourceSpec, DataSourceType, GtfsFeed};
+use jc_core::kinds::data_source::{check_class, env_var_of};
+use jc_core::kinds::{DataSourceSpec, DataSourceType, GtfsFeed, PipelineSpec};
 use serde_norway::{Mapping, Value};
 
 /// The GTFS-realtime descriptors the runner image carries, so no pipeline ships a copy.
@@ -30,7 +30,7 @@ const GTFS_MESSAGE: &str = "transit_realtime.FeedMessage";
 pub const ORG_DOMAIN_VAR: &str = "JC_ORG_DOMAIN";
 
 /// What the renderer needs beyond the connection itself.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct InputContext<'a> {
     /// The `DataSource` name, which seeds the environment variable names.
     pub source: &'a str,
@@ -38,6 +38,26 @@ pub struct InputContext<'a> {
     pub project: &'a str,
     /// The pipeline name, part of the MQTT client id so two streams never collide.
     pub pipeline: &'a str,
+    /// Optional pipeline specification to validate execution class against source.
+    pub pipeline_spec: Option<&'a PipelineSpec>,
+}
+
+impl<'a> InputContext<'a> {
+    /// Creates a new context with the given source, project, and pipeline names.
+    pub const fn new(source: &'a str, project: &'a str, pipeline: &'a str) -> Self {
+        Self {
+            source,
+            project,
+            pipeline,
+            pipeline_spec: None,
+        }
+    }
+
+    /// Attaches a pipeline spec for class compatibility validation.
+    pub const fn with_pipeline_spec(mut self, spec: &'a PipelineSpec) -> Self {
+        self.pipeline_spec = Some(spec);
+        self
+    }
 }
 
 /// Why a pipeline and a connection cannot be rendered together.
@@ -49,6 +69,9 @@ pub enum RenderError {
     /// The author wrote an input and the reference names another one (PL-39).
     #[error("bento.yaml already declares an input, and spec.source.dataSourceRef names another one; keep one of the two")]
     InputAlreadyDeclared,
+    /// The pipeline's operational class cannot execute the source (PL-04, PL-50).
+    #[error("pipeline class does not fit data source: {0}")]
+    Class(String),
     /// The text does not parse as YAML.
     #[error("bento.yaml does not parse: {0}")]
     Parse(String),
@@ -56,14 +79,29 @@ pub enum RenderError {
 
 /// The `input` block one connection becomes (PL-39).
 pub fn input_of(spec: &DataSourceSpec, context: &InputContext) -> Value {
-    let block = match spec.source_type {
-        DataSourceType::Mqtt => ("mqtt", mqtt(spec, context)),
-        DataSourceType::Http => ("http_client", http(spec, context)),
-        DataSourceType::WebSocket => ("websocket", websocket(spec)),
-        DataSourceType::GtfsRt => ("http_client", gtfs(spec)),
-    };
     let mut input = Mapping::new();
-    input.insert(key(block.0), Value::Mapping(block.1));
+    match &spec.source_type {
+        DataSourceType::Mqtt => {
+            input.insert(key("mqtt"), Value::Mapping(mqtt(spec, context)));
+        }
+        DataSourceType::Http => {
+            input.insert(key("http_client"), Value::Mapping(http(spec, context)));
+        }
+        DataSourceType::WebSocket => {
+            input.insert(key("websocket"), Value::Mapping(websocket(spec)));
+        }
+        DataSourceType::GtfsRt => {
+            input.insert(key("http_client"), Value::Mapping(gtfs(spec)));
+        }
+        DataSourceType::Runner(name) => {
+            let runner_val = spec
+                .input
+                .as_ref()
+                .and_then(|v| serde_norway::to_value(v).ok())
+                .unwrap_or_else(|| Value::Mapping(Mapping::new()));
+            input.insert(key(name), runner_val);
+        }
+    }
     Value::Mapping(input)
 }
 
@@ -97,6 +135,10 @@ pub fn render(
     spec: &DataSourceSpec,
     context: &InputContext,
 ) -> Result<String, RenderError> {
+    if let Some(pipeline) = context.pipeline_spec {
+        check_class(pipeline, spec).map_err(|e| RenderError::Class(e.to_string()))?;
+    }
+
     let parsed: Value = match bento_yaml.trim().is_empty() {
         true => Value::Mapping(Mapping::new()),
         false => {

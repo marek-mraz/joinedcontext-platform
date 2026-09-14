@@ -101,6 +101,9 @@
           ],
           "description": "The HTTP connection, present when `type` is `http`."
         },
+        "input": {
+          "description": "Verbatim input configuration document for runner-provided inputs (PL-50)."
+        },
         "mqtt": {
           "anyOf": [
             {
@@ -111,6 +114,13 @@
             }
           ],
           "description": "The MQTT connection, present when `type` is `mqtt`."
+        },
+        "secrets": {
+          "description": "Secret references for runner-provided inputs (PL-50, MF-35).",
+          "items": {
+            "$ref": "#/definitions/SecretRef"
+          },
+          "type": "array"
         },
         "tls": {
           "anyOf": [
@@ -149,37 +159,17 @@
       "type": "object"
     },
     "DataSourceType": {
-      "description": "Which kind of feed a [`DataSourceSpec`] connects to (MF-35).",
-      "oneOf": [
-        {
-          "description": "An MQTT broker the runner subscribes to.",
-          "enum": [
-            "mqtt"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "An HTTP resource the runner polls.",
-          "enum": [
-            "http"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "A WebSocket the runner keeps open.",
-          "enum": [
-            "websocket"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "A GTFS-realtime protobuf feed, polled over HTTP and decoded by the runner.",
-          "enum": [
-            "gtfs-rt"
-          ],
-          "type": "string"
-        }
-      ]
+      "description": "Which kind of feed a DataSource connects to: a typed connection or any runner input (MF-35, PL-50).",
+      "examples": [
+        "mqtt",
+        "http",
+        "websocket",
+        "gtfs-rt",
+        "kafka",
+        "csv",
+        "sql_select"
+      ],
+      "type": "string"
     },
     "GtfsFeed": {
       "description": "The three feeds GTFS-realtime defines.",

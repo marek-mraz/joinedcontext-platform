@@ -172,18 +172,20 @@ fn every_example_renders_the_input_the_reader_never_wrote() {
             source: &source.metadata.name,
             project: pipeline.metadata.namespace.as_deref().unwrap_or_default(),
             pipeline: &pipeline.metadata.name,
+            pipeline_spec: Some(&pipeline.spec),
         };
         let rendered =
             render(&authored, &source.spec, &context).unwrap_or_else(|e| panic!("{example}: {e}"));
         assert!(rendered.starts_with("input:"), "{example}:\n{rendered}");
 
-        let expected_input = match source.spec.source_type {
-            DataSourceType::Mqtt => "  mqtt:",
-            DataSourceType::WebSocket => "  websocket:",
-            DataSourceType::Http | DataSourceType::GtfsRt => "  http_client:",
+        let expected_input = match &source.spec.source_type {
+            DataSourceType::Mqtt => "  mqtt:".to_owned(),
+            DataSourceType::WebSocket => "  websocket:".to_owned(),
+            DataSourceType::Http | DataSourceType::GtfsRt => "  http_client:".to_owned(),
+            DataSourceType::Runner(name) => format!("  {name}:"),
         };
         assert!(
-            rendered.contains(expected_input),
+            rendered.contains(expected_input.as_str()),
             "{example} did not render {expected_input}:\n{rendered}"
         );
     }
@@ -203,6 +205,7 @@ fn the_gtfs_example_mirrors_the_decoder_the_reconciler_prepends() {
             source: &source.metadata.name,
             project: pipeline.metadata.namespace.as_deref().unwrap_or_default(),
             pipeline: &pipeline.metadata.name,
+            pipeline_spec: Some(&pipeline.spec),
         },
     )
     .expect("renders");
@@ -245,6 +248,7 @@ fn no_example_carries_a_credential() {
                 source: &source.metadata.name,
                 project: pipeline.metadata.namespace.as_deref().unwrap_or_default(),
                 pipeline: &pipeline.metadata.name,
+                pipeline_spec: Some(&pipeline.spec),
             },
         )
         .expect("renders");

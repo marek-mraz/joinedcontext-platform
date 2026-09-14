@@ -73,6 +73,14 @@ pub enum Error {
         /// Human-readable explanation.
         reason: &'static str,
     },
+    /// A field value failed validation with dynamic details.
+    #[error("invalid {field}: {reason}")]
+    Invalid {
+        /// Name of the field that failed validation.
+        field: String,
+        /// Human-readable explanation.
+        reason: String,
+    },
     /// The manifest apiVersion does not match joinedcontext.com/v1alpha1.
     #[error("apiVersion must be `joinedcontext.com/v1alpha1`, got `{0}`")]
     ApiVersion(String),
@@ -225,6 +233,7 @@ impl From<Error> for ProblemDetails {
         match err {
             Error::Urn { .. } => ProblemDetails::urn_scheme().with_detail(err.to_string()),
             Error::Name { .. }
+            | Error::Invalid { .. }
             | Error::ApiVersion(..)
             | Error::Kind { .. }
             | Error::Locale(..)
