@@ -424,16 +424,17 @@ impl ViewMapping {
         }
         translated.insert("type".to_owned(), Value::String(self.target_class.clone()));
 
+        let normalized = is_normalized(members);
         for slot in &self.slots {
             if let Derivation::Constant(value) = &slot.derivation {
-                translated.insert(slot.target.clone(), value.clone());
+                translated.insert(slot.target.clone(), produced(value.clone(), normalized));
                 continue;
             }
             if let Derivation::Expr(expression) = &slot.derivation {
                 // A computed slot reads the attributes the broker sent rather than one source
                 // attribute of its own; where it has no value it is left out (DM-51).
                 if let Some(value) = expression.evaluate(members) {
-                    translated.insert(slot.target.clone(), value);
+                    translated.insert(slot.target.clone(), produced(value, normalized));
                 }
                 continue;
             }
@@ -604,6 +605,56 @@ fn forward(derivation: &Derivation, attribute: &Value) -> Value {
 
 /// Applies `transform` to an attribute's value, whatever NGSI-LD shape it is in.
 ///
+/// The attribute types of NGSI-LD's normalized form (CIM 009 clause 4.5).
+const ATTRIBUTE_TYPES: [&str; 8] = [
+    "Property",
+    "GeoProperty",
+    "Relationship",
+    "LanguageProperty",
+    "VocabProperty",
+    "JsonProperty",
+    "ListProperty",
+    "ListRelationship",
+];
+
+/// Whether the broker answered in normalized form, judged from the attributes it sent.
+///
+/// An entity with no attribute to judge by is taken as normalized, the representation a
+/// request gets unless it asks for `keyValues`.
+fn is_normalized(members: &Map<String, Value>) -> bool {
+    let mut attributes = members
+        .iter()
+        .filter(|(name, _)| {
+            let name = name.as_str();
+            name != "type"
+                && name != "@type"
+                && !STRUCTURAL.contains(&name)
+                && !SYSTEM.contains(&name)
+        })
+        .peekable();
+    if attributes.peek().is_none() {
+        return true;
+    }
+    attributes.any(|(_, value)| {
+        value
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| ATTRIBUTE_TYPES.contains(&kind))
+    })
+}
+
+/// A value a view produces itself (a constant, a computed slot) in the entity's own form.
+///
+/// A mapping cannot say that a produced value is a geometry or a relationship, so in normalized
+/// form it is a `Property`; in key-value form it is the value itself (T-0473).
+fn produced(value: Value, normalized: bool) -> Value {
+    if normalized {
+        serde_json::json!({ "type": "Property", "value": value })
+    } else {
+        value
+    }
+}
+
 /// A normalized attribute carries its value under `value` or `object`; a key-value one is the
 /// value itself. Both forms reach a view, because the representation is the caller's choice.
 fn map_value(attribute: &Value, transform: impl Fn(&Value) -> Value) -> Value {
@@ -868,4 +919,39 @@ pub fn read_only() -> ProblemDetails {
          is invertible per attribute, not per entity, so a write has no source entity to \
          reconstruct",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_normalized, produced};
+    use serde_json::{json, Value};
+
+    fn members(entity: Value) -> serde_json::Map<String, Value> {
+        entity.as_object().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn a_produced_value_takes_the_form_of_the_entity_it_joins() {
+        let normalized = members(json!({
+            "id": "urn:x", "type": "T", "pm25": { "type": "Property", "value": 1 }
+        }));
+        let key_values = members(json!({
+            "id": "urn:x", "type": "T", "pm25": 1,
+            "location": { "type": "Point", "coordinates": [17.0, 48.0] }
+        }));
+        assert!(is_normalized(&normalized));
+        assert!(
+            !is_normalized(&key_values),
+            "a GeoJSON `type` is not an attribute type"
+        );
+        assert!(
+            is_normalized(&members(json!({ "id": "urn:x", "type": "T" }))),
+            "no attribute to judge by: the default representation"
+        );
+        assert_eq!(
+            produced(json!("bb"), true),
+            json!({ "type": "Property", "value": "bb" })
+        );
+        assert_eq!(produced(json!("bb"), false), json!("bb"));
+    }
 }

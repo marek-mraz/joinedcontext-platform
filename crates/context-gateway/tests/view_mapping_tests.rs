@@ -216,12 +216,25 @@ async fn an_answer_comes_back_in_the_target_model() {
         "a value mapping"
     );
     assert_eq!(entity["stationCount"]["value"], json!(4), "a cast");
-    assert_eq!(entity["dataProvider"], json!("bb"), "a constant");
+    assert_eq!(
+        entity["dataProvider"],
+        json!({ "type": "Property", "value": "bb" }),
+        "a constant, in the normalized form the rest of the entity is in (T-0473)"
+    );
     assert_eq!(
         entity["label"],
-        json!("Senzor Fončorda (vysoka)"),
+        json!({ "type": "Property", "value": "Senzor Fončorda (vysoka)" }),
         "a computed slot, evaluated from the source attributes its expression reads (DM-51)"
     );
+    for (name, attribute) in entity.as_object().expect("an entity") {
+        if ["id", "type", "@context", "createdAt", "modifiedAt"].contains(&name.as_str()) {
+            continue;
+        }
+        assert!(
+            attribute.get("type").is_some() && attribute.get("value").is_some(),
+            "every attribute of a normalized answer has a type and a value: {name} = {attribute}"
+        );
+    }
 
     assert_eq!(entity["id"], json!(STATION), "still an NGSI-LD entity");
     assert_eq!(
@@ -519,13 +532,14 @@ fn every_form_of_the_expression_subset_evaluates() {
     mapping.translate_entity(&mut entity);
 
     // Two whole numbers stay whole; a division answers a fraction, as Python and Bloblang do.
-    assert_eq!(entity["sum"], json!(7));
-    assert_eq!(entity["half"], json!(2.0));
-    assert_eq!(entity["negated"], json!(-3));
-    assert_eq!(entity["joined"], json!("sensor!"));
-    assert_eq!(entity["over"], json!(true));
-    assert_eq!(entity["both"], json!(true));
-    assert_eq!(entity["either"], json!(false));
+    // The entity is normalized, so each produced value arrives as a Property (T-0473).
+    assert_eq!(entity["sum"]["value"], json!(7));
+    assert_eq!(entity["half"]["value"], json!(2.0));
+    assert_eq!(entity["negated"]["value"], json!(-3));
+    assert_eq!(entity["joined"]["value"], json!("sensor!"));
+    assert_eq!(entity["over"]["value"], json!(true));
+    assert_eq!(entity["both"]["value"], json!(true));
+    assert_eq!(entity["either"]["value"], json!(false));
 }
 
 /// A view must not invent a value. An attribute the broker did not send, and one whose
@@ -580,7 +594,7 @@ fn a_computed_slot_with_nothing_to_compute_from_is_left_out() {
         );
     }
     assert_eq!(
-        entity["present"],
+        entity["present"]["value"],
         json!(40),
         "the rest of the view still answers"
     );

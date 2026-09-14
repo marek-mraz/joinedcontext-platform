@@ -190,7 +190,7 @@ impl Gateway {
     }
 
     /// The gateway's public base URL, or the empty string when none is configured.
-    fn base_url(&self) -> &str {
+    pub(crate) fn base_url(&self) -> &str {
         self.public_url.as_deref().unwrap_or_default()
     }
 

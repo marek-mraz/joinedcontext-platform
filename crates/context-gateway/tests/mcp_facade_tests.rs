@@ -555,3 +555,80 @@ async fn the_describing_tools_answer_from_the_endpoint_and_never_from_the_broker
         "neither tool asks the broker anything"
     );
 }
+
+/// T-0425, EP-60: `describe_access` speaks the three languages the HTTP access surface speaks,
+/// and says the same thing in each; a word it does not know is refused, never defaulted.
+#[tokio::test]
+async fn describe_access_answers_each_format_with_the_document_the_http_surface_serves() {
+    let realm = common::Realm::new();
+    let (broker, _log) = stub_broker().await;
+    let call = |id: u32, arguments: Value| {
+        json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
+            "name": "describe_access", "arguments": arguments,
+        }})
+    };
+    let over_http = |accept: &'static str| {
+        let app = app(&broker, &realm);
+        async move {
+            let request = Request::builder()
+                .uri(format!("/api/endpoint/{SLUG}/access"))
+                .header("accept", accept)
+                .body(Body::empty())
+                .expect("a request");
+            send(app, request).await.1
+        }
+    };
+
+    for (id, format, accept) in [
+        (21, "permissions", "application/json"),
+        (22, "odrl", "application/odrl+json"),
+        (
+            23,
+            "grant-ast",
+            "application/vnd.joinedcontext.grant-ast+json",
+        ),
+    ] {
+        let (_, answer) = send(
+            app(&broker, &realm),
+            message(SLUG, None, call(id, json!({ "format": format }))),
+        )
+        .await;
+        assert_eq!(answer["result"]["isError"], false, "{format}: {answer}");
+        assert_eq!(
+            answer["result"]["structuredContent"],
+            over_http(accept).await,
+            "{format} over MCP is the {accept} document"
+        );
+    }
+
+    let (_, unknown) = send(
+        app(&broker, &realm),
+        message(SLUG, None, call(24, json!({ "format": "xacml" }))),
+    )
+    .await;
+    assert_eq!(
+        unknown["result"]["isError"], true,
+        "an unknown format is refused: {unknown}"
+    );
+
+    let (_, resource) = send(
+        app(&broker, &realm),
+        message(
+            SLUG,
+            None,
+            json!({ "jsonrpc": "2.0", "id": 25, "method": "resources/read", "params": {
+                "uri": format!("access://{SLUG}?format=odrl"),
+            }}),
+        ),
+    )
+    .await;
+    let text = resource["result"]["contents"][0]["text"]
+        .as_str()
+        .map(|t| serde_json::from_str::<Value>(t).expect("json text"))
+        .unwrap_or_else(|| resource["result"]["contents"][0].clone());
+    assert_eq!(
+        text,
+        over_http("application/odrl+json").await,
+        "the resource takes the same format"
+    );
+}

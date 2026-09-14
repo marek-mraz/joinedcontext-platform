@@ -214,9 +214,19 @@ const TOOLS: &[Tool] = &[
         name: "describe_access",
         operations: &[],
         description:
-            "The caller's effective grants here: operations, attributes, residual constraints.",
+            "The caller's effective grants here: operations, attributes, residual constraints. \
+             `format` picks the language: `permissions` (AuthZEN, the default), `odrl` (ODRL 2.2) \
+             or `grant-ast` (UCAST); the grants are the same in all three (EP-60).",
         read_only: true,
-        schema: || json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "format": { "type": "string", "enum": ACCESS_FORMATS },
+                },
+                "additionalProperties": false,
+            })
+        },
     },
     Tool {
         name: "describe_schema",
@@ -513,8 +523,13 @@ async fn call_tool(
     // projections the access and schema surfaces serve (EP-47, EP-55).
     match tool.name {
         "describe_access" => {
-            let permissions = access::permissions(&subject, &endpoint, crate::pdp::now());
-            return result(id, answered(&permissions));
+            // The schema's enum already refused any other word (AG-31).
+            let format = arguments
+                .get("format")
+                .and_then(Value::as_str)
+                .unwrap_or("permissions");
+            let document = access_document(&gateway, &subject, &endpoint, format);
+            return result(id, answered(&document));
         }
         "describe_schema" => {
             return match describe_schema(&endpoint, &subject, &arguments) {
@@ -628,9 +643,9 @@ async fn read_resource(
     // serve; the other two are ordinary NGSI-LD reads.
     let arguments: Map<String, Value> = Map::new();
     let (tool, call): (&str, Map<String, Value>) = match parse_resource(&endpoint, uri) {
-        Some(Resource::Access) => {
-            let permissions = access::permissions(&subject, &endpoint, crate::pdp::now());
-            return result(id, contents(uri, &permissions));
+        Some(Resource::Access(format)) => {
+            let document = access_document(&gateway, &subject, &endpoint, &format);
+            return result(id, contents(uri, &document));
         }
         Some(Resource::Schema { major, format }) => {
             let mut asked = arguments;
@@ -699,8 +714,8 @@ enum Resource {
     Type(String),
     /// `ngsi-ld://{space}/entities/{id}`
     Entity(String),
-    /// `access://{endpointSlug}`
-    Access,
+    /// `access://{endpointSlug}`, optionally `?format=odrl|grant-ast|permissions`
+    Access(String),
     /// `schema://{endpointSlug}/v{major}/{artifact}`
     Schema { major: u64, format: String },
 }
@@ -723,8 +738,13 @@ fn parse_resource(endpoint: &Endpoint, uri: &str) -> Option<Resource> {
             _ => None,
         };
     }
-    if let Some(slug) = uri.strip_prefix("access://") {
-        return (slug == endpoint.slug).then_some(Resource::Access);
+    if let Some(rest) = uri.strip_prefix("access://") {
+        let (slug, format) = match rest.split_once("?format=") {
+            Some((slug, format)) => (slug, format),
+            None => (rest, "permissions"),
+        };
+        return (slug == endpoint.slug && ACCESS_FORMATS.contains(&format))
+            .then(|| Resource::Access(format.to_owned()));
     }
     if let Some(rest) = uri.strip_prefix("schema://") {
         let (slug, path) = rest.split_once('/')?;
@@ -739,6 +759,31 @@ fn parse_resource(endpoint: &Endpoint, uri: &str) -> Option<Resource> {
         });
     }
     None
+}
+
+/// The words `describe_access` and the `access://` resource answer in (EP-56, EP-57, EP-58).
+const ACCESS_FORMATS: [&str; 3] = ["permissions", "odrl", "grant-ast"];
+
+/// The caller's grants in one of [`ACCESS_FORMATS`], computed by the very functions the HTTP
+/// access surface uses, so MCP and HTTP answer the same document (EP-60, T-0425).
+fn access_document(
+    gateway: &Gateway,
+    subject: &Subject,
+    endpoint: &Endpoint,
+    format: &str,
+) -> Value {
+    let now = crate::pdp::now();
+    match format {
+        "odrl" => crate::handlers::access_odrl::policy(
+            subject,
+            endpoint,
+            now,
+            gateway.base_url(),
+            crate::app::sha256_hex,
+        ),
+        "grant-ast" => crate::handlers::access_ucast::grant_ast(subject, endpoint, now),
+        _ => access::permissions(subject, endpoint, now),
+    }
 }
 
 /// One resource, in the envelope `resources/read` answers with.
