@@ -13,7 +13,7 @@
 
 use crate::envelope::{Kind, ObjectMeta, Scope};
 use crate::error::{Error, Result};
-use crate::i18n::MultiLanguageMap;
+use crate::i18n::Text;
 use crate::names;
 use crate::registry;
 use schemars::JsonSchema;
@@ -45,11 +45,12 @@ pub struct UiSchemaSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct UiSchemaGroup {
-    /// The legend, as a language map like every other human-facing string in a manifest.
-    pub title: MultiLanguageMap,
+    /// The legend: one plain string, like every other human-facing string in a manifest
+    /// (UI-50); the legacy language map still reads.
+    pub title: Text,
     /// Optional sentence under the legend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<MultiLanguageMap>,
+    pub description: Option<Text>,
     /// The fields this group holds, in the order it holds them.
     pub fields: Vec<String>,
 }
@@ -63,7 +64,7 @@ pub struct UiSchemaField {
     pub widget: Option<String>,
     /// Help text shown with the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub help: Option<MultiLanguageMap>,
+    pub help: Option<Text>,
     /// Placeholder text of an empty input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,

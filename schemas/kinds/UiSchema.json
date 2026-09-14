@@ -223,7 +223,7 @@
         "help": {
           "anyOf": [
             {
-              "$ref": "#/definitions/MultiLanguageMap"
+              "$ref": "#/definitions/Text"
             },
             {
               "type": "null"
@@ -262,7 +262,7 @@
         "description": {
           "anyOf": [
             {
-              "$ref": "#/definitions/MultiLanguageMap"
+              "$ref": "#/definitions/Text"
             },
             {
               "type": "null"
@@ -280,10 +280,10 @@
         "title": {
           "allOf": [
             {
-              "$ref": "#/definitions/MultiLanguageMap"
+              "$ref": "#/definitions/Text"
             }
           ],
-          "description": "The legend, as a language map like every other human-facing string in a manifest."
+          "description": "The legend: one plain string, like every other human-facing string in a manifest (UI-50); the legacy language map still reads."
         }
       },
       "required": [

@@ -20,16 +20,16 @@ spec:
   for: Endpoint
   order: [name, slug, audience, enabledRepresentations, caching]
   groups:
-    - title: { sk: "Základ", en: "Basics" }
+    - title: Basics
       fields: [name, slug]
-    - title: { sk: "Prístup", en: "Access" }
-      description: { sk: "Kto smie čítať", en: "Who may read" }
+    - title: Access
+      description: Who may read
       fields: [audience, enabledRepresentations]
   fields:
     slug:
       widget: text
-      help: { sk: "Neuhádnuteľná adresa endpointu", en: "The unguessable address" }
-      placeholder: "26 znakov"
+      help: The unguessable address
+      placeholder: "26 characters"
       columns: 6
       readOnly: false
       advanced: false
@@ -62,11 +62,30 @@ fn the_documented_example_parses_and_validates() {
     assert!(manifest.spec.groups[0].description.is_none());
     let slug = &manifest.spec.fields["slug"];
     assert_eq!(slug.widget.as_deref(), Some("text"));
-    assert_eq!(slug.placeholder.as_deref(), Some("26 znakov"));
+    assert_eq!(slug.placeholder.as_deref(), Some("26 characters"));
     assert_eq!(slug.columns, Some(6));
     // CC-29: the Git mechanics are declared like any other field and simply not on the
     // default form.
     assert_eq!(manifest.spec.fields["commitMessage"].advanced, Some(true));
+}
+
+/// UI-50: a legend or help written as the legacy language map still reads, and resolves to
+/// the string a plain manifest would have written.
+#[test]
+fn a_legacy_language_map_label_still_reads() {
+    let manifest = parse(&documented_with(
+        "  for: Endpoint\n  groups:\n    - title: { sk: Základ, en: Basics }\n      fields: [name]\n  \
+         fields:\n    slug:\n      help: { sk: Adresa }\n",
+    ))
+    .expect("the legacy map form reads through v0.9");
+    assert_eq!(manifest.spec.groups[0].title.resolve(&[], "en"), "Basics");
+    assert_eq!(
+        manifest.spec.fields["slug"]
+            .help
+            .as_ref()
+            .map(|help| help.resolve(&[], "en")),
+        Some("Adresa")
+    );
 }
 
 #[test]
