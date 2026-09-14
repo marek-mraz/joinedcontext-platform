@@ -107,6 +107,17 @@
             }
           ],
           "description": "Which protocol the proxy speaks to the model provider."
+        },
+        "reasoningEffort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How hard the model thinks on every call of a run; absent, no reasoning setting is sent (AG-72)."
         }
       },
       "required": [
@@ -544,6 +555,32 @@
           "description": "Reconciliation error.",
           "enum": [
             "Error"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ReasoningEffort": {
+      "description": "The provider's reasoning setting a run's model calls carry (AG-72).",
+      "oneOf": [
+        {
+          "description": "A short think before each answer.",
+          "enum": [
+            "low"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The setting the reference `app-builder` profile uses (SDK-26).",
+          "enum": [
+            "medium"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The longest think the provider offers for the setting.",
+          "enum": [
+            "high"
           ],
           "type": "string"
         }

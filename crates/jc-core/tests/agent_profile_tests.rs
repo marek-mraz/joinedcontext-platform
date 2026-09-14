@@ -1,7 +1,7 @@
 //! Tests for `kind: AgentProfile` (AG-26, AG-47..AG-50).
 
 use jc_core::kinds::agent_profile::{
-    AgentProfileRole, AgentTool, EndpointVerb, KindVerb, ModelProvider,
+    AgentProfileRole, AgentTool, EndpointVerb, KindVerb, ModelProvider, ReasoningEffort,
 };
 use jc_core::kinds::AgentProfile;
 
@@ -219,4 +219,34 @@ fn an_access_block_outside_mf_40_is_refused() {
             "{why} must not parse"
         );
     }
+}
+
+#[test]
+fn reasoning_effort_is_optional_and_one_of_three() {
+    let profile = AgentProfile::from_yaml(VALID_YAML).expect("valid yaml");
+    assert_eq!(profile.spec.model.reasoning_effort, None);
+    assert!(!profile.to_yaml().unwrap().contains("reasoningEffort"));
+
+    for (value, effort) in [
+        ("low", ReasoningEffort::Low),
+        ("medium", ReasoningEffort::Medium),
+        ("high", ReasoningEffort::High),
+    ] {
+        let yaml = VALID_YAML.replace(
+            "maxTokensPerRun: 2000000",
+            &format!("maxTokensPerRun: 2000000\n    reasoningEffort: {value}"),
+        );
+        let profile = AgentProfile::from_yaml(&yaml).expect("valid effort");
+        profile.validate().expect("valid profile");
+        assert_eq!(profile.spec.model.reasoning_effort, Some(effort));
+        let again = AgentProfile::from_yaml(&profile.to_yaml().unwrap()).unwrap();
+        assert_eq!(again, profile);
+    }
+
+    let yaml = VALID_YAML.replace(
+        "maxTokensPerRun: 2000000",
+        "maxTokensPerRun: 2000000\n    reasoningEffort: extreme",
+    );
+    let err = AgentProfile::from_yaml(&yaml).unwrap_err().to_string();
+    assert!(err.contains("reasoningEffort"), "{err}");
 }

@@ -24,6 +24,9 @@ pub struct RunContext {
     pub max_response_bytes: u64,
     pub created_by: String,
     pub model_name: String,
+    /// The profile's `model.reasoningEffort`, absent when it names none (AG-72).
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 /// Run records the proxy has fetched, with the moment each was fetched.

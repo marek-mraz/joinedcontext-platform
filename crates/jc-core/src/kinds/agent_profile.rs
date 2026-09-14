@@ -62,6 +62,22 @@ pub struct AgentModel {
     pub name: String,
     /// Tokens one run may consume before the proxy ends it (AG-41).
     pub max_tokens_per_run: u64,
+    /// How hard the model thinks on every call of a run; absent, no reasoning setting is sent
+    /// (AG-72).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+/// The provider's reasoning setting a run's model calls carry (AG-72).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    /// A short think before each answer.
+    Low,
+    /// The setting the reference `app-builder` profile uses (SDK-26).
+    Medium,
+    /// The longest think the provider offers for the setting.
+    High,
 }
 
 /// Computational, execution, and rate bounds per run (AG-41).

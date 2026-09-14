@@ -3,12 +3,48 @@
 use crate::audit::{log_request, AuditEntry};
 use crate::auth::authenticate;
 use crate::ProxyState;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use http_body_util::BodyExt;
+use serde_json::{json, Value};
 use std::time::Instant;
+
+/// The body with the run's reasoning setting in the shape the endpoint reads (AG-72): OpenRouter's
+/// `reasoning.effort` on chat completions, a thinking budget on Anthropic messages, whose
+/// `max_tokens` grows by the budget so the answer keeps the room it asked for. A body that
+/// already carries a setting, is not a JSON object, or an effort outside the three is sent as is.
+fn with_reasoning(body: &Bytes, rest: &str, effort: &str) -> Bytes {
+    let budget = match effort {
+        "low" => 2048,
+        "medium" => 8192,
+        "high" => 24576,
+        _ => return body.clone(),
+    };
+    let Ok(Value::Object(mut map)) = serde_json::from_slice::<Value>(body) else {
+        return body.clone();
+    };
+    if rest.ends_with("messages") {
+        if map.contains_key("thinking") {
+            return body.clone();
+        }
+        let max_tokens = map.get("max_tokens").and_then(Value::as_u64).unwrap_or(0);
+        map.insert("max_tokens".into(), json!(max_tokens + budget));
+        map.insert(
+            "thinking".into(),
+            json!({ "type": "enabled", "budget_tokens": budget }),
+        );
+    } else {
+        if map.contains_key("reasoning") || map.contains_key("reasoning_effort") {
+            return body.clone();
+        }
+        map.insert("reasoning".into(), json!({ "effort": effort }));
+    }
+    serde_json::to_vec(&map)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| body.clone())
+}
 
 pub async fn handler(
     State(state): State<ProxyState>,
@@ -60,6 +96,11 @@ pub async fn handler(
         )
             .into_response();
     }
+
+    let body_bytes = match run.reasoning_effort.as_deref() {
+        Some(effort) => with_reasoning(&body_bytes, &rest, effort),
+        None => body_bytes,
+    };
 
     let target_url = format!(
         "{}/{}",
@@ -149,4 +190,46 @@ pub async fn handler(
         .header("Content-Type", "application/json")
         .body(Body::from(resp_bytes))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sent(body: &str, rest: &str, effort: &str) -> Value {
+        serde_json::from_slice(&with_reasoning(&Bytes::from(body.to_owned()), rest, effort))
+            .unwrap()
+    }
+
+    #[test]
+    fn chat_completions_carry_the_effort_and_messages_a_thinking_budget() {
+        let chat = sent(
+            r#"{"model":"m","max_tokens":100}"#,
+            "v1/chat/completions",
+            "medium",
+        );
+        assert_eq!(chat["reasoning"], json!({ "effort": "medium" }));
+        assert_eq!(chat["max_tokens"], 100);
+
+        let messages = sent(r#"{"model":"m","max_tokens":100}"#, "v1/messages", "low");
+        assert_eq!(
+            messages["thinking"],
+            json!({ "type": "enabled", "budget_tokens": 2048 })
+        );
+        assert_eq!(messages["max_tokens"], 2148);
+    }
+
+    #[test]
+    fn a_setting_already_in_the_body_or_an_unknown_effort_is_left_alone() {
+        let own = r#"{"reasoning":{"effort":"high"}}"#;
+        assert_eq!(
+            sent(own, "chat/completions", "low"),
+            serde_json::from_str::<Value>(own).unwrap()
+        );
+        assert!(sent("{}", "chat/completions", "extreme")
+            .get("reasoning")
+            .is_none());
+        let not_json = Bytes::from_static(b"not json");
+        assert_eq!(with_reasoning(&not_json, "messages", "high"), not_json);
+    }
 }

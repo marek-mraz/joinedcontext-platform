@@ -36,6 +36,7 @@ fn sample_run(allows_write: bool, status: &str) -> RunContext {
         max_response_bytes: 1048576,
         created_by: "demo.steward@hel.fi".to_string(),
         model_name: "claude-3-7".to_string(),
+        reasoning_effort: None,
     }
 }
 
@@ -44,10 +45,16 @@ fn test_state(run: RunContext) -> Arc<ProxyState> {
 }
 
 fn test_state_with_gateway(run: RunContext, gateway: &str) -> Arc<ProxyState> {
+    test_state_with_upstreams(run, gateway, "https://api.anthropic.com")
+}
+
+fn test_state_with_upstreams(run: RunContext, gateway: &str, model: &str) -> Arc<ProxyState> {
     let gateway = gateway.to_string();
+    let model = model.to_string();
     let config = Config::from_lookup(|k| match k {
         "JC_PROXY_BIND" => Some("127.0.0.1:0".to_string()),
         "JC_GATEWAY_BASE" => Some(gateway.clone()),
+        "JC_MODEL_BASE" => Some(model.clone()),
         "JC_MODEL_KEY" => Some("mock-model-key".to_string()),
         "JC_FORGE_TOKEN" => Some("mock-forge-token".to_string()),
         _ => None,
@@ -298,6 +305,48 @@ async fn a_data_read_carries_its_query_string_to_the_gateway() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     gateway.verify().await;
+}
+
+/// AG-72: the profile's reasoning effort reaches the model provider on a call whose body names
+/// none, beside everything the caller sent.
+#[tokio::test]
+async fn a_model_call_carries_the_profiles_reasoning_effort_upstream() {
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_json(serde_json::json!({
+            "model": "google/gemini-3.8-flash",
+            "messages": [],
+            "reasoning": { "effort": "medium" },
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&provider)
+        .await;
+
+    let mut run = sample_run(false, "building");
+    run.reasoning_effort = Some("medium".to_string());
+    let app = router(test_state_with_upstreams(
+        run,
+        "http://context-gateway:8080",
+        &provider.uri(),
+    ));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/v1/chat/completions")
+        .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+        .header("x-jc-ticket", "secret-ticket-123")
+        .body(Body::from(
+            r#"{"model":"google/gemini-3.8-flash","messages":[]}"#,
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    provider.verify().await;
 }
 
 #[tokio::test]
