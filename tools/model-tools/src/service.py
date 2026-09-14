@@ -43,6 +43,7 @@ from gen_docs import compile_docs
 from gen_example import compile_example
 from gen_json_schema import compile_schema
 from gen_rdf_artifacts import compile_owl, compile_shacl
+from gen_typescript import compile_typescript
 from infer_schema import MAX_SAMPLE_BYTES, SampleError, infer
 from import_sdm import (
     RAW_BASE,
@@ -79,6 +80,7 @@ CATALOGUE_TTL_SECONDS = 24 * 60 * 60
 #: Renaming a key here is a silent empty preview in the editor, which `test_service.py` guards.
 #: The first four are the set DM-02 commits beside the source, in that order; SHACL and OWL
 #: are DM-44's artifact-store set and are rendered in the same run so they cannot disagree.
+#: `typescript` is the `jc-types.ts` a generated application compiles against (SDK-10).
 RENDERERS: tuple[tuple[str, Callable[[str], Any]], ...] = (
     ("jsonSchema", compile_schema),
     ("context", compile_context),
@@ -86,6 +88,7 @@ RENDERERS: tuple[tuple[str, Callable[[str], Any]], ...] = (
     ("example", compile_example),
     ("shacl", compile_shacl),
     ("owl", compile_owl),
+    ("typescript", compile_typescript),
 )
 
 

@@ -33,6 +33,7 @@ ARTIFACT_FIELDS = {
     "example",
     "shacl",
     "owl",
+    "typescript",
     "generatorVersion",
     "errors",
 }
@@ -121,6 +122,7 @@ def test_a_model_that_compiles_answers_every_artifact(senzor):
     assert "temperature" in body["context"]["@context"]
     assert "http://www.w3.org/ns/shacl#" in body["shacl"]
     assert "owl:Ontology" in body["owl"] or "owl#Ontology" in body["owl"]
+    assert 'type: "AirQualityObserved";' in body["typescript"]
     assert body["generatorVersion"].startswith("linkml-")
 
 
