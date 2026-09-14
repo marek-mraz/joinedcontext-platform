@@ -138,3 +138,40 @@ impl schemars::JsonSchema for MultiLanguageMap {
         schemars::schema::Schema::Object(schema)
     }
 }
+
+/// A human label or description (UI-50): one plain string in the author's language. The legacy
+/// language map is still read, through release `v0.9`, and resolves to one string.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(untagged)]
+pub enum Text {
+    /// The form every new manifest writes.
+    Plain(String),
+    /// The legacy `{locale: text}` map.
+    Localized(MultiLanguageMap),
+}
+
+impl Text {
+    /// The text for `locale` in the legacy map; a plain string belongs to no locale.
+    pub fn get(&self, locale: &str) -> Option<&str> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Localized(map) => map.get(locale),
+        }
+    }
+
+    /// The one string to show: the plain text, or the legacy map resolved as PF-28 orders it.
+    pub fn resolve(&self, preferred: &[String], fallback: &str) -> &str {
+        match self {
+            Self::Plain(text) => text,
+            Self::Localized(map) => map.resolve(preferred, fallback),
+        }
+    }
+}
+
+impl From<&str> for Text {
+    fn from(text: &str) -> Self {
+        Self::Plain(text.to_owned())
+    }
+}

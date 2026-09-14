@@ -258,13 +258,13 @@
         "description": {
           "anyOf": [
             {
-              "$ref": "#/definitions/MultiLanguageMap"
+              "$ref": "#/definitions/Text"
             },
             {
               "type": "null"
             }
           ],
-          "description": "Human-readable multilingual description (PF-24)."
+          "description": "Human-readable description: one string, or the legacy map per locale (UI-50, PF-24)."
         },
         "labels": {
           "additionalProperties": {
@@ -287,13 +287,13 @@
         "title": {
           "anyOf": [
             {
-              "$ref": "#/definitions/MultiLanguageMap"
+              "$ref": "#/definitions/Text"
             },
             {
               "type": "null"
             }
           ],
-          "description": "Human-readable multilingual title (PF-24)."
+          "description": "Human-readable title: one string, or the legacy map per locale (UI-50, PF-24)."
         }
       },
       "required": [
@@ -411,6 +411,23 @@
         }
       },
       "type": "object"
+    },
+    "Text": {
+      "anyOf": [
+        {
+          "description": "The form every new manifest writes.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MultiLanguageMap"
+            }
+          ],
+          "description": "The legacy `{locale: text}` map."
+        }
+      ],
+      "description": "A human label or description (UI-50): one plain string in the author's language. The legacy language map is still read, through release `v0.9`, and resolves to one string."
     },
     "TypedRef": {
       "additionalProperties": false,

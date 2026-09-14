@@ -1,7 +1,7 @@
 //! Kubernetes-style resource envelope, metadata, and status types (MF-01..MF-08).
 
 use crate::error::{Error, Result};
-use crate::i18n::MultiLanguageMap;
+use crate::i18n::Text;
 use crate::names;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -247,12 +247,12 @@ pub struct ObjectMeta {
     /// Key-value annotations for provenance and ownership (MF-08).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub annotations: BTreeMap<String, String>,
-    /// Human-readable multilingual title (PF-24).
+    /// Human-readable title: one string, or the legacy map per locale (UI-50, PF-24).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<MultiLanguageMap>,
-    /// Human-readable multilingual description (PF-24).
+    pub title: Option<Text>,
+    /// Human-readable description: one string, or the legacy map per locale (UI-50, PF-24).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<MultiLanguageMap>,
+    pub description: Option<Text>,
 }
 
 impl ObjectMeta {

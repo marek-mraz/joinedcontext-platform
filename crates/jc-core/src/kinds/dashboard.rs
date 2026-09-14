@@ -8,7 +8,7 @@
 
 use crate::envelope::{Kind, ObjectMeta, Scope};
 use crate::error::{Error, Result};
-use crate::i18n::MultiLanguageMap;
+use crate::i18n::Text;
 use crate::names;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -67,8 +67,8 @@ pub struct Page {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DashboardSpec {
-    /// The title per locale (PF-24).
-    pub title: MultiLanguageMap,
+    /// The title (UI-50): one string, or the legacy map per locale (PF-24).
+    pub title: Text,
     /// Who may open it.
     #[serde(default)]
     pub visibility: DashboardVisibility,

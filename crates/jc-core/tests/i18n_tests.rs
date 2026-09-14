@@ -103,3 +103,34 @@ fn iteration_is_sorted_and_get_is_exact() {
     assert_eq!(m.get("EN"), None);
     assert_eq!(m.get("fr"), None);
 }
+
+/// UI-50: a title is one plain string; the legacy map is still read and resolves to one string.
+#[test]
+fn a_title_is_a_plain_string_and_the_legacy_map_still_reads() {
+    use jc_core::envelope::ObjectMeta;
+    use jc_core::Text;
+
+    let plain: ObjectMeta =
+        serde_json::from_str(r#"{"name":"air","title":"Air quality","description":"Stations"}"#)
+            .expect("a plain title");
+    let title = plain.title.as_ref().expect("title");
+    assert_eq!(title, &Text::from("Air quality"));
+    assert_eq!(title.resolve(&["sk".to_owned()], "en"), "Air quality");
+    assert_eq!(title.get("en"), None);
+    assert_eq!(
+        serde_json::to_value(&plain).expect("serialize")["title"],
+        serde_json::json!("Air quality")
+    );
+
+    let legacy: ObjectMeta =
+        serde_json::from_str(r#"{"name":"air","title":{"sk":"Ovzdušie","en":"Air quality"}}"#)
+            .expect("a legacy map title");
+    let title = legacy.title.as_ref().expect("title");
+    assert_eq!(title.get("sk"), Some("Ovzdušie"));
+    assert_eq!(title.resolve(&["de".to_owned()], "en"), "Air quality");
+
+    // A map with a key that is no locale is neither form.
+    assert!(
+        serde_json::from_str::<ObjectMeta>(r#"{"name":"air","title":{"english":"x"}}"#).is_err()
+    );
+}

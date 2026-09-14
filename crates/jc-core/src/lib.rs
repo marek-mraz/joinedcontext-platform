@@ -22,7 +22,7 @@ pub use envelope::{
     Ref, ResourceEnvelope, Scope, SecretRef, Status, TypedRef, API_VERSION,
 };
 pub use error::{Error, ProblemDetails, Result, UrnError, PROBLEM_JSON, PROBLEM_TYPE_BASE};
-pub use i18n::MultiLanguageMap;
+pub use i18n::{MultiLanguageMap, Text};
 pub use kinds::{
     AgentEgress, AgentLimits, AgentModel, AgentProfile, AgentProfileRole, AgentProfileSpec,
     AgentRuntime, AgentTool, AgentWorkspace, AgreementConstraints, AgreementRole, AgreementState,
