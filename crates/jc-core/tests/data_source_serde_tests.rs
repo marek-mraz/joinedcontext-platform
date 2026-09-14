@@ -438,6 +438,56 @@ fn runner_input_reading_the_runners_own_environment_is_refused() {
         .expect("a declared secret may appear outside its field");
 }
 
+fn sql_select(dsn: &str) -> DataSource {
+    DataSource::from_yaml(&format!(
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: counters-db
+  namespace: bb-ovzdusie
+spec:
+  type: sql_select
+  input:
+    driver: postgres
+    dsn: "{dsn}"
+    table: counters
+    columns: ["*"]
+  secrets:
+    - name: counters-db
+      key: password
+      envVar: DS_COUNTERS_DB_PASSWORD
+"#
+    ))
+    .expect("parses")
+}
+
+#[test]
+fn a_literal_password_inside_a_connection_string_is_refused() {
+    for dsn in [
+        "postgres://jc:hunter2@db:5432/counters",
+        "jc:hunter2@tcp(db:3306)/counters",
+        "sqlserver://db:1433?database=counters&password=hunter2",
+    ] {
+        let err = sql_select(dsn)
+            .validate()
+            .expect_err("a literal password is refused");
+        assert!(
+            err.to_string().contains("spec.input.dsn"),
+            "{dsn}: error names the field, got: {err}"
+        );
+    }
+    for dsn in [
+        "postgres://jc:${DS_COUNTERS_DB_PASSWORD}@db:5432/counters",
+        "sqlserver://db:1433?database=counters&password=${DS_COUNTERS_DB_PASSWORD}",
+        "file:/data/counters.db",
+        "postgres://db:5432/counters",
+    ] {
+        sql_select(dsn)
+            .validate()
+            .unwrap_or_else(|e| panic!("{dsn}: {e}"));
+    }
+}
+
 #[test]
 fn unknown_type_nope_is_refused_and_names_accepted_types() {
     let nope = KAFKA.replace("type: kafka", "type: nope");

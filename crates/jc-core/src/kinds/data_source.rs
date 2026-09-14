@@ -25,6 +25,12 @@ use super::bento_inputs;
 static ENV_VAR_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^[A-Z][A-Z0-9_]*$").expect("valid regex"));
 
+/// The password of a `user:password@` part, or of a `password=` parameter, in a connection string.
+static EMBEDDED_PASSWORD_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)(?:[^\s/@:?&=]+:([^\s/@]+)@|(?:^|[?&;\s])password=([^&;\s]+))")
+        .expect("valid regex")
+});
+
 /// Which kind of feed a [`DataSourceSpec`] connects to: one of the four typed feeds or any
 /// input the runner ships (MF-35, PL-50).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -529,6 +535,23 @@ impl DataSourceSpec {
             });
         }
 
+        let mut strings = Vec::new();
+        strings_of(input_val, "spec.input".to_string(), &mut strings);
+        for (path, text) in strings {
+            for caps in EMBEDDED_PASSWORD_RE.captures_iter(text) {
+                let password = caps
+                    .get(1)
+                    .or_else(|| caps.get(2))
+                    .map_or("", |m| m.as_str());
+                if is_exact_var_interpolation(password).is_none() {
+                    return Err(Error::Invalid {
+                        field: path,
+                        reason: "a password inside a connection string is a `${VAR}` naming an envVar of spec.secrets, never a literal (PL-50, MF-35)".to_string(),
+                    });
+                }
+            }
+        }
+
         if bento_inputs::FILE_READERS.contains(&runner_name) {
             let check_file_path = |field: &'static str, val: &str| -> Result<()> {
                 if !val.starts_with("/data/") || val.split('/').any(|seg| seg == "..") {
@@ -690,6 +713,24 @@ fn collect_secret_targets<'a>(
             format!("{current}.{seg}")
         };
         collect_secret_targets(child, rest, &next_prefix, out);
+    }
+}
+
+/// Every string value in the document with its dotted path, for checks that read text.
+fn strings_of<'a>(val: &'a serde_json::Value, path: String, out: &mut Vec<(String, &'a str)>) {
+    match val {
+        serde_json::Value::String(s) => out.push((path, s)),
+        serde_json::Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                strings_of(v, format!("{path}[{i}]"), out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                strings_of(v, format!("{path}.{k}"), out);
+            }
+        }
+        _ => {}
     }
 }
 
