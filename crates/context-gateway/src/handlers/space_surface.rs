@@ -198,14 +198,20 @@ pub fn dataset_html(space: &Space, base: &str) -> String {
 }
 
 /// A language map as JSON-LD wants it: one `@value`/`@language` object per locale, or a
-/// plain string when the manifest named no locale at all.
+/// plain string for text of no locale (a plain manifest title, or none at all).
 pub(crate) fn localized(map: &BTreeMap<String, String>, fallback: &str) -> Value {
     if map.is_empty() {
         return json!(fallback);
     }
+    if let (1, Some(text)) = (map.len(), map.get("")) {
+        return json!(text);
+    }
     Value::Array(
         map.iter()
-            .map(|(locale, text)| json!({ "@value": text, "@language": locale }))
+            .map(|(locale, text)| match locale.as_str() {
+                "" => json!(text),
+                locale => json!({ "@value": text, "@language": locale }),
+            })
             .collect(),
     )
 }
@@ -250,6 +256,19 @@ mod tests {
             Format::Html
         );
         assert_eq!(negotiate(Some("application/ld+json")), Format::JsonLd);
+    }
+
+    #[test]
+    fn a_plain_title_carries_no_language_tag() {
+        let plain_title = BTreeMap::from([(String::new(), "Air quality".to_owned())]);
+        assert_eq!(localized(&plain_title, "air"), json!("Air quality"));
+        assert_eq!(plain(&plain_title, "air"), "Air quality");
+        let legacy = BTreeMap::from([("fi".to_owned(), "Ilmanlaatu".to_owned())]);
+        assert_eq!(
+            localized(&legacy, "air"),
+            json!([{ "@value": "Ilmanlaatu", "@language": "fi" }])
+        );
+        assert_eq!(localized(&BTreeMap::new(), "air"), json!("air"));
     }
 
     #[test]

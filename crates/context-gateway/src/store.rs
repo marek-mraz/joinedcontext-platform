@@ -270,24 +270,28 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
     spaces
 }
 
-/// One `metadata` language map, or an empty one when the manifest carries none (PF-24).
+/// One `metadata` text as a language map, or an empty one when the manifest carries none
+/// (PF-24, UI-50).
 ///
 /// The loader keeps metadata beyond name and namespace as raw JSON, so this reads the
-/// shape rather than a type: a `title` that is not a map of locale to string is a
-/// manifest the Portal would have rejected, and here it simply describes nothing.
+/// shape rather than a type. A plain string, the form every new manifest writes, belongs
+/// to no locale and is kept under the empty key; the legacy `{locale: text}` map is kept
+/// as it is. Anything else is a manifest the Portal would have rejected, and here it
+/// simply describes nothing.
 fn language_map(
     metadata: &serde_json::Map<String, serde_json::Value>,
     key: &str,
 ) -> BTreeMap<String, String> {
-    metadata
-        .get(key)
-        .and_then(serde_json::Value::as_object)
-        .map(|map| {
-            map.iter()
-                .filter_map(|(locale, text)| Some((locale.clone(), text.as_str()?.to_owned())))
-                .collect()
-        })
-        .unwrap_or_default()
+    match metadata.get(key) {
+        Some(serde_json::Value::String(text)) if !text.is_empty() => {
+            BTreeMap::from([(String::new(), text.clone())])
+        }
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .filter_map(|(locale, text)| Some((locale.clone(), text.as_str()?.to_owned())))
+            .collect(),
+        _ => BTreeMap::new(),
+    }
 }
 
 /// The policies of every space, keyed by the project and space they name (GW8).
@@ -457,8 +461,39 @@ fn normalize(path: &Path) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize;
+    use super::{language_map, normalize};
+    use serde_json::json;
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+
+    /// A plain title reads as text of no locale, the legacy map as its locales, and a
+    /// shape no manifest may carry as nothing (UI-50).
+    #[test]
+    fn a_plain_title_and_the_legacy_map_both_read() {
+        let metadata = |title: serde_json::Value| {
+            json!({ "title": title })
+                .as_object()
+                .cloned()
+                .expect("object")
+        };
+        assert_eq!(
+            language_map(&metadata(json!("Air quality")), "title"),
+            BTreeMap::from([(String::new(), "Air quality".to_owned())])
+        );
+        assert_eq!(
+            language_map(
+                &metadata(json!({ "fi": "Ilmanlaatu", "en": "Air" })),
+                "title"
+            ),
+            BTreeMap::from([
+                ("en".to_owned(), "Air".to_owned()),
+                ("fi".to_owned(), "Ilmanlaatu".to_owned())
+            ])
+        );
+        assert!(language_map(&metadata(json!("")), "title").is_empty());
+        assert!(language_map(&metadata(json!(7)), "title").is_empty());
+        assert!(language_map(&metadata(json!({})), "description").is_empty());
+    }
 
     /// An artifact path is checked before anything is opened, so a manifest that names
     /// `../../.secrets/x` is visible as leaving the repository rather than being read.
