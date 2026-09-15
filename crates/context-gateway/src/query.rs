@@ -58,6 +58,52 @@ pub fn first<'a>(params: &'a [(String, String)], name: &str) -> Option<&'a str> 
         .map(|(_, value)| value.as_str())
 }
 
+/// Why a query of entities is one the specification refuses, before any grant narrows it
+/// (GW31): a `type` that is no NGSI-LD name or type expression, or a `q` whose tokens do not
+/// lex. `None` for a well-formed query.
+pub fn malformed(params: &[(String, String)]) -> Option<String> {
+    // The reason names the parameter, never its value: an agent reads it back (AG-21).
+    if let Some(types) = first(params, "type") {
+        let named = |c: char| c.is_ascii_alphanumeric() || "_-.:/#,;|()~@%+".contains(c);
+        if !types.chars().all(named) {
+            return Some("the type is not an NGSI-LD name or type expression".to_owned());
+        }
+    }
+    first(params, "q")
+        .filter(|q| !lexes(q))
+        .map(|_| "q is not an NGSI-LD query".to_owned())
+}
+
+/// Whether a `q` is made of the query language's tokens: outside a double-quoted string no
+/// whitespace, no single quote and nothing else the grammar has no use for, every string
+/// closed and every parenthesis matched. A lexer, not the broker's parser.
+fn lexes(q: &str) -> bool {
+    let mut depth = 0usize;
+    let mut chars = q.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => loop {
+                match chars.next() {
+                    Some('"') => break,
+                    Some('\\') => {
+                        chars.next();
+                    }
+                    Some(_) => {}
+                    None => return false,
+                }
+            },
+            '(' => depth += 1,
+            ')' => match depth.checked_sub(1) {
+                Some(open) => depth = open,
+                None => return false,
+            },
+            c if c.is_ascii_alphanumeric() || "_-.:/#[]=!<>~;|,+*@%$^&".contains(c) => {}
+            _ => return false,
+        }
+    }
+    depth == 0
+}
+
 /// What the caller asked for, in the dimensions a grant can narrow (GW11).
 pub fn requested(params: &[(String, String)]) -> Request {
     Request {
@@ -272,6 +318,43 @@ pub fn decode(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_type_or_q_the_specification_refuses_is_named_before_any_grant_narrows_it() {
+        let refused = |raw: &str| malformed(&parse(raw));
+        assert!(
+            refused("idPattern=.*&limit=1").is_none(),
+            "a selector is the grants' to add"
+        );
+        assert!(refused(
+            "georel=near%3BmaxDistance%3D%3D100&geometry=Point&coordinates=%5B1%2C2%5D"
+        )
+        .is_none());
+
+        let hostile = "%27%3B%20DROP%20TABLE%20entities%3B%20--";
+        assert!(refused(&format!("type={hostile}"))
+            .is_some_and(|why| why.contains("not an NGSI-LD name")));
+        assert!(refused(&format!("type=A&q={hostile}"))
+            .is_some_and(|why| why.contains("not an NGSI-LD query")));
+        assert!(refused(
+            "type=(A%3BB)%7CC,https://smartdatamodels.org/dataModel.Env/AirQualityObserved"
+        )
+        .is_none());
+
+        for q in [
+            "pm10>=30",
+            "status==%22out%20of%20service%22",
+            "(a==1|b!=2);c~=%22x.*%22",
+            "dateObserved>=2026-09-01T00:00:00Z",
+            "refStation==urn:ngsi-ld:Station:hel.fi:helsinki:001",
+            "a.b[c]==1..9",
+        ] {
+            assert!(refused(&format!("type=A&q={q}")).is_none(), "{q}");
+        }
+        for q in ["a==1)", "(a==1", "name==%22open", "a%20==%201"] {
+            assert!(refused(&format!("type=A&q={q}")).is_some(), "{q}");
+        }
+    }
 
     #[test]
     fn a_query_round_trips_through_encoding() {

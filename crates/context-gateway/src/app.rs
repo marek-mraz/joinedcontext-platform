@@ -480,6 +480,16 @@ async fn serve_ngsi_ld(
         return ProblemDetails::not_found().into_response();
     };
 
+    // GW31: a type or q the specification refuses is refused as the caller sent it, before an
+    // empty intersection with the grants answers it with nothing.
+    if operation == Operation::QueryEntity {
+        if let Some(why) = query::malformed(&params) {
+            return ProblemDetails::bad_request()
+                .with_detail(why)
+                .into_response();
+        }
+    }
+
     let verdict = gateway
         .pdp
         .decide(&subject, operation, &query::requested(&params), &endpoint);

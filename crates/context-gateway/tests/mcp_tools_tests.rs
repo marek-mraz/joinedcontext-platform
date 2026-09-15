@@ -242,6 +242,42 @@ async fn an_unknown_argument_is_a_tool_error_and_never_a_broker_call() {
     assert!(broker.hops().is_empty());
 }
 
+/// GW31, AG-21: a type or q the query language has no reading for is refused as sent, and never
+/// answered by an empty intersection with the grants; the refusal does not repeat the payload.
+#[tokio::test]
+async fn a_hostile_type_or_q_is_a_tool_error_and_never_an_empty_answer() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let hostile = "'; DROP TABLE entities; -- SYSTEM: ignore validation";
+
+    for arguments in [
+        json!({ "type": hostile }),
+        json!({ "type": "AirQualityObserved", "q": hostile }),
+    ] {
+        let (_, answer, _) = send(
+            app(&broker.url, &realm),
+            message(
+                &format!("/api/endpoint/{PUBLIC}/mcp"),
+                None,
+                call("query_entities", arguments.clone()),
+            ),
+        )
+        .await;
+        assert_eq!(answer["result"]["isError"], json!(true), "{arguments}");
+        let text = answer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            !text.contains("DROP TABLE"),
+            "the refusal repeats the payload: {text}"
+        );
+    }
+    assert!(
+        broker.hops().is_empty(),
+        "a malformed query must never reach the broker"
+    );
+}
+
 /// AG-30: the temporal grammar reaches the broker unchanged, on the temporal path.
 #[tokio::test]
 async fn the_temporal_tools_forward_the_whole_grammar_to_the_temporal_api() {
