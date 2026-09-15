@@ -229,6 +229,33 @@ async fn an_attribute_outside_the_grant_serves_nothing_and_never_the_whole_entit
     assert!(asked.is_empty(), "the broker was never asked: {asked:?}");
 }
 
+/// T-0805 edge cases: an addressed read for an ungranted attribute is 404 and never a hop; a
+/// grant over the whole entity is not narrowed by `attrs`, the caller's selection stands.
+#[tokio::test]
+async fn an_addressed_read_for_an_ungranted_attribute_is_not_found_and_a_whole_grant_stays() {
+    let named =
+        policy("information:\n  - entities: [{ type: Vehicle }]\n    propertyNames: [name]\n");
+    let (status, _, asked) = query(
+        endpoint(named, None),
+        "/ngsi-ld/v1/entities/urn:ngsi-ld:Vehicle:hel.fi:fleet:bus-01?attrs=maintenanceNote",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(asked.is_empty(), "the broker was never asked: {asked:?}");
+
+    let (status, body, asked) = query(
+        endpoint(policy(""), None),
+        "/ngsi-ld/v1/entities?type=Vehicle&attrs=maintenanceNote",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body[0]["maintenanceNote"]["value"],
+        json!("brake pads next week")
+    );
+    assert!(asked[0].contains("attrs=maintenanceNote"), "{asked:?}");
+}
+
 /// T-0812: a policy whitelist that shares no slot with the projection leaves identity only;
 /// it does not switch the projection off.
 #[tokio::test]

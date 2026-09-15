@@ -618,3 +618,72 @@ information:
         "the grant's set, so a body naming reliability is refused by the guard"
     );
 }
+
+/// T-0805 edge cases: a batch write ignores `attrs` the same way; a caller naming no
+/// attribute keeps the grant's set; a prohibition still ends the evaluation.
+#[test]
+fn attrs_edge_cases_batch_write_no_selection_and_prohibition() {
+    let steward = policy(
+        r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: steward }
+operations: [upsertBatch, queryEntity]
+information:
+  - entities:
+      - type: AirQualityObserved
+    propertyNames: [pm10]
+"#,
+    );
+    let subject = Subject {
+        roles: set(&["steward"]),
+        ..Subject::anonymous()
+    };
+    let greedy = Request {
+        types: set(&["AirQualityObserved"]),
+        attrs: set(&["reliability"]),
+        ..Request::default()
+    };
+    let batch = evaluate(
+        &subject,
+        Operation::UpsertBatch,
+        &greedy,
+        "ovzdusie",
+        std::slice::from_ref(&steward),
+        now(),
+    );
+    let constraints = batch.constraints().expect("a rewrite");
+    assert!(!constraints.empty);
+    assert_eq!(constraints.attrs, set(&["pm10"]));
+
+    let none = Request {
+        types: set(&["AirQualityObserved"]),
+        ..Request::default()
+    };
+    let read = evaluate(
+        &subject,
+        Operation::QueryEntity,
+        &none,
+        "ovzdusie",
+        std::slice::from_ref(&steward),
+        now(),
+    );
+    let constraints = read.constraints().expect("a rewrite");
+    assert!(!constraints.empty);
+    assert_eq!(
+        constraints.attrs,
+        set(&["pm10"]),
+        "no selection means the grant's set"
+    );
+
+    let mut forbidden = steward.clone();
+    forbidden.effect = jc_core::kinds::PolicyEffect::Prohibition;
+    let denied = evaluate(
+        &subject,
+        Operation::QueryEntity,
+        &none,
+        "ovzdusie",
+        &[steward, forbidden],
+        now(),
+    );
+    assert_eq!(denied, Verdict::Deny);
+}
