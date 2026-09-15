@@ -497,6 +497,20 @@ async fn a_body_that_is_not_json_and_a_method_nobody_defined_answer_as_json_rpc_
     )
     .await;
     assert_eq!(unknown["error"]["code"], -32601);
+
+    for invalid in [
+        json!({ "jsonrpc": "1.0", "id": 11, "method": "ping" }),
+        json!({ "id": 12, "method": "ping" }),
+        json!({ "jsonrpc": "2.0", "id": 13 }),
+    ] {
+        let (_, answer) = send(
+            app("http://127.0.0.1:1", &realm),
+            message(SLUG, None, invalid.clone()),
+        )
+        .await;
+        assert_eq!(answer["error"]["code"], -32600, "{invalid}");
+        assert_eq!(answer["id"], invalid["id"], "the id is echoed");
+    }
 }
 
 /// EP-47, EP-55: the two describing tools are the access and schema projections, answered

@@ -421,12 +421,24 @@ pub async fn handle(
     authorization: Option<HeaderValue>,
     message: Value,
 ) -> Option<Value> {
-    let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or(json!({}));
 
     // No id is a notification. `notifications/initialized` is the only one that matters,
     // and nothing is kept between calls for it to change, so there is nothing to do.
     let id = message.get("id").cloned()?;
+
+    // A request that is not JSON-RPC 2.0, or names no method, is an Invalid Request (SP-14).
+    let Some(method) = message
+        .get("method")
+        .and_then(Value::as_str)
+        .filter(|_| message.get("jsonrpc").and_then(Value::as_str) == Some("2.0"))
+    else {
+        return Some(error(
+            id,
+            -32600,
+            "invalid request: a JSON-RPC 2.0 request names \"jsonrpc\": \"2.0\" and a method",
+        ));
+    };
 
     match method {
         "initialize" => Some(result(
