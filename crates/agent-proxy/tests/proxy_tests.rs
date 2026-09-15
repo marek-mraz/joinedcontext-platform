@@ -672,3 +672,36 @@ async fn a_double_encoded_dot_segment_never_leaves_the_application_directory() {
         .path()
         .ends_with("/contents/projects/helsinki/apps/bikes/src/App.tsx"));
 }
+
+/// Edge cases of the application-directory guard: a directory listing with its trailing slash
+/// still reaches the forge, and a literal `..` is refused like an encoded one.
+#[tokio::test]
+async fn a_directory_listing_inside_the_application_passes_and_a_literal_dot_dot_does_not() {
+    let forge = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&forge)
+        .await;
+    let state = test_state_with_forge(sample_run(false, "building"), &forge.uri());
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/forge/contents/projects/helsinki/apps/bikes/")
+        .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+        .header("x-jc-ticket", "secret-ticket-123")
+        .body(Body::empty())
+        .unwrap();
+    let resp = router(state.clone()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/forge/contents/projects/helsinki/apps/bikes/../other/x")
+        .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+        .header("x-jc-ticket", "secret-ticket-123")
+        .body(Body::empty())
+        .unwrap();
+    let resp = router(state).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(forge.received_requests().await.unwrap_or_default().len(), 1);
+}

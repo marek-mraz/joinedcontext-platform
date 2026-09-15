@@ -166,3 +166,33 @@ async fn an_addressed_delete_outside_the_pattern_or_type_never_reaches_the_broke
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(asked.len(), 1);
 }
+
+/// Edge cases: a batch item that is no URN is a bad request, an empty batch is the broker's
+/// to answer, and the attribute fragment of an addressed write is held to the path id.
+#[tokio::test]
+async fn a_malformed_batch_item_is_a_bad_request_and_an_empty_batch_is_forwarded() {
+    let (status, asked) = send(
+        Method::POST,
+        "/entityOperations/delete",
+        Some(json!(["not-a-urn"])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
+
+    let (status, asked) = send(Method::POST, "/entityOperations/delete", Some(json!([]))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(asked.len(), 1, "an empty batch is the broker's to refuse");
+}
+
+#[tokio::test]
+async fn an_attribute_fragment_for_an_entity_outside_the_pattern_never_reaches_the_broker() {
+    let (status, asked) = send(
+        Method::PATCH,
+        "/entities/urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:traffic-1/attrs",
+        Some(json!({ "status": { "type": "Property", "value": "off" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
+}
