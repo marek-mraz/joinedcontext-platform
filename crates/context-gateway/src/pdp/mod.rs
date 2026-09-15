@@ -106,7 +106,7 @@ fn project_constraints(
         .filter_map(|class| projection.attributes_of(class))
         .flatten()
         .collect();
-    constraints.attrs = evaluator::narrow(&constraints.attrs, &slots);
+    constraints.attrs = evaluator::narrow_to_identity(&constraints.attrs, &slots);
     constraints.types = types;
     if let Some(filter) = &projection.filter {
         if let Some(q) = &filter.q {

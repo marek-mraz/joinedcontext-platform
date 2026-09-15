@@ -213,6 +213,41 @@ async fn an_attribute_outside_is_dropped_and_a_type_outside_is_refused() {
     );
 }
 
+/// T-0805: an attribute no grant names is answered with nothing, never with the whole
+/// entity, and the broker is not asked.
+#[tokio::test]
+async fn an_attribute_outside_the_grant_serves_nothing_and_never_the_whole_entity() {
+    let named =
+        policy("information:\n  - entities: [{ type: Vehicle }]\n    propertyNames: [name]\n");
+    let (status, body, asked) = query(
+        endpoint(named, None),
+        "/ngsi-ld/v1/entities?type=Vehicle&attrs=maintenanceNote",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!([]), "nothing granted was asked for");
+    assert!(asked.is_empty(), "the broker was never asked: {asked:?}");
+}
+
+/// T-0812: a policy whitelist that shares no slot with the projection leaves identity only;
+/// it does not switch the projection off.
+#[tokio::test]
+async fn a_policy_whitelist_disjoint_from_the_projection_serves_identity_only() {
+    let odometer =
+        policy("information:\n  - entities: [{ type: Vehicle }]\n    propertyNames: [odometer]\n");
+    let (status, body, _) = query(
+        endpoint(odometer, Some(projection())),
+        "/ngsi-ld/v1/entities?type=Vehicle",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entity = &body[0];
+    assert_eq!(entity["type"], json!("Vehicle"));
+    for name in ["name", "speed", "odometer", "maintenanceNote"] {
+        assert!(entity.get(name).is_none(), "{name} served: {entity}");
+    }
+}
+
 /// GW10: the projection's `q` is conjoined with the caller's, so a caller's own filter
 /// cannot widen what the endpoint is about.
 #[tokio::test]

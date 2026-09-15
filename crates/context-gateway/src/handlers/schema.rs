@@ -11,7 +11,9 @@
 //! visible rather than mysterious (EP-47).
 
 use super::formalisms;
-use crate::pdp::evaluator::{effective, granted_attrs, granted_types, narrow, Subject};
+use crate::pdp::evaluator::{
+    effective, granted_attrs, granted_types, narrow, narrow_to_identity, Subject,
+};
 use crate::resolver::{Endpoint, Model};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
@@ -250,7 +252,7 @@ pub fn visible(subject: &Subject, endpoint: &Endpoint, now: DateTime<Utc>) -> Vi
             .filter_map(|class| projection.attributes_of(&class.name))
             .flatten()
             .collect();
-        visible.attrs = narrow(&visible.attrs, &slots);
+        visible.attrs = narrow_to_identity(&visible.attrs, &slots);
     }
     visible
 }

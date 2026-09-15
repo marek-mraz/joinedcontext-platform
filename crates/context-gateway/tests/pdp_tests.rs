@@ -492,8 +492,8 @@ temporalQ: "timerel=after;timeAt=P-1D"
         "no granted type was asked for, so nothing is served"
     );
     assert!(
-        constraints.attrs.is_empty(),
-        "no granted attribute was asked for"
+        constraints.empty,
+        "no granted type or attribute was asked for, so nothing is served (T-0805)"
     );
     assert!(constraints.restricted);
 
@@ -533,4 +533,88 @@ temporalQ: "timerel=after;timeAt=P-1D"
         .as_deref()
         .unwrap_or_default()
         .contains("P-10Y"));
+}
+
+/// T-0805: asking for an attribute the grant does not name is answered with nothing, never
+/// with the whole entity. An empty `attrs` set means "no projection" downstream, so the
+/// decision has to say `empty` itself, the way it does for a type nothing covers.
+#[test]
+fn an_attribute_outside_the_grant_empties_the_answer_instead_of_the_projection() {
+    let request = Request {
+        types: set(&["AirQualityObserved"]),
+        attrs: set(&["reliability"]),
+        ..Request::default()
+    };
+    let verdict = evaluate(
+        &Subject::anonymous(),
+        Operation::QueryEntity,
+        &request,
+        "ovzdusie",
+        &[public_read()],
+        now(),
+    );
+    let constraints = verdict.constraints().expect("a rewrite");
+    assert!(constraints.empty, "nothing granted was asked for");
+    assert!(
+        constraints.empty || !constraints.attrs.is_empty(),
+        "an empty attrs set would serve every attribute"
+    );
+
+    // One granted attribute among the asked ones: the answer is that one, projected.
+    let mixed = Request {
+        attrs: set(&["reliability", "pm10"]),
+        ..request
+    };
+    let verdict = evaluate(
+        &Subject::anonymous(),
+        Operation::QueryEntity,
+        &mixed,
+        "ovzdusie",
+        &[public_read()],
+        now(),
+    );
+    let constraints = verdict.constraints().expect("a rewrite");
+    assert!(!constraints.empty);
+    assert_eq!(constraints.attrs, set(&["pm10"]));
+}
+
+/// T-0805, GW17: a write never narrows the grant's attribute set by a query parameter; the
+/// write guard checks the body against what the grant names.
+#[test]
+fn a_write_keeps_the_grants_attributes_whatever_the_query_names() {
+    let steward = policy(
+        r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: steward }
+operations: [updateAttrs]
+information:
+  - entities:
+      - type: AirQualityObserved
+    propertyNames: [pm10]
+"#,
+    );
+    let request = Request {
+        types: set(&["AirQualityObserved"]),
+        attrs: set(&["reliability"]),
+        ..Request::default()
+    };
+    let subject = Subject {
+        roles: set(&["steward"]),
+        ..Subject::anonymous()
+    };
+    let verdict = evaluate(
+        &subject,
+        Operation::UpdateAttrs,
+        &request,
+        "ovzdusie",
+        &[steward],
+        now(),
+    );
+    let constraints = verdict.constraints().expect("a rewrite");
+    assert!(!constraints.empty);
+    assert_eq!(
+        constraints.attrs,
+        set(&["pm10"]),
+        "the grant's set, so a body naming reliability is refused by the guard"
+    );
 }

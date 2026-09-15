@@ -185,7 +185,9 @@ pub fn evaluate(
         return Verdict::Deny;
     }
 
-    Verdict::Rewrite(Box::new(intersect(request, tenant, &grants, now)))
+    Verdict::Rewrite(Box::new(intersect(
+        operation, request, tenant, &grants, now,
+    )))
 }
 
 /// Whether a policy speaks about this caller and this operation at all (GW7).
@@ -224,6 +226,7 @@ fn covers_request(policy: &PolicySpec, request: &Request) -> bool {
 
 /// Intersects the request with the union of the grants (GW10, GW11).
 fn intersect(
+    operation: Operation,
     request: &Request,
     tenant: &str,
     grants: &[&PolicySpec],
@@ -250,13 +253,24 @@ fn intersect(
     };
 
     let types = narrow(&request.types, &granted_types);
-    let attrs = narrow(&request.attrs, &granted_attrs);
+    // A write carries no attribute selection: its attributes are in the body, which the
+    // write guard checks against the grant's own set. Narrowing by a query parameter
+    // here would let `?attrs=x` empty that set, and an empty set is "no projection"
+    // (T-0805, GW11, GW17).
+    let attrs = if operation.is_write() {
+        granted_attrs.clone()
+    } else {
+        narrow(&request.attrs, &granted_attrs)
+    };
 
     // The caller named types, the grants name types, and nothing is left: the answer is
     // genuinely nothing. It has to be said here, because an empty `types` set means "no
     // type filter" downstream, and forwarding no filter would ask the broker for every
     // type in the tenant instead of none of them (T-0381, GW10, R20).
     let no_type_left = !request.types.is_empty() && !granted_types.is_empty() && types.is_empty();
+    // The same for attributes: the caller named some, the grants name some, none is shared.
+    // An empty `attrs` downstream is "no projection", the opposite of what was decided.
+    let no_attr_left = !request.attrs.is_empty() && !granted_attrs.is_empty() && attrs.is_empty();
 
     let filters: Vec<String> = grants
         .iter()
@@ -300,7 +314,7 @@ fn intersect(
         geo_caller: geo.caller,
         temporal_q: clamped.temporal_q,
         temporal_windows: clamped.windows,
-        empty: clamped.empty || no_type_left,
+        empty: clamped.empty || no_type_left || no_attr_left,
     }
 }
 
@@ -345,6 +359,20 @@ pub fn narrow(requested: &BTreeSet<String>, granted: &BTreeSet<String>) -> BTree
         return granted.clone();
     }
     requested.intersection(granted).cloned().collect()
+}
+
+/// `narrow`, except that two whitelists sharing nothing leave the entity's identity (`id`,
+/// `type`) rather than an empty set, which downstream would read as "no projection"
+/// (T-0812, R9).
+pub fn narrow_to_identity(
+    requested: &BTreeSet<String>,
+    granted: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let narrowed = narrow(requested, granted);
+    if narrowed.is_empty() && !requested.is_empty() && !granted.is_empty() {
+        return ["id", "type"].into_iter().map(str::to_owned).collect();
+    }
+    narrowed
 }
 
 /// The policies that name this caller and are in force now, whatever they grant (EP-55).
