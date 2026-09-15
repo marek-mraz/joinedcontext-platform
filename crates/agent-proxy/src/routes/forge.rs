@@ -35,7 +35,15 @@ pub async fn handler(
     let mut body_val = serde_json::from_slice::<serde_json::Value>(&body_bytes).ok();
 
     if let Some(file_path) = rest.strip_prefix("contents/") {
-        if file_path.contains("..") || !file_path.starts_with(&run.path_prefix) {
+        // axum decoded the path once; anything still percent-encoded (`%2e%2e` from a
+        // double-encoded `..`) would be decoded again by the URL parser on the way to the
+        // forge, so nothing encoded and no dot or empty segment gets through (T-0817).
+        let escapes = file_path.contains('%')
+            || file_path
+                .split('/')
+                .any(|segment| matches!(segment, "." | ".."))
+            || file_path.contains("//");
+        if escapes || !file_path.starts_with(&run.path_prefix) {
             return jc_core::ProblemDetails::forbidden()
                 .with_detail("file path outside assigned application directory")
                 .into_response();
@@ -101,6 +109,19 @@ pub async fn handler(
         state.config.forge_repo,
         rest.trim_start_matches('/')
     );
+    // The URL the forge will see, after its parser had its say, is inside the application
+    // directory or the request stops here (T-0817).
+    if rest.starts_with("contents/") {
+        let inside = format!(
+            "/api/v1/repos/{}/contents/{}",
+            state.config.forge_repo, run.path_prefix
+        );
+        if !reqwest::Url::parse(&target_url).is_ok_and(|url| url.path().starts_with(&inside)) {
+            return jc_core::ProblemDetails::forbidden()
+                .with_detail("file path outside assigned application directory")
+                .into_response();
+        }
+    }
 
     let forge_token = state.credentials.get_forge_token();
     let mut client_req = state

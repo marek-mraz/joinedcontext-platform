@@ -50,12 +50,27 @@ fn test_state_with_gateway(run: RunContext, gateway: &str) -> Arc<ProxyState> {
 }
 
 fn test_state_with_upstreams(run: RunContext, gateway: &str, model: &str) -> Arc<ProxyState> {
+    test_state_with(run, gateway, model, "http://gitea-http:3000")
+}
+
+fn test_state_with_forge(run: RunContext, forge: &str) -> Arc<ProxyState> {
+    test_state_with(
+        run,
+        "http://context-gateway:8080",
+        "https://api.anthropic.com",
+        forge,
+    )
+}
+
+fn test_state_with(run: RunContext, gateway: &str, model: &str, forge: &str) -> Arc<ProxyState> {
     let gateway = gateway.to_string();
     let model = model.to_string();
+    let forge = forge.to_string();
     let config = Config::from_lookup(|k| match k {
         "JC_PROXY_BIND" => Some("127.0.0.1:0".to_string()),
         "JC_GATEWAY_BASE" => Some(gateway.clone()),
         "JC_MODEL_BASE" => Some(model.clone()),
+        "JC_FORGE_BASE" => Some(forge.clone()),
         "JC_MODEL_KEY" => Some("mock-model-key".to_string()),
         "JC_FORGE_TOKEN" => Some("mock-forge-token".to_string()),
         _ => None,
@@ -600,4 +615,60 @@ async fn an_endpoint_added_since_the_run_was_cached_is_reached_at_once() {
     assert_eq!(resp.status(), StatusCode::OK);
     gateway.verify().await;
     portal.verify().await;
+}
+
+/// T-0817: axum decodes the path once, so a double-encoded dot segment reaches the guard as
+/// `%2e%2e`, which the URL parser on the way out would fold into `..`. Nothing encoded, no
+/// dot segment and no empty segment gets past the application directory, and the forge is
+/// never called for it.
+#[tokio::test]
+async fn a_double_encoded_dot_segment_never_leaves_the_application_directory() {
+    let forge = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("PUT"))
+        .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+        .mount(&forge)
+        .await;
+    let state = test_state_with_forge(sample_run(false, "building"), &forge.uri());
+    for path in [
+        "projects/helsinki/apps/bikes/%252e%252e/other/x",
+        "projects/helsinki/apps/bikes/%2e%2e/other/x",
+        "projects/helsinki/apps/bikes/./x",
+        "projects/helsinki/apps/bikes//x",
+        "projects/helsinki/apps/bikes/%2Fsecret",
+    ] {
+        let req = Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/forge/contents/{path}"))
+            .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+            .header("x-jc-ticket", "secret-ticket-123")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = router(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    assert!(
+        forge
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "the forge was called"
+    );
+
+    // A file inside the directory still reaches the forge, on the run's branch.
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/v1/forge/contents/projects/helsinki/apps/bikes/src/App.tsx")
+        .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+        .header("x-jc-ticket", "secret-ticket-123")
+        .body(Body::from(r#"{"content":"aGk=","message":"add app"}"#))
+        .unwrap();
+    let resp = router(state).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let calls = forge.received_requests().await.unwrap_or_default();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0]
+        .url
+        .path()
+        .ends_with("/contents/projects/helsinki/apps/bikes/src/App.tsx"));
 }
