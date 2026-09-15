@@ -269,7 +269,8 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     assert_eq!(entities.as_array().map(Vec::len), Some(1));
 
     // An attribute outside the grant never reaches the wire, whichever way it is asked
-    // for (R9).
+    // for (R9): an addressed read that names only ungranted attributes is a miss, never
+    // the whole entity (T-0805, GW1, R20).
     let (status, body) = call(
         &app,
         get(
@@ -278,9 +279,13 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let entity: Value = serde_json::from_slice(&body).expect("an entity");
-    assert!(entity.get("operatorPhone").is_none());
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "ungranted attrs: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(!String::from_utf8_lossy(&body).contains("pm10"));
 
     // DEMO step 4: the same data, several ways. The map reads the FeatureCollection and
     // sees exactly the attributes the grant allows (EP-09, EP-07).
