@@ -1,10 +1,10 @@
 name: ci-full
-# the slow lane: runs after every push to main, nightly and on demand; never a PR gate.
-# agents watch it with tasks/ci and fix red runs first.
+# the slow lane: runs once an hour on main and on demand; never a PR gate.
+# The MVP pushes to main many times an hour, and a full run per push queued behind the next
+# one; ci.yml stays the per-push gate. tasks/ci files a task for a red hourly run like any other.
+# To put the per-push trigger back: add `push: { branches: [main] }` under `on:`.
 on:
-  push:
-    branches: [main]
-  schedule: [{ cron: "17 2 * * *" }]
+  schedule: [{ cron: "7 * * * *" }]
   workflow_dispatch:
 permissions: { contents: read }
 concurrency: { group: "ci-full-${{ github.ref }}", cancel-in-progress: false }
