@@ -1,5 +1,5 @@
 use context_gateway::pdp::evaluator::Constraints;
-use context_gateway::pdp::write_guard::{check, Refusal};
+use context_gateway::pdp::write_guard::{check, check_granted_id, Refusal};
 use jc_core::ProblemDetails;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -213,4 +213,59 @@ fn a_policy_refusal_discloses_no_rule() {
     let problem = ProblemDetails::from(Refusal::ScopeOutsideGrant("/geo/SK/ZA".to_owned()));
     assert_eq!(problem.status, 403);
     assert_eq!(problem.detail, None, "the body must not name the scope");
+}
+
+/// T-0806, GW11, R24: an identifier alone, with no body to read, is held to the grant's
+/// types and patterns, so an addressed write and a bare URN in a batch cannot slip past the
+/// checks an entity payload gets.
+#[test]
+fn an_identifier_outside_the_granted_type_or_pattern_is_refused_on_its_own() {
+    let lamps = Constraints {
+        types: names(&["Device"]),
+        id_patterns: names(&["^urn:ngsi-ld:Device:banskabystrica\\.sk:ovzdusie:lamps-.*$"]),
+        ..grant()
+    };
+    check_granted_id(
+        "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:lamps-7",
+        &lamps,
+    )
+    .expect("a lamp is granted");
+    assert_eq!(
+        check_granted_id(
+            "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:traffic-1",
+            &lamps
+        ),
+        Err(Refusal::IdOutsideGrant(
+            "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:traffic-1".to_owned()
+        ))
+    );
+    assert_eq!(
+        check_granted_id("urn:ngsi-ld:Secret:banskabystrica.sk:ovzdusie:1", &lamps),
+        Err(Refusal::TypeOutsideGrant("Secret".to_owned()))
+    );
+    assert_eq!(
+        check_granted_id("not-a-urn", &lamps),
+        Err(Refusal::MalformedId("not-a-urn".to_owned()))
+    );
+
+    // A whole-type grant names no pattern and takes every id of its type.
+    check_granted_id(
+        "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:anything",
+        &grant(),
+    )
+    .expect("no pattern is no restriction");
+
+    // An entity payload whose URN matches no pattern is refused whole, whatever it declares.
+    let mut traffic = entity();
+    traffic["id"] = json!("urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:traffic-1");
+    traffic["type"] = json!("Device");
+    assert_eq!(
+        check(&traffic, &lamps, SPACE, ORG),
+        Err(Refusal::IdOutsideGrant(
+            "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:traffic-1".to_owned()
+        ))
+    );
+    // And the refusal is a policy decision: 403, no rule named (GW6).
+    let problem = ProblemDetails::from(Refusal::IdOutsideGrant("x".to_owned()));
+    assert_eq!(problem.status, 403);
 }

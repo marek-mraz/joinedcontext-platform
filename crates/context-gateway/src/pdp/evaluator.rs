@@ -299,11 +299,20 @@ fn intersect(
             || geo.restricted
             || clamped.restricted,
         types,
+        // An exact `id` is the pattern that matches only it; until T-0806 it was never
+        // compiled, so a selector naming one entity granted the whole type.
         id_patterns: grants
             .iter()
             .flat_map(|policy| policy.information.iter())
             .flat_map(|info| info.entities.iter())
-            .filter_map(|selector| selector.id_pattern.clone())
+            .flat_map(|selector| {
+                selector.id_pattern.clone().into_iter().chain(
+                    selector
+                        .id
+                        .as_ref()
+                        .map(|urn| format!("^{}$", regex::escape(&urn.to_string()))),
+                )
+            })
             .collect(),
         attrs,
         hidden: BTreeSet::new(),

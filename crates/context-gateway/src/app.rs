@@ -547,13 +547,20 @@ async fn serve_ngsi_ld(
     // The identifier in the path belongs to this organization and this space or the
     // request is malformed, whichever verb carries it (PF-10, PF-42).
     if let Some(raw) = operations::addressed_entity(&path) {
-        if let Err(refusal) = write_guard::check_identifier(
-            &query::decode(raw),
-            None,
-            &endpoint.space,
-            &gateway.org_domain,
-        ) {
+        let id = query::decode(raw);
+        if let Err(refusal) =
+            write_guard::check_identifier(&id, None, &endpoint.space, &gateway.org_domain)
+        {
             return ProblemDetails::from(refusal).into_response();
+        }
+        // A write to an id outside the grant's types and patterns is refused here, before a
+        // body is read (T-0806, GW11, R24); a read is narrowed by the PDP and answered by
+        // the broker, so a miss stays a miss (R20).
+        if operation.is_write() {
+            if let Err(refusal) = write_guard::check_granted_id(&id, &constraints) {
+                tracing::info!(slug = %endpoint.slug, %refusal, "write refused");
+                return ProblemDetails::from(refusal).into_response();
+            }
         }
     }
 
@@ -777,7 +784,12 @@ fn refuse_write(
         other => vec![other],
     };
     for entity in entities {
-        let outcome = if entity.get("id").is_some() || entity.get("@id").is_some() {
+        // A batch delete is an array of URN strings: each is an identifier and nothing else
+        // (T-0806).
+        let outcome = if let Some(raw) = entity.as_str() {
+            write_guard::check_identifier(raw, None, &endpoint.space, org_domain)
+                .and_then(|()| write_guard::check_granted_id(raw, constraints))
+        } else if entity.get("id").is_some() || entity.get("@id").is_some() {
             write_guard::check(entity, constraints, &endpoint.space, org_domain)
         } else {
             write_guard::check_fragment(entity, constraints)

@@ -687,3 +687,45 @@ information:
     );
     assert_eq!(denied, Verdict::Deny);
 }
+
+/// T-0806, R9: a selector naming one entity by `id` grants that entity, not its whole type.
+#[test]
+fn an_exact_id_selector_compiles_into_a_pattern_that_matches_only_it() {
+    let one = policy(
+        r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+operations: [queryEntity, retrieveEntity]
+information:
+  - entities:
+      - type: AirQualityObserved
+        id: urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:sever-01
+"#,
+    );
+    let request = Request {
+        types: set(&["AirQualityObserved"]),
+        ..Request::default()
+    };
+    let verdict = evaluate(
+        &Subject::anonymous(),
+        Operation::QueryEntity,
+        &request,
+        "ovzdusie",
+        &[one],
+        now(),
+    );
+    let constraints = verdict.constraints().expect("a rewrite");
+    let pattern = constraints
+        .id_patterns
+        .iter()
+        .next()
+        .expect("the id became a pattern");
+    let compiled = regex::Regex::new(pattern).expect("anchored and escaped");
+    assert!(compiled.is_match("urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:sever-01"));
+    assert!(
+        !compiled.is_match("urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:sever-012")
+    );
+    assert!(
+        !compiled.is_match("urn:ngsi-ld:AirQualityObserved:banskabystricaXsk:ovzdusie:sever-01")
+    );
+}

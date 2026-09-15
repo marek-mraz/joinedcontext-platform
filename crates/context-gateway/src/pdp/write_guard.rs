@@ -29,6 +29,9 @@ pub enum Refusal {
     /// The entity's type is outside every grant (GW11).
     #[error("entity type `{0}` is outside the grant")]
     TypeOutsideGrant(String),
+    /// The entity's id matches no `id` or `idPattern` of the grant (R24, GW16).
+    #[error("entity id `{0}` is outside the grant")]
+    IdOutsideGrant(String),
     /// The payload touches an attribute no grant covers (GW17).
     #[error("attribute `{0}` is outside the grant")]
     AttributeOutsideGrant(String),
@@ -82,7 +85,37 @@ pub fn check(
     check_no_smuggled_policy(entity)?;
     check_id(entity, space, org_domain)?;
     check_type(entity, constraints)?;
+    if let Some(raw) = entity_id(entity) {
+        check_granted_id(raw, constraints)?;
+    }
     check_fragment(entity, constraints)
+}
+
+/// A write's identifier against what the grant selects (T-0806, GW11, R24): the type the
+/// URN carries must be a granted type, and the URN must match an `id` or `idPattern` when
+/// the grant names any. Checked without a body, so the path id of an addressed write and a
+/// bare URN in a batch delete get the same answer as an entity payload.
+pub fn check_granted_id(raw: &str, constraints: &Constraints) -> Result<(), Refusal> {
+    let urn: Urn = raw
+        .parse()
+        .map_err(|_| Refusal::MalformedId(raw.to_owned()))?;
+    if !constraints.types.is_empty() && !constraints.types.contains(urn.entity_type()) {
+        return Err(Refusal::TypeOutsideGrant(urn.entity_type().to_owned()));
+    }
+    if !crate::pdp::projection::permitted(
+        &serde_json::json!({ "id": raw }),
+        &constraints.id_patterns,
+    ) {
+        return Err(Refusal::IdOutsideGrant(raw.to_owned()));
+    }
+    Ok(())
+}
+
+fn entity_id(entity: &Value) -> Option<&str> {
+    entity
+        .get("id")
+        .or_else(|| entity.get("@id"))
+        .and_then(Value::as_str)
 }
 
 /// Checks a payload that carries no identifier of its own: the attribute fragment of a
@@ -149,11 +182,7 @@ fn check_location(entity: &Value, constraints: &Constraints) -> Result<(), Refus
 
 /// The id the payload carries must be an NGSI-LD URN of this organization and this space.
 fn check_id(entity: &Value, space: &str, org_domain: &str) -> Result<(), Refusal> {
-    let raw = entity
-        .get("id")
-        .or_else(|| entity.get("@id"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| Refusal::MalformedId(String::new()))?;
+    let raw = entity_id(entity).ok_or_else(|| Refusal::MalformedId(String::new()))?;
     check_identifier(
         raw,
         entity.get("type").and_then(Value::as_str),
