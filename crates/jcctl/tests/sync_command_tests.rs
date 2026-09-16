@@ -58,7 +58,9 @@ fn options(checkout: &Path, state: &Path) -> Options {
 fn one_run_proposes_what_the_origin_carries_and_the_next_run_over_it_writes_nothing() {
     let repo = repo_with_source("sync-cmd-repo");
     let origin = checkout("sync-cmd-origin");
-    let state = origin.join("..").join("sync-cmd-state.json");
+    // Inside the run's own temp directory: a state file at a stable path would carry the
+    // open proposal of the previous run of this test into the next one.
+    let state = origin.join("state.json");
 
     let first = sync::run(&repo, &options(&origin, &state)).expect("the first run decides");
     let proposal = first
@@ -107,7 +109,7 @@ fn a_source_the_repository_does_not_hold_is_named_not_guessed() {
 fn the_command_prints_the_change_and_exits_two_when_a_proposal_is_open() {
     let repo = repo_with_source("sync-cmd-cli");
     let origin = checkout("sync-cmd-cli-origin");
-    let state = origin.join("..").join("sync-cmd-cli-state.json");
+    let state = origin.join("state.json");
 
     let output = Command::new(env!("CARGO_BIN_EXE_jcctl"))
         .args([
