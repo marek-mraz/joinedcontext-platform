@@ -102,15 +102,22 @@ pub fn collect(
     // Two kinds may share a plural — `Policy` and `ScopeDefinition` are both `policies` —
     // so the answer to a query is not one kind's resources and the path template comes
     // from each manifest's own kind, not from the query.
+    // A kind that lives in either place is asked for in both, so a project's own roles are
+    // exported beside the organization's (PF-68).
     let queries: BTreeSet<(&str, &str)> = registry::KINDS
         .iter()
-        .map(|info| {
-            let namespace = match info.scope {
-                Scope::Organization => "org",
-                Scope::Project => project,
-            };
-            (namespace, info.plural)
+        .flat_map(|info| {
+            let organization = info
+                .scope
+                .allows_organization()
+                .then_some((jc_core::envelope::ORG_NAMESPACE, info.plural));
+            let in_project = info
+                .scope
+                .allows_project()
+                .then_some((project, info.plural));
+            [organization, in_project]
         })
+        .flatten()
         .collect();
 
     let mut found: BTreeMap<String, RawManifest> = BTreeMap::new();
@@ -122,8 +129,11 @@ pub fn collect(
             if !belongs_to(&manifest, space) {
                 continue;
             }
+            // The manifest's own namespace decides where it lands, which is what tells a
+            // project's role from the organization's (PF-68).
+            let namespace = manifest.metadata.namespace.as_deref().unwrap_or(project);
             found.insert(
-                info.repo_path(project, space, &manifest.metadata.name),
+                info.repo_path(namespace, space, &manifest.metadata.name),
                 manifest,
             );
         }
@@ -194,6 +204,18 @@ pub fn write(out_dir: &Path, report: &Report) -> std::io::Result<usize> {
 /// The space itself is in its own export; everything else is in it if it says so. A
 /// resource that names no space (a Project, a ServiceAccount) belongs to the installation
 /// rather than to this space and is not copied out with it.
+/// Whether this manifest belongs to the organization rather than to one project (PF-68).
+///
+/// A kind that lives in one place is answered by its scope alone; `Role`, which lives in
+/// either, is answered by the namespace it carries.
+pub fn belongs_to_the_organization(kind: &str, namespace: Option<&str>) -> bool {
+    registry::by_kind(kind).is_some_and(|info| match info.scope {
+        Scope::Organization => true,
+        Scope::Project => false,
+        Scope::OrganizationOrProject => namespace == Some(jc_core::envelope::ORG_NAMESPACE),
+    })
+}
+
 fn belongs_to(manifest: &RawManifest, space: &str) -> bool {
     if manifest.kind == "ContextSpace" {
         return manifest.metadata.name == space;
@@ -344,8 +366,10 @@ fn index_of(project: &str, revision: &str, exported_by: &str, bundle: &Bundle) -
         .resources
         .iter()
         .map(|resource| {
-            let organization_scoped = registry::by_kind(&resource.manifest.kind)
-                .is_some_and(|info| info.scope == Scope::Organization);
+            let organization_scoped = belongs_to_the_organization(
+                &resource.manifest.kind,
+                resource.manifest.metadata.namespace.as_deref(),
+            );
             jc_core::kinds::BundleItem {
                 kind: resource.manifest.kind.clone(),
                 namespace: resource

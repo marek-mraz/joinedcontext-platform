@@ -81,16 +81,50 @@ pub struct RoleSpec {
 impl Kind for RoleSpec {
     const KIND: &'static str = "Role";
     const PLURAL: &'static str = "roles";
-    const SCOPE: Scope = Scope::Organization;
+    /// A role belongs to the organization or to one project (PF-68).
+    const SCOPE: Scope = Scope::OrganizationOrProject;
     const PATH_TEMPLATE: &'static str = "users/roles/{name}.yaml";
+    const PROJECT_PATH_TEMPLATE: Option<&'static str> =
+        Some("projects/{project}/roles/{name}.yaml");
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
-        self.validate()
+        self.validate()?;
+        if meta.namespace.as_deref() != Some(crate::envelope::ORG_NAMESPACE) {
+            self.validate_in_project()?;
+        }
+        Ok(())
     }
 }
 
 impl RoleSpec {
+    /// What a role that lives inside a project may name (PF-68).
+    ///
+    /// A project role reaches only the kinds that live inside a project, which is exactly the
+    /// catalogue's project-scoped kinds. `Role`, `RoleBinding`, `Group`, `Organization` and
+    /// `Project` are not among them, so no project role writes roles, bindings or the
+    /// organization itself, and none of them reaches another project. The list is derived from
+    /// the catalogue rather than written twice, so a kind added tomorrow is covered by the rule
+    /// its own scope already states.
+    pub fn validate_in_project(&self) -> Result<()> {
+        for rule in &self.rules {
+            for kind in &rule.kinds {
+                let project_kind = crate::registry::by_kind(kind)
+                    .is_some_and(|info| info.scope == crate::envelope::Scope::Project);
+                if !project_kind {
+                    return Err(Error::Name {
+                        field: "spec.rules[].kinds",
+                        value: kind.clone(),
+                        reason: "a role inside a project names project kinds only; Role, \
+                                 RoleBinding, Group, Organization and Project belong to the \
+                                 organization's own roles (PF-68)",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Every rule names at least one kind and one verb; every constraint has one operator.
     pub fn validate(&self) -> Result<()> {
         if self.rules.is_empty() {

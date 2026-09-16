@@ -73,3 +73,23 @@ test_organization_scope_covers_every_project if {
 		with data.roles as roles
 		with data.bindings as bindings
 }
+
+project_roles := {"ovzdusie": {"air-analyst": {"rules": [{"kinds": ["DataSource"], "verbs": ["propose"]}]}}}
+
+project_role_bindings := [{"name": "ovzdusie-analysts", "subjects": [{"user": "peter"}], "role": "air-analyst", "scope": {"project": "ovzdusie"}}]
+
+datasource_change(project) := {"path": sprintf("projects/%s/sources/air.yaml", [project]), "action": "propose", "kind": "DataSource", "name": "air", "project": project, "manifest": {"kind": "DataSource", "spec": {}}}
+
+test_a_project_role_grants_inside_its_project if {
+	count(deny) == 0 with input as {"author": "peter", "groups": [], "changes": [datasource_change("ovzdusie")]}
+		with data.roles as roles
+		with data.projectRoles as project_roles
+		with data.bindings as project_role_bindings
+}
+
+test_a_project_role_grants_nothing_in_another_project if {
+	count(deny) == 1 with input as {"author": "peter", "groups": [], "changes": [datasource_change("doprava")]}
+		with data.roles as roles
+		with data.projectRoles as project_roles
+		with data.bindings as project_role_bindings
+}

@@ -7,6 +7,7 @@
 //! runs them. `input` turns a diff into the document the gate evaluates.
 
 use crate::loader::{RawManifest, Repository};
+use jc_core::envelope::ORG_NAMESPACE;
 use jc_core::kinds::{RoleBindingSpec, RoleSpec, Subject, Verb};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -57,6 +58,24 @@ pub enum RolesError {
         /// The role it names.
         role: String,
     },
+    /// The same role name in `users/roles/` and inside a project (PF-68).
+    RoleNameClash {
+        /// The name both carry.
+        name: String,
+        /// The project whose role clashes with the organization's.
+        project: String,
+    },
+    /// A project's own role bound where it does not reach (PF-69).
+    RoleOutOfReach {
+        /// The binding's name.
+        binding: String,
+        /// The role it names.
+        role: String,
+        /// The project the role belongs to.
+        role_project: String,
+        /// Where the binding applies, in words.
+        scope: String,
+    },
     /// A file could not be read or written.
     Io(std::io::Error),
 }
@@ -70,7 +89,27 @@ impl fmt::Display for RolesError {
             Self::MissingRole { binding, role } => {
                 write!(
                     f,
-                    "RoleBinding `{binding}` names Role `{role}`, which users/roles/ lacks"
+                    "RoleBinding `{binding}` names Role `{role}`, which neither users/roles/ \
+                     nor its own project holds"
+                )
+            }
+            Self::RoleNameClash { name, project } => {
+                write!(
+                    f,
+                    "Role `{name}` is in users/roles/ and in project `{project}`; a project \
+                     role takes a name of its own (PF-68)"
+                )
+            }
+            Self::RoleOutOfReach {
+                binding,
+                role,
+                role_project,
+                scope,
+            } => {
+                write!(
+                    f,
+                    "RoleBinding `{binding}` names Role `{role}` of project `{role_project}` \
+                     at {scope}; a project role is bound inside its own project alone (PF-69)"
                 )
             }
             Self::Io(e) => write!(f, "{e}"),
@@ -89,8 +128,11 @@ impl From<std::io::Error> for RolesError {
 /// `policies/roles.json`: the bindings as the Rego gate reads them.
 #[derive(Debug, Serialize)]
 pub struct RolesData {
-    /// Every `Role`, by name.
+    /// The organization's roles, by name.
     pub roles: BTreeMap<String, RoleSpec>,
+    /// Each project's own roles, by project and then by name (PF-68).
+    #[serde(rename = "projectRoles")]
+    pub project_roles: BTreeMap<String, BTreeMap<String, RoleSpec>>,
     /// Every `RoleBinding`, sorted by name.
     pub bindings: Vec<NamedBinding>,
 }
@@ -135,41 +177,122 @@ fn handle(subject: &Subject, org: Option<&str>) -> Option<String> {
     })
 }
 
+/// The role a binding names, looked up where the binding may reach it (PF-69).
+///
+/// The organization's roles first, then the roles of the project the binding's scope names —
+/// its own project, or the project the bound context space lives in. A name cannot be in both,
+/// because [`compile`] refuses that before it gets here (PF-68).
+fn resolve<'a>(
+    binding: &NamedBinding,
+    roles: &'a BTreeMap<String, RoleSpec>,
+    project_roles: &'a BTreeMap<String, BTreeMap<String, RoleSpec>>,
+    project_of_space: &BTreeMap<String, String>,
+) -> Result<&'a RoleSpec, RolesError> {
+    if let Some(spec) = roles.get(&binding.spec.role) {
+        return Ok(spec);
+    }
+    let scope = &binding.spec.scope;
+    let reachable = scope.project.clone().or_else(|| {
+        scope
+            .context_space
+            .as_ref()
+            .and_then(|space| project_of_space.get(space).cloned())
+    });
+    if let Some(project) = &reachable {
+        if let Some(spec) = project_roles
+            .get(project)
+            .and_then(|named| named.get(&binding.spec.role))
+        {
+            return Ok(spec);
+        }
+    }
+    // The role exists, but not where this binding reaches: say where it is and where the
+    // binding is, rather than "missing".
+    if let Some((role_project, _)) = project_roles
+        .iter()
+        .find(|(_, named)| named.contains_key(&binding.spec.role))
+    {
+        return Err(RolesError::RoleOutOfReach {
+            binding: binding.name.clone(),
+            role: binding.spec.role.clone(),
+            role_project: role_project.clone(),
+            scope: match (&scope.organization, &scope.project, &scope.context_space) {
+                (Some(org), _, _) => format!("organization scope `{org}`"),
+                (_, Some(project), _) => format!("project scope `{project}`"),
+                (_, _, Some(space)) => format!("context space scope `{space}`"),
+                _ => "an unnamed scope".to_owned(),
+            },
+        });
+    }
+    Err(RolesError::MissingRole {
+        binding: binding.name.clone(),
+        role: binding.spec.role.clone(),
+    })
+}
+
 /// Compiles the repository's `users/` into `CODEOWNERS` and `policies/roles.json`.
 pub fn compile(repo: &Repository) -> Result<Compiled, RolesError> {
     let mut roles = BTreeMap::new();
+    let mut project_roles: BTreeMap<String, BTreeMap<String, RoleSpec>> = BTreeMap::new();
     let mut bindings = Vec::new();
     let mut org: Option<String> = None;
+    // A context-space binding names no project, so the space's own namespace says which
+    // project's roles it may reach (PF-69).
+    let mut project_of_space: BTreeMap<String, String> = BTreeMap::new();
     for (id, loaded) in repo.iter() {
         match id.kind.as_str() {
             "Role" => {
-                roles.insert(id.name.clone(), parse::<RoleSpec>(&loaded.manifest)?);
+                let spec = parse::<RoleSpec>(&loaded.manifest)?;
+                match id.namespace.as_deref() {
+                    Some(project) if project != ORG_NAMESPACE => {
+                        project_roles
+                            .entry(project.to_owned())
+                            .or_default()
+                            .insert(id.name.clone(), spec);
+                    }
+                    _ => {
+                        roles.insert(id.name.clone(), spec);
+                    }
+                }
             }
             "RoleBinding" => bindings.push(NamedBinding {
                 name: id.name.clone(),
                 spec: parse::<RoleBindingSpec>(&loaded.manifest)?,
             }),
             "Organization" => org = Some(id.name.clone()),
+            "ContextSpace" => {
+                if let Some(project) = id.namespace.clone() {
+                    project_of_space.insert(id.name.clone(), project);
+                }
+            }
             _ => {}
+        }
+    }
+    for (project, named) in &project_roles {
+        for name in named.keys() {
+            if roles.contains_key(name) {
+                return Err(RolesError::RoleNameClash {
+                    name: name.clone(),
+                    project: project.clone(),
+                });
+            }
         }
     }
     bindings.sort_by(|a, b| a.name.cmp(&b.name));
     for binding in &bindings {
-        if !roles.contains_key(&binding.spec.role) {
-            return Err(RolesError::MissingRole {
-                binding: binding.name.clone(),
-                role: binding.spec.role.clone(),
-            });
-        }
+        resolve(binding, &roles, &project_roles, &project_of_space)?;
     }
 
     // CODEOWNERS: a binding owns the paths its scope covers when its role may approve
     // anything there; what it may approve exactly is the Rego gate's business.
     let approves = |binding: &NamedBinding| {
-        roles[&binding.spec.role]
-            .rules
-            .iter()
-            .any(|rule| rule.verbs.contains(&Verb::Approve))
+        resolve(binding, &roles, &project_roles, &project_of_space)
+            .map(|spec| {
+                spec.rules
+                    .iter()
+                    .any(|rule| rule.verbs.contains(&Verb::Approve))
+            })
+            .unwrap_or(false)
     };
     let owners = |binding: &NamedBinding| -> Vec<String> {
         binding
@@ -217,8 +340,12 @@ pub fn compile(repo: &Repository) -> Result<Compiled, RolesError> {
         }
     }
 
-    let mut roles_json =
-        serde_json::to_string_pretty(&RolesData { roles, bindings }).expect("role data serializes");
+    let mut roles_json = serde_json::to_string_pretty(&RolesData {
+        roles,
+        project_roles,
+        bindings,
+    })
+    .expect("role data serializes");
     roles_json.push('\n');
     Ok(Compiled {
         codeowners: out,

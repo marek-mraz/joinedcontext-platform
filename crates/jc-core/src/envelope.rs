@@ -26,6 +26,10 @@ pub trait Kind:
     /// ContextSpace, see [`Kind::context_space`]) and `{name}` (`metadata.name`).
     const PATH_TEMPLATE: &'static str;
 
+    /// Where a kind of scope [`Scope::OrganizationOrProject`] lives when it is in a project
+    /// (PF-68). `None` for every kind that lives in one place, which is all but `Role`.
+    const PROJECT_PATH_TEMPLATE: Option<&'static str> = None;
+
     /// Kind-specific validation of the spec against its own metadata.
     ///
     /// The default checks nothing; every kind that has invariants of its own implements it,
@@ -48,12 +52,20 @@ pub trait Kind:
     /// `jcctl`, the reconciler and the Portal (through [`crate::registry`]) all derive the
     /// same path.
     fn repo_path(&self, meta: &ObjectMeta) -> String {
-        Self::PATH_TEMPLATE
-            .replace("{project}", meta.namespace.as_deref().unwrap_or_default())
+        let namespace = meta.namespace.as_deref().unwrap_or_default();
+        let template = match Self::PROJECT_PATH_TEMPLATE {
+            Some(in_project) if !namespace.is_empty() && namespace != ORG_NAMESPACE => in_project,
+            _ => Self::PATH_TEMPLATE,
+        };
+        template
+            .replace("{project}", namespace)
             .replace("{space}", self.context_space().unwrap_or_default())
             .replace("{name}", &meta.name)
     }
 }
+
+/// The namespace of everything that belongs to the organization rather than to one project.
+pub const ORG_NAMESPACE: &str = "org";
 
 /// Target scope hierarchy of a manifest kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -62,6 +74,22 @@ pub enum Scope {
     Organization,
     /// Project-level resource (namespace must be a project slug).
     Project,
+    /// A kind that lives in either: the organization's own copy in `org`, or a project's own
+    /// copy in that project's namespace. `Role` is the one, so a project defines roles of its
+    /// own without reaching outside it (PF-68).
+    OrganizationOrProject,
+}
+
+impl Scope {
+    /// Whether a manifest of this scope may carry the organization's namespace.
+    pub fn allows_organization(self) -> bool {
+        matches!(self, Scope::Organization | Scope::OrganizationOrProject)
+    }
+
+    /// Whether a manifest of this scope may carry a project's namespace.
+    pub fn allows_project(self) -> bool {
+        matches!(self, Scope::Project | Scope::OrganizationOrProject)
+    }
 }
 
 /// Kubernetes-style resource envelope (MF-01..MF-04).
@@ -167,8 +195,9 @@ impl<S: Kind> ResourceEnvelope<S> {
         };
 
         match S::SCOPE {
+            Scope::OrganizationOrProject => {}
             Scope::Organization => {
-                if ns != "org" {
+                if ns != ORG_NAMESPACE {
                     return Err(Error::Name {
                         field: "metadata.namespace",
                         value: ns.to_string(),
@@ -177,7 +206,7 @@ impl<S: Kind> ResourceEnvelope<S> {
                 }
             }
             Scope::Project => {
-                if ns == "org" {
+                if ns == ORG_NAMESPACE {
                     return Err(Error::Name {
                         field: "metadata.namespace",
                         value: ns.to_string(),

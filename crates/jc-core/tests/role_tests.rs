@@ -141,6 +141,7 @@ fn validity_is_ordered_and_bounds_are_inclusive() {
 #[test]
 fn both_kinds_live_in_users_of_the_organization_repository() {
     let role_info = jc_core::registry::by_kind("Role").expect("registered");
+    // No namespace is the organization's, never a project's (PF-68).
     assert_eq!(
         role_info.repo_path("", "", "pipeline-developer"),
         "users/roles/pipeline-developer.yaml"
@@ -199,4 +200,72 @@ fn the_read_verb_parses_from_a_manifest() {
     assert_eq!(viewer.spec.rules[0].verbs, vec![Verb::Read]);
     let yaml = serde_norway::to_string(&viewer).expect("serializes");
     assert!(yaml.contains("- read"), "serde name is `read`: {yaml}");
+}
+
+// ---------------------------------------------------------------------------
+// A role of a project (PF-68, T-0871)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_role_in_a_project_lands_in_that_project_and_names_project_kinds_only() {
+    use jc_core::envelope::Kind;
+
+    // The same rules, in a project: the path is the project's, not the organization's.
+    let in_project = role("namespace: org", "namespace: ovzdusie").expect("a project role");
+    assert_eq!(
+        in_project.spec.repo_path(&in_project.metadata),
+        "projects/ovzdusie/roles/pipeline-developer.yaml"
+    );
+    let in_org = role("", "").expect("the organization's role");
+    assert_eq!(
+        in_org.spec.repo_path(&in_org.metadata),
+        "users/roles/pipeline-developer.yaml"
+    );
+
+    // Naming an organization kind from a project would let a project write the rules.
+    for forbidden in ["Role", "RoleBinding", "Group", "Organization", "Project"] {
+        let yaml = ROLE
+            .replace("namespace: org", "namespace: ovzdusie")
+            .replace("[Pipeline, DataSource, Mapping]", &format!("[{forbidden}]"));
+        let manifest = Role::from_yaml(&yaml).expect("parses");
+        let err = manifest
+            .validate()
+            .expect_err("{forbidden} is out of reach");
+        assert!(
+            err.to_string().contains(forbidden) && err.to_string().contains("PF-68"),
+            "{err}"
+        );
+    }
+
+    // The same kinds are a role of the organization's own, unchanged.
+    let yaml = ROLE.replace("[Pipeline, DataSource, Mapping]", "[Role, RoleBinding]");
+    Role::from_yaml(&yaml)
+        .expect("parses")
+        .validate()
+        .expect("the organization's role names the organization's kinds");
+}
+
+#[test]
+fn the_registry_knows_where_a_role_lives_in_either_place() {
+    use jc_core::envelope::Scope;
+
+    let info = jc_core::registry::by_kind("Role").expect("Role is catalogued");
+    assert_eq!(info.scope, Scope::OrganizationOrProject);
+    assert!(info.scope.allows_organization() && info.scope.allows_project());
+    assert_eq!(
+        info.repo_path("org", "", "pipeline-developer"),
+        "users/roles/pipeline-developer.yaml"
+    );
+    assert_eq!(
+        info.repo_path("ovzdusie", "", "air-analyst"),
+        "projects/ovzdusie/roles/air-analyst.yaml"
+    );
+
+    // Every other kind lives in one place and is unchanged by the second template.
+    let binding = jc_core::registry::by_kind("RoleBinding").expect("RoleBinding is catalogued");
+    assert_eq!(binding.project_path_template, None);
+    assert_eq!(
+        binding.repo_path("ovzdusie", "", "analysts"),
+        "users/assignments/analysts.yaml"
+    );
 }

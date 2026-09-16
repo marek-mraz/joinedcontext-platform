@@ -23,7 +23,7 @@
 use crate::commands::export;
 use crate::loader::{is_empty_doc, parse_yaml_documents, RawManifest, Repository, ResourceId};
 use jc_core::envelope::annotations::IMPORTED_FROM;
-use jc_core::{registry, Scope, API_VERSION};
+use jc_core::{registry, API_VERSION};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -395,8 +395,10 @@ fn rewrite(manifest: &mut RawManifest, options: &Options, origin: &str) {
     manifest.metadata.collapse_language_maps();
 
     if let Some(target) = &options.namespace {
-        let organization_scoped =
-            registry::by_kind(&manifest.kind).is_some_and(|info| info.scope == Scope::Organization);
+        let organization_scoped = crate::commands::export::belongs_to_the_organization(
+            &manifest.kind,
+            manifest.metadata.namespace.as_deref(),
+        );
         if !organization_scoped {
             manifest.metadata.namespace = Some(target.clone());
         }

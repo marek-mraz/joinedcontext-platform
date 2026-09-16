@@ -20,6 +20,9 @@ pub struct KindInfo {
     pub scope: Scope,
     /// Repository path template with `{project}`, `{space}` and `{name}` placeholders.
     pub path_template: &'static str,
+    /// Where a kind of scope [`Scope::OrganizationOrProject`] lives inside a project (PF-68);
+    /// `None` for every kind that lives in one place.
+    pub project_path_template: Option<&'static str>,
 }
 
 macro_rules! catalogue {
@@ -30,6 +33,7 @@ macro_rules! catalogue {
             plural: <$spec as Kind>::PLURAL,
             scope: <$spec as Kind>::SCOPE,
             path_template: <$spec as Kind>::PATH_TEMPLATE,
+            project_path_template: <$spec as Kind>::PROJECT_PATH_TEMPLATE,
         }),+];
 
         /// Parses and validates a manifest of `kind` from YAML without knowing its Rust type.
@@ -105,11 +109,21 @@ pub fn by_plural(plural: &str) -> Option<&'static KindInfo> {
 }
 
 impl KindInfo {
-    /// Renders [`KindInfo::path_template`] for a concrete project, space and resource name.
+    /// Renders the kind's path template for a concrete project, space and resource name.
     ///
-    /// `space` is ignored by kinds whose template has no `{space}` placeholder.
+    /// `project` is the manifest's namespace, so a kind that lives in either place lands where
+    /// its namespace says (PF-68). `space` is ignored by kinds whose template has no `{space}`
+    /// placeholder.
     pub fn repo_path(&self, project: &str, space: &str, name: &str) -> String {
-        self.path_template
+        let template = match self.project_path_template {
+            Some(in_project)
+                if !project.is_empty() && project != crate::envelope::ORG_NAMESPACE =>
+            {
+                in_project
+            }
+            _ => self.path_template,
+        };
+        template
             .replace("{project}", project)
             .replace("{space}", space)
             .replace("{name}", name)

@@ -331,3 +331,127 @@ fn a_repository_without_users_gets_no_files() {
     assert!(roles::render(&dir).expect("renders").is_empty());
     assert!(!dir.join(roles::CODEOWNERS).exists());
 }
+
+// ---------------------------------------------------------------------------
+// A role of a project, bound inside that project and nowhere else (PF-68, PF-69, T-0871)
+// ---------------------------------------------------------------------------
+
+const PROJECT_ROLE_ANALYST: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Role
+metadata: { name: air-analyst, namespace: ovzdusie }
+spec:
+  rules:
+    - kinds: [DataSource, Mapping]
+      verbs: [propose]
+"#;
+
+const BINDING_ANALYSTS: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: RoleBinding
+metadata: { name: ovzdusie-analysts, namespace: org }
+spec:
+  subjects: [{ user: peter }]
+  role: air-analyst
+  scope: { project: ovzdusie }
+"#;
+
+#[test]
+fn a_project_role_is_bound_in_its_own_project_and_carries_its_namespace() {
+    let dir = users_repo("project-role");
+    write(
+        &dir,
+        "projects/ovzdusie/roles/air-analyst.yaml",
+        PROJECT_ROLE_ANALYST,
+    );
+    write(
+        &dir,
+        "users/assignments/ovzdusie-analysts.yaml",
+        BINDING_ANALYSTS,
+    );
+
+    let compiled = roles::compile(&load(&dir)).expect("compiles");
+    let data: serde_json::Value = serde_json::from_str(&compiled.roles_json).expect("json");
+
+    // The organization's roles and the project's stay apart, so the gate knows which is which.
+    assert!(data["roles"]["air-analyst"].is_null(), "{}", data["roles"]);
+    assert_eq!(
+        data["projectRoles"]["ovzdusie"]["air-analyst"]["rules"][0]["kinds"][0],
+        "DataSource"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_project_role_bound_at_organization_scope_or_in_another_project_is_refused() {
+    let at_org = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: RoleBinding
+metadata: { name: everyone-analysts, namespace: org }
+spec:
+  subjects: [{ user: peter }]
+  role: air-analyst
+  scope: { organization: banskabystrica }
+"#;
+    let dir = demo_repo("project-role-at-org");
+    write(
+        &dir,
+        "projects/ovzdusie/roles/air-analyst.yaml",
+        PROJECT_ROLE_ANALYST,
+    );
+    write(&dir, "users/assignments/everyone-analysts.yaml", at_org);
+    let err = roles::compile(&load(&dir)).expect_err("out of reach");
+    assert!(
+        matches!(&err, RolesError::RoleOutOfReach { role, role_project, .. }
+            if role == "air-analyst" && role_project == "ovzdusie"),
+        "{err}"
+    );
+    assert!(err.to_string().contains("organization scope"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let elsewhere = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: RoleBinding
+metadata: { name: doprava-analysts, namespace: org }
+spec:
+  subjects: [{ user: peter }]
+  role: air-analyst
+  scope: { project: doprava }
+"#;
+    let dir = demo_repo("project-role-elsewhere");
+    write(
+        &dir,
+        "projects/ovzdusie/roles/air-analyst.yaml",
+        PROJECT_ROLE_ANALYST,
+    );
+    write(&dir, "users/assignments/doprava-analysts.yaml", elsewhere);
+    let err = roles::compile(&load(&dir)).expect_err("out of reach");
+    assert!(
+        matches!(&err, RolesError::RoleOutOfReach { scope, .. } if scope.contains("doprava")),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_same_role_name_in_users_and_in_a_project_is_refused() {
+    let clash = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Role
+metadata: { name: pipeline-developer, namespace: ovzdusie }
+spec:
+  rules:
+    - kinds: [DataSource]
+      verbs: [propose]
+"#;
+    let dir = users_repo("role-name-clash");
+    write(
+        &dir,
+        "projects/ovzdusie/roles/pipeline-developer.yaml",
+        clash,
+    );
+    let err = roles::compile(&load(&dir)).expect_err("a name in two places");
+    assert!(
+        matches!(&err, RolesError::RoleNameClash { name, project }
+            if name == "pipeline-developer" && project == "ovzdusie"),
+        "{err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

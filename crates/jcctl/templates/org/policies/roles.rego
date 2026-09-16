@@ -8,7 +8,9 @@
 #   groups: the groups the author belongs to (empty when the forge cannot tell)
 #   changes: one per changed manifest: path, action (propose | delete), kind, name, project,
 #            manifest (the whole document, for the constraints)
-# data (policies/roles.json): roles (name -> { rules }), bindings ([{ name, subjects, role, scope }])
+# data (policies/roles.json): roles (name -> { rules }) for the organization's own roles,
+#   projectRoles (project -> name -> { rules }) for a project's own roles (PF-68),
+#   bindings ([{ name, subjects, role, scope }])
 package main
 
 import rego.v1
@@ -23,10 +25,21 @@ allowed(change) if {
 	some binding in data.bindings
 	subject_matches(binding)
 	scope_covers(binding.scope, change)
-	some rule in data.roles[binding.role].rules
+	some rule in rules_of(binding, change)
 	change.kind in rule.kinds
 	change.action in rule.verbs
 	constraints_hold(rule, change.manifest)
+}
+
+# The organization's role, or the role of the project this change belongs to; a name is never
+# both, which `jcctl validate` refuses before this file is written (PF-68, PF-69).
+rules_of(binding, _) := rules if {
+	rules := data.roles[binding.role].rules
+}
+
+rules_of(binding, change) := rules if {
+	not data.roles[binding.role]
+	rules := data.projectRoles[change.project][binding.role].rules
 }
 
 subject_matches(binding) if {

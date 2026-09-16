@@ -136,6 +136,15 @@ pub fn run(repo_dir: &Path) -> Report {
         });
     }
 
+    for (location, message) in roles_that_do_not_resolve(&repo) {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
     for (directory, message) in projects_without_a_manifest(repo_dir, &repo) {
         report.findings.push(Finding {
             path: directory,
@@ -160,6 +169,46 @@ pub fn run(repo_dir: &Path) -> Report {
 
 /// Where a finding sits: the file, the document inside it and its first line.
 type Location = (PathBuf, usize, usize);
+
+/// What the roles compiler refuses: a role name in two places, a binding that names a role it
+/// cannot reach, or one that names no role at all (PF-68, PF-69, PF-49).
+///
+/// The compiler already knows these rules, because it writes `CODEOWNERS` and
+/// `policies/roles.json` from them. Running it here is what turns "the render fails" into a
+/// finding `jcctl validate` reports with the file and line, before anyone pushes.
+fn roles_that_do_not_resolve(repo: &Repository) -> Vec<(Location, String)> {
+    let touches_roles = repo
+        .iter()
+        .any(|(id, _)| id.kind == "Role" || id.kind == "RoleBinding");
+    if !touches_roles {
+        return Vec::new();
+    }
+    let Err(err) = crate::roles::compile(repo) else {
+        return Vec::new();
+    };
+    let named = match &err {
+        crate::roles::RolesError::RoleNameClash { name, project } => {
+            Some(("Role", name.clone(), Some(project.clone())))
+        }
+        crate::roles::RolesError::RoleOutOfReach { binding, .. }
+        | crate::roles::RolesError::MissingRole { binding, .. } => {
+            Some(("RoleBinding", binding.clone(), None))
+        }
+        _ => None,
+    };
+    let at = named.and_then(|(kind, name, namespace)| {
+        repo.iter().find_map(|(id, loaded)| {
+            let matches = id.kind == kind
+                && id.name == name
+                && namespace
+                    .as_deref()
+                    .is_none_or(|ns| id.namespace.as_deref() == Some(ns));
+            matches.then(|| (loaded.path.clone(), loaded.document, loaded.line))
+        })
+    });
+    let location = at.unwrap_or_else(|| (PathBuf::from("users"), 1, 1));
+    vec![(location, err.to_string())]
+}
 
 /// Every `subjects[].group` of a `RoleBinding` that no `Group` manifest declares (PF-64).
 ///
