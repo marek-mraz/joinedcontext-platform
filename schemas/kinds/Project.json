@@ -184,8 +184,35 @@
       "additionalProperties": false,
       "description": "Structural resource quotas per project (PF-17).\n\nAn absent field indicates unlimited quota for that resource.",
       "properties": {
+        "agentRunsPerDay": {
+          "description": "Maximum number of agent runs the project starts in one day (PF-73, PF-74).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "apps": {
+          "description": "Maximum number of Apps the project deploys (PF-73).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "contextSpaces": {
           "description": "Maximum number of active Context Spaces.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "entitiesPerSpace": {
+          "description": "Maximum number of entities one Context Space of the project holds (PF-73).",
           "format": "uint32",
           "minimum": 0.0,
           "type": [
@@ -204,6 +231,15 @@
         },
         "publicEndpoints": {
           "description": "Maximum number of public endpoints.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requestsPerMinute": {
+          "description": "Maximum requests per minute one Endpoint of the project serves (PF-73, EP-17).",
           "format": "uint32",
           "minimum": 0.0,
           "type": [

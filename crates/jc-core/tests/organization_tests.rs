@@ -1,5 +1,5 @@
 use jc_core::envelope::ResourceEnvelope;
-use jc_core::kinds::{ContactRole, Organization, OrganizationSpec};
+use jc_core::kinds::{ContactRole, Organization, OrganizationSpec, Quotas};
 use jc_core::names;
 
 const GOLDEN: &str = r#"apiVersion: joinedcontext.com/v1alpha1
@@ -247,4 +247,69 @@ fn an_unknown_visibility_or_creation_is_refused() {
             "{field}: {value} was accepted"
         );
     }
+}
+
+/// PF-73: the quota every project starts from, and what stands above it.
+#[test]
+fn the_default_quota_is_the_organizations_and_an_override_above_it_is_named() {
+    let yaml = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata: { name: hel, namespace: org }
+spec:
+  domain: hel.fi
+  locales: [en]
+  defaultLocale: en
+  projects:
+    quota:
+      contextSpaces: 10
+      residentPipelines: 25
+      publicEndpoints: 15
+      apps: 5
+      agentRunsPerDay: 50
+      entitiesPerSpace: 1000000
+      requestsPerMinute: 600
+"#;
+    assert!(jc_core::registry::validate_yaml("Organization", yaml)
+        .expect("a known kind")
+        .is_ok());
+    let spec: OrganizationSpec = serde_norway::from_str(
+        &serde_norway::to_string(
+            serde_norway::from_str::<serde_norway::Value>(yaml)
+                .expect("yaml")
+                .get("spec")
+                .expect("a spec"),
+        )
+        .expect("spec"),
+    )
+    .expect("an organization");
+    let default = spec.projects.quota.expect("the default quota");
+
+    let project: Quotas = serde_norway::from_str("apps: 9\nagentRunsPerDay: 10\n").expect("quotas");
+    assert_eq!(project.above(&default), vec![("apps", 9, 5)]);
+    assert!(!project.within(&default));
+
+    let lowered: Quotas = serde_norway::from_str("apps: 2\n").expect("quotas");
+    assert!(
+        lowered.within(&default),
+        "below the default is the project's own"
+    );
+}
+
+/// A quota of zero forbids everything by accident; PF-17 wants a positive number or none.
+#[test]
+fn a_zero_in_the_default_quota_is_refused_with_its_field() {
+    let yaml = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata: { name: hel, namespace: org }
+spec:
+  domain: hel.fi
+  locales: [en]
+  defaultLocale: en
+  projects:
+    quota: { requestsPerMinute: 0 }
+"#;
+    let err = jc_core::registry::validate_yaml("Organization", yaml)
+        .expect("a known kind")
+        .expect_err("zero is not a quota");
+    assert!(err.to_string().contains("requestsPerMinute"), "{err}");
 }

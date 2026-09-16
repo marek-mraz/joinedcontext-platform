@@ -66,48 +66,68 @@ pub struct Quotas {
     /// Maximum ingestion rate in events per second.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingest_events_per_second: Option<u32>,
+    /// Maximum number of Apps the project deploys (PF-73).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps: Option<u32>,
+    /// Maximum number of agent runs the project starts in one day (PF-73, PF-74).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_runs_per_day: Option<u32>,
+    /// Maximum number of entities one Context Space of the project holds (PF-73).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entities_per_space: Option<u32>,
+    /// Maximum requests per minute one Endpoint of the project serves (PF-73, EP-17).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests_per_minute: Option<u32>,
 }
 
 impl Quotas {
+    /// Every dimension by its manifest field name, in the order PF-73 lists them.
+    pub fn dimensions(&self) -> [(&'static str, Option<u32>); 8] {
+        [
+            ("contextSpaces", self.context_spaces),
+            ("residentPipelines", self.resident_pipelines),
+            ("publicEndpoints", self.public_endpoints),
+            ("ingestEventsPerSecond", self.ingest_events_per_second),
+            ("apps", self.apps),
+            ("agentRunsPerDay", self.agent_runs_per_day),
+            ("entitiesPerSpace", self.entities_per_space),
+            ("requestsPerMinute", self.requests_per_minute),
+        ]
+    }
+
     /// Validates that all defined quotas are positive integers (>= 1).
     pub fn validate(&self) -> Result<()> {
-        if let Some(val) = self.context_spaces {
-            if val == 0 {
+        for (field, value) in self.dimensions() {
+            if value == Some(0) {
                 return Err(Error::Name {
-                    field: "quotas.contextSpaces",
-                    value: "0".to_string(),
-                    reason: "quota must be >= 1",
-                });
-            }
-        }
-        if let Some(val) = self.resident_pipelines {
-            if val == 0 {
-                return Err(Error::Name {
-                    field: "quotas.residentPipelines",
-                    value: "0".to_string(),
-                    reason: "quota must be >= 1",
-                });
-            }
-        }
-        if let Some(val) = self.public_endpoints {
-            if val == 0 {
-                return Err(Error::Name {
-                    field: "quotas.publicEndpoints",
-                    value: "0".to_string(),
-                    reason: "quota must be >= 1",
-                });
-            }
-        }
-        if let Some(val) = self.ingest_events_per_second {
-            if val == 0 {
-                return Err(Error::Name {
-                    field: "quotas.ingestEventsPerSecond",
-                    value: "0".to_string(),
+                    field: "quotas",
+                    value: format!("{field}: 0"),
                     reason: "quota must be >= 1",
                 });
             }
         }
         Ok(())
+    }
+
+    /// Which of this quota's values stand above `default`, as `(field, value, default)` (PF-73).
+    ///
+    /// An override below the default is the project's own business, in the yellow lane; one above
+    /// it is the organization's, which is what makes it red. A dimension the default leaves open
+    /// is not exceeded by any value.
+    pub fn above(&self, default: &Quotas) -> Vec<(&'static str, u32, u32)> {
+        self.dimensions()
+            .into_iter()
+            .zip(default.dimensions())
+            .filter_map(|((field, mine), (_, theirs))| match (mine, theirs) {
+                (Some(mine), Some(theirs)) if mine > theirs => Some((field, mine, theirs)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether every value of this quota is within `default` (PF-73).
+    pub fn within(&self, default: &Quotas) -> bool {
+        self.above(default).is_empty()
     }
 }
 

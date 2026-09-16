@@ -336,6 +336,17 @@
           "default": "org-admin",
           "description": "Who may open a project: `anyone`, `group:<name>` or `org-admin` (PF-65)."
         },
+        "quota": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Quotas"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The quota every project the organization opens starts from (PF-73). A project may lower a value in the yellow lane; raising one above this is the red lane and an `org-admin`."
+        },
         "visibility": {
           "allOf": [
             {
@@ -344,6 +355,85 @@
           ],
           "default": "organization",
           "description": "Who holds the seeded `viewer` role at organization scope: every signed-in person of the organization (`organization`, the default) or only whoever a binding names (`members`) (PF-61)."
+        }
+      },
+      "type": "object"
+    },
+    "Quotas": {
+      "additionalProperties": false,
+      "description": "Structural resource quotas per project (PF-17).\n\nAn absent field indicates unlimited quota for that resource.",
+      "properties": {
+        "agentRunsPerDay": {
+          "description": "Maximum number of agent runs the project starts in one day (PF-73, PF-74).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "apps": {
+          "description": "Maximum number of Apps the project deploys (PF-73).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "contextSpaces": {
+          "description": "Maximum number of active Context Spaces.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "entitiesPerSpace": {
+          "description": "Maximum number of entities one Context Space of the project holds (PF-73).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ingestEventsPerSecond": {
+          "description": "Maximum ingestion rate in events per second.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "publicEndpoints": {
+          "description": "Maximum number of public endpoints.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requestsPerMinute": {
+          "description": "Maximum requests per minute one Endpoint of the project serves (PF-73, EP-17).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "residentPipelines": {
+          "description": "Maximum number of resident streaming pipelines.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "type": "object"

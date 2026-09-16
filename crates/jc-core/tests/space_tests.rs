@@ -66,25 +66,30 @@ fn golden_project_manifest_roundtrips_and_validates() {
 
 #[test]
 fn project_quota_zero_fails_validation() {
-    let mut q = Quotas {
-        context_spaces: Some(0),
+    // Every dimension of PF-17 and PF-73: a zero forbids everything by accident, and an absent
+    // field is what "unlimited" looks like.
+    let full = Quotas {
+        context_spaces: Some(1),
         resident_pipelines: Some(1),
         public_endpoints: Some(1),
         ingest_events_per_second: Some(1),
+        apps: Some(1),
+        agent_runs_per_day: Some(1),
+        entities_per_space: Some(1),
+        requests_per_minute: Some(1),
     };
-    assert!(q.validate().is_err());
+    assert!(full.validate().is_ok());
+    assert_eq!(full.dimensions().len(), 8);
 
-    q.context_spaces = Some(1);
-    q.resident_pipelines = Some(0);
-    assert!(q.validate().is_err());
+    for (field, _) in full.dimensions() {
+        let zeroed: Quotas = serde_norway::from_str(&format!("{field}: 0\n")).expect("quotas");
+        let err = zeroed
+            .validate()
+            .expect_err("a quota of zero is not a quota");
+        assert!(err.to_string().contains(field), "{err}");
+    }
 
-    q.resident_pipelines = Some(1);
-    q.public_endpoints = Some(0);
-    assert!(q.validate().is_err());
-
-    q.public_endpoints = Some(1);
-    q.ingest_events_per_second = Some(0);
-    assert!(q.validate().is_err());
+    assert!(Quotas::default().validate().is_ok(), "no quota is no limit");
 }
 
 #[test]

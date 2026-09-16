@@ -40,6 +40,10 @@ pub struct ProjectsPolicy {
     /// (PF-61).
     #[serde(default)]
     pub visibility: ProjectVisibility,
+    /// The quota every project the organization opens starts from (PF-73). A project may lower a
+    /// value in the yellow lane; raising one above this is the red lane and an `org-admin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<crate::kinds::Quotas>,
 }
 
 /// Who may open a project (PF-65). `group:<name>` names a `Group` of the organization.
@@ -184,6 +188,10 @@ impl OrganizationSpec {
                 },
                 other => other,
             })?;
+        }
+
+        if let Some(quota) = self.projects.quota.as_ref() {
+            quota.validate()?;
         }
 
         Ok(())
