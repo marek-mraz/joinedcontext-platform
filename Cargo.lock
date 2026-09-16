@@ -1679,6 +1679,7 @@ dependencies = [
  "aes-gcm",
  "age",
  "base64 0.22.1",
+ "chrono",
  "jc-core",
  "jsonschema",
  "minijinja",

@@ -12,7 +12,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -38,7 +38,9 @@ fn main() -> ExitCode {
             None => usage(),
         },
         ["export", rest @ ..] => match export_options(rest) {
-            Some((space, out, project)) => export(&space, &out, project.as_deref()),
+            Some((repo_dir, project, out, revision)) => {
+                export(&repo_dir, &project, &out, revision.as_deref())
+            }
             None => usage(),
         },
         ["model", "import", id, rest @ ..] => match import_options(rest) {
@@ -742,37 +744,47 @@ fn bundle_options(args: &[&str]) -> Option<(PathBuf, commands::import::Options, 
 /// Gateway serves the configuration API, so today it exports a fresh installation: an
 /// empty space. The cleaning and the redaction are what the command is for and they are
 /// exercised by `commands::export` directly.
-fn export(space: &str, out: &Path, project: Option<&str>) -> ExitCode {
-    // A space lives in a project and the platform has no project directory to ask; the
-    // usual naming has the two equal, and `--project` names them when they are not.
-    let project = project.unwrap_or(space);
-    let report = match commands::export::collect(&InMemory::new(), project, space) {
-        Ok(report) => report,
+fn export(repo_dir: &Path, project: &str, out: &Path, revision: Option<&str>) -> ExitCode {
+    // The configuration kinds live in Git (CC-72), so the bundle is the checkout's own
+    // `projects/{project}/`: manifests without status or secrets, natives byte for byte, and
+    // the index that says what it is (MF-16, MF-17, T-0824).
+    let bundle = match commands::export::collect_project(repo_dir, project) {
+        Ok(bundle) => bundle,
         Err(err) => return fail(&err.to_string()),
     };
-    let written = match commands::export::write(out, &report) {
-        Ok(written) => written,
-        Err(err) => return fail(&err.to_string()),
-    };
+    if bundle.resources.is_empty() && bundle.natives.is_empty() {
+        return fail(&format!(
+            "no project '{project}' in {} (projects/{project}/ holds nothing)",
+            repo_dir.display()
+        ));
+    }
+    let revision = revision.unwrap_or("0000000");
+    let exported_by = std::env::var("USER").unwrap_or_else(|_| "jcctl".to_owned());
+    let written =
+        match commands::export::write_bundle(out, project, revision, &exported_by, &bundle) {
+            Ok(written) => written,
+            Err(err) => return fail(&err.to_string()),
+        };
 
-    for redaction in &report.redactions {
+    for redaction in &bundle.redactions {
         eprintln!(
             "jcctl: redacted {redaction} (MF-17: a manifest carries a secretRef, never a secret)"
         );
     }
-    println!("{written} manifests written to {}", out.display());
+    println!("{written} files written to {}", out.display());
     ExitCode::SUCCESS
 }
 
-/// Parses `--space`, `--out-dir` and the optional `--project`, in any order.
-fn export_options(args: &[&str]) -> Option<(String, PathBuf, Option<String>)> {
-    let (mut space, mut out, mut project) = (None, None, None);
+/// Parses `--repo-dir`, `--project`, `--out-dir` and the optional `--revision`, in any order.
+fn export_options(args: &[&str]) -> Option<(PathBuf, String, PathBuf, Option<String>)> {
+    let (mut repo_dir, mut project, mut out, mut revision) = (None, None, None, None);
     let mut rest = args;
     while let [flag, value, tail @ ..] = rest {
         match *flag {
-            "--space" => space = Some((*value).to_owned()),
-            "--out-dir" => out = Some(PathBuf::from(value)),
+            "--repo-dir" => repo_dir = Some(PathBuf::from(value)),
             "--project" => project = Some((*value).to_owned()),
+            "--out-dir" => out = Some(PathBuf::from(value)),
+            "--revision" => revision = Some((*value).to_owned()),
             _ => return None,
         }
         rest = tail;
@@ -780,7 +792,7 @@ fn export_options(args: &[&str]) -> Option<(String, PathBuf, Option<String>)> {
     if !rest.is_empty() {
         return None;
     }
-    Some((space?, out?, project))
+    Some((repo_dir?, project?, out?, revision))
 }
 
 struct RolesInputOptions {
@@ -978,21 +990,51 @@ mod tests {
     #[test]
     fn export_option_parsing() {
         assert_eq!(
-            export_options(&["--space", "ovzdusie", "--out-dir", "/tmp/x"]),
-            Some(("ovzdusie".to_owned(), PathBuf::from("/tmp/x"), None))
-        );
-        assert_eq!(
-            export_options(&["--out-dir", "/tmp/x", "--project", "bb", "--space", "air"]),
+            export_options(&[
+                "--repo-dir",
+                "/tmp/repo",
+                "--project",
+                "ovzdusie",
+                "--out-dir",
+                "/tmp/x"
+            ]),
             Some((
-                "air".to_owned(),
+                PathBuf::from("/tmp/repo"),
+                "ovzdusie".to_owned(),
                 PathBuf::from("/tmp/x"),
-                Some("bb".to_owned())
+                None
             ))
         );
-        assert_eq!(export_options(&["--space", "ovzdusie"]), None, "no out-dir");
-        assert_eq!(export_options(&["--out-dir", "/tmp/x"]), None, "no space");
-        assert_eq!(export_options(&["--space"]), None, "no value");
-        assert_eq!(export_options(&["--repo-dir", "x", "--space", "y"]), None);
+        assert_eq!(
+            export_options(&[
+                "--out-dir",
+                "/tmp/x",
+                "--revision",
+                "3f9c2e1",
+                "--project",
+                "air",
+                "--repo-dir",
+                "/tmp/repo"
+            ]),
+            Some((
+                PathBuf::from("/tmp/repo"),
+                "air".to_owned(),
+                PathBuf::from("/tmp/x"),
+                Some("3f9c2e1".to_owned())
+            ))
+        );
+        assert_eq!(
+            export_options(&["--repo-dir", "/tmp/repo", "--project", "air"]),
+            None,
+            "no out-dir"
+        );
+        assert_eq!(
+            export_options(&["--out-dir", "/tmp/x", "--project", "air"]),
+            None,
+            "no repo-dir"
+        );
+        assert_eq!(export_options(&["--repo-dir"]), None, "no value");
+        assert_eq!(export_options(&["--space", "ovzdusie"]), None, "not a flag");
     }
 
     #[test]

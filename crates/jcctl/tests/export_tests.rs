@@ -8,24 +8,6 @@ use jcctl::commands::{export, validate};
 use jcctl::loader::RawManifest;
 use jcctl::platform::{InMemory, Platform};
 
-const POLICY: &str = r#"apiVersion: joinedcontext.com/v1alpha1
-kind: Policy
-metadata:
-  name: public-air-quality
-  namespace: ovzdusie
-spec:
-  contextSpaceRef:
-    kind: ContextSpace
-    name: ovzdusie
-  assigner: "did:web:banskabystrica.sk"
-  assignee: { kind: role, id: public }
-  operations: [queryEntity, retrieveEntity]
-  information:
-    - entities:
-        - type: AirQualityObserved
-      propertyNames: [pm10, pm25]
-"#;
-
 /// The same endpoint the platform would hand back: the declaration, plus the metadata the
 /// reconciler keeps beside it.
 const LIVE_ENDPOINT: &str = r#"apiVersion: joinedcontext.com/v1alpha1
@@ -61,6 +43,21 @@ spec:
   enabledRepresentations: ["ngsi-ld"]
 "#;
 
+const PIPELINE: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: aq
+  namespace: ovzdusie
+spec:
+  class: resident
+  source: { dataSourceRef: { kind: DataSource, name: mqtt-mesto } }
+  compute: { kind: bloblang }
+  targetEndpoint: "urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:public-air"
+"#;
+
+/// The pipeline's own logic, in Bento's format: ours only to carry (MF-17).
+const BENTO: &str = "input:\n  mqtt:\n    urls: [ mqtts://mqtt.mesto.sk:8883 ]\n";
+
 fn live(manifests: &[&str]) -> InMemory {
     let mut platform = InMemory::new();
     for yaml in manifests {
@@ -78,39 +75,112 @@ fn exported<'a>(report: &'a export::Report, path: &str) -> &'a RawManifest {
         .manifest
 }
 
-/// CC-22 and MF-06: what comes out is a repository — every manifest at the path its kind
-/// prescribes, and every manifest valid.
+/// MF-16, MF-17 and T-0824: what `jcctl export` writes is the project of the checkout — every
+/// manifest at the path it had, the native files beside them, and an index the platform's own
+/// registry accepts.
 #[test]
-fn an_exported_space_is_a_repository_that_validates() {
-    let platform = live(&[SPACE, LIVE_ENDPOINT, POLICY]);
-    let report = export::collect(&platform, "ovzdusie", "ovzdusie").expect("the platform answers");
+fn a_project_of_the_repository_is_written_out_as_a_bundle_that_validates() {
+    let repo = demo_repo("export-bundle-repo");
+    common::write(
+        &repo,
+        "projects/ovzdusie/pipelines/aq/pipeline.yaml",
+        PIPELINE,
+    );
+    common::write(&repo, "projects/ovzdusie/pipelines/aq/bento.yaml", BENTO);
 
-    let paths: Vec<&str> = report
+    let bundle = export::collect_project(&repo, "ovzdusie").expect("the checkout is read");
+    let paths: Vec<String> = bundle
         .resources
         .iter()
-        .filter_map(|resource| resource.path.to_str())
+        .map(|resource| resource.path.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        paths.contains(&"projects/ovzdusie/pipelines/aq/pipeline.yaml".to_owned()),
+        "{paths:?}"
+    );
+    let natives: Vec<String> = bundle
+        .natives
+        .iter()
+        .map(|(path, _)| path.to_string_lossy().into_owned())
         .collect();
     assert_eq!(
-        paths,
-        vec![
-            "projects/ovzdusie/spaces/ovzdusie/endpoints/public-air.yaml",
-            "projects/ovzdusie/spaces/ovzdusie/policies/public-air-quality.yaml",
-            "projects/ovzdusie/spaces/ovzdusie/space.yaml",
-        ]
+        natives,
+        vec!["projects/ovzdusie/pipelines/aq/bento.yaml".to_owned()],
+        "the pipeline's own logic travels with it (MF-17)"
     );
 
-    let dir = temp_dir("export-repository");
-    assert_eq!(export::write(&dir, &report).expect("written"), 3);
-
-    // validate(export(x)): the whole point of the command, run the way CI runs it.
-    let checked = validate::run(&dir);
-    assert!(
-        checked.is_valid(),
-        "the export does not validate: {:?}",
-        checked.findings
+    let out = temp_dir("export-bundle-out");
+    let written = export::write_bundle(&out, "ovzdusie", "3f9c2e1", "digitalizacia", &bundle)
+        .expect("written");
+    assert_eq!(written, bundle.resources.len() + bundle.natives.len() + 1);
+    assert_eq!(
+        std::fs::read_to_string(out.join("projects/ovzdusie/pipelines/aq/bento.yaml"))
+            .expect("the native file is in the bundle"),
+        BENTO,
+        "byte for byte"
     );
-    assert_eq!(checked.checked, 3);
-    let _ = std::fs::remove_dir_all(&dir);
+
+    // The index is the platform's own kind, so what the CLI wrote is what it accepts back.
+    let index = std::fs::read_to_string(out.join("bundle.yaml")).expect("the index");
+    assert_eq!(
+        jc_core::registry::validate_yaml("Bundle", &index),
+        Some(Ok(())),
+        "{index}"
+    );
+    assert!(index.contains("sourceRevision: 3f9c2e1"), "{index}");
+
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// MF-17: a literal credential in the checkout is dropped on the way out and named, the same
+/// rule the live read follows.
+#[test]
+fn a_bundle_of_the_repository_carries_no_literal_credential() {
+    let repo = demo_repo("export-bundle-secret");
+    common::write(
+        &repo,
+        "projects/ovzdusie/datasources/mqtt.yaml",
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: mqtt-mesto
+  namespace: ovzdusie
+spec:
+  kind: mqtt
+  mqtt:
+    urls: ["mqtts://mqtt.mesto.sk:8883"]
+    topics: ["air/#"]
+  password: "hunter2"
+"#,
+    );
+
+    let bundle = export::collect_project(&repo, "ovzdusie").expect("the checkout is read");
+    let rendered = format!("{:?}", bundle.resources);
+    assert!(!rendered.contains("hunter2"), "{rendered}");
+    assert_eq!(bundle.redactions, vec!["DataSource/mqtt-mesto: password"]);
+
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// A project the checkout does not hold is nothing to export, not an empty bundle with an
+/// index nobody can import.
+#[test]
+fn a_project_the_checkout_does_not_hold_writes_no_index() {
+    let repo = demo_repo("export-bundle-missing");
+    let bundle = export::collect_project(&repo, "doprava").expect("the checkout is read");
+    assert!(bundle.resources.is_empty() && bundle.natives.is_empty());
+
+    let out = temp_dir("export-bundle-missing-out");
+    assert_eq!(
+        export::write_bundle(&out, "doprava", "3f9c2e1", "digitalizacia", &bundle)
+            .expect("written"),
+        0
+    );
+    assert!(!out.join("bundle.yaml").exists());
+
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&out);
 }
 
 /// MF-16 and MF-04: an export is a declaration, not a snapshot. The platform's own

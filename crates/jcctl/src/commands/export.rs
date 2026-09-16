@@ -236,3 +236,168 @@ fn redact(spec: &mut Value, dropped: &mut Vec<String>) {
         _ => {}
     }
 }
+
+// --- the repository export (MF-16, MF-17, T-0824) -----------------------------------------
+
+/// Everything a bundle of one project holds: the manifests, the files beside them, and the
+/// index that says what it is.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Bundle {
+    /// Manifests, cleaned, at the path they had in the repository.
+    pub resources: Vec<Exported>,
+    /// Native files (`bento.yaml`, LinkML sources, generated artifacts), byte for byte.
+    pub natives: Vec<(PathBuf, Vec<u8>)>,
+    /// `kind/name: member` for every credential that was dropped (MF-17).
+    pub redactions: Vec<String>,
+}
+
+/// Reads `projects/{project}/` of a checkout as the bundle a download produces (MF-16, MF-17).
+///
+/// The configuration kinds live in Git (CC-72), so this is the whole export: a manifest is
+/// parsed, cleaned of `status` and of any literal credential, and written back at the path it
+/// had; anything else beside it is a native file and travels byte for byte, because it is the
+/// pipeline's or the model's own format, not ours to rewrite.
+pub fn collect_project(repo_dir: &Path, project: &str) -> std::io::Result<Bundle> {
+    let root = repo_dir.join("projects").join(project);
+    let mut bundle = Bundle::default();
+    let mut files: Vec<PathBuf> = Vec::new();
+    walk(&root, &mut files)?;
+    files.sort();
+
+    for path in files {
+        let relative = path
+            .strip_prefix(repo_dir)
+            .map_err(|_| std::io::Error::other("path escaped the repository"))?
+            .to_path_buf();
+        let body = std::fs::read(&path)?;
+        let manifest = match relative.extension().and_then(|e| e.to_str()) {
+            Some("yaml") | Some("yml") => std::str::from_utf8(&body)
+                .ok()
+                .and_then(|text| serde_norway::from_str::<RawManifest>(text).ok())
+                .filter(|manifest| registry::by_kind(&manifest.kind).is_some()),
+            _ => None,
+        };
+        match manifest {
+            Some(mut manifest) => {
+                strip_system_metadata(&mut manifest.metadata.rest);
+                let mut dropped = Vec::new();
+                redact(&mut manifest.spec, &mut dropped);
+                bundle.redactions.extend(dropped.into_iter().map(|member| {
+                    format!("{}/{}: {member}", manifest.kind, manifest.metadata.name)
+                }));
+                bundle.resources.push(Exported {
+                    path: relative,
+                    manifest,
+                });
+            }
+            None => bundle.natives.push((relative, body)),
+        }
+    }
+    Ok(bundle)
+}
+
+/// Writes a bundle under `out_dir`, index included, and answers how many files it wrote.
+pub fn write_bundle(
+    out_dir: &Path,
+    project: &str,
+    revision: &str,
+    exported_by: &str,
+    bundle: &Bundle,
+) -> std::io::Result<usize> {
+    let mut written = 0usize;
+    for resource in &bundle.resources {
+        let path = out_dir.join(&resource.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let yaml = serde_norway::to_string(&resource.manifest)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        std::fs::write(path, yaml)?;
+        written += 1;
+    }
+    for (relative, body) in &bundle.natives {
+        let path = out_dir.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, body)?;
+        written += 1;
+    }
+    // A Bundle lists at least one resource, so a project with no manifest gets no index
+    // rather than one the platform refuses (MF-17, T-0823).
+    if bundle.resources.is_empty() {
+        return Ok(written);
+    }
+    let index = index_of(project, revision, exported_by, bundle);
+    let yaml =
+        serde_norway::to_string(&index).map_err(|err| std::io::Error::other(err.to_string()))?;
+    std::fs::write(out_dir.join("bundle.yaml"), yaml)?;
+    Ok(written + 1)
+}
+
+/// The `kind: Bundle` index of a bundle, as the Portal's download writes it (MF-17, T-0823).
+///
+/// The platform's own kind, built from its own types: an index the registry refuses is a bundle
+/// the platform rejects as soon as anyone validates the tree it unpacks to.
+fn index_of(project: &str, revision: &str, exported_by: &str, bundle: &Bundle) -> Value {
+    let items: Vec<jc_core::kinds::BundleItem> = bundle
+        .resources
+        .iter()
+        .map(|resource| {
+            let organization_scoped = registry::by_kind(&resource.manifest.kind)
+                .is_some_and(|info| info.scope == Scope::Organization);
+            jc_core::kinds::BundleItem {
+                kind: resource.manifest.kind.clone(),
+                namespace: resource
+                    .manifest
+                    .metadata
+                    .namespace
+                    .clone()
+                    .filter(|_| !organization_scoped),
+                name: resource.manifest.metadata.name.clone(),
+                path: resource.path.to_string_lossy().into_owned(),
+            }
+        })
+        .collect();
+    let spec = jc_core::kinds::BundleSpec {
+        exported_at: chrono::Utc::now(),
+        exported_by: exported_by.to_owned(),
+        source_instance: None,
+        source_revision: revision.to_owned(),
+        items,
+        native_files: bundle
+            .natives
+            .iter()
+            .map(|(path, _)| path.to_string_lossy().into_owned())
+            .collect(),
+        omitted: 0,
+        readme: None,
+        schemas: None,
+    };
+    serde_json::json!({
+        "apiVersion": jc_core::API_VERSION,
+        "kind": "Bundle",
+        "metadata": { "name": project, "namespace": "org" },
+        "spec": spec,
+    })
+}
+
+/// Every file under `dir`, depth first; a directory whose name starts with a dot is skipped.
+fn walk(dir: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if std::fs::metadata(&path)?.is_dir() {
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            walk(&path, into)?;
+            continue;
+        }
+        into.push(path);
+    }
+    Ok(())
+}

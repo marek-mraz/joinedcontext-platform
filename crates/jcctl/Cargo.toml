@@ -10,6 +10,8 @@ jc-core = { path = "../jc-core", version = "0.1.0" }
 aes-gcm = "0.10"
 age = { version = "0.12", default-features = false, features = ["armor"] }
 base64 = "0.22"
+# The export index stamps when it was taken; jc-core already carries the same clock.
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 jsonschema = { version = "0.54", default-features = false }
 minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
 # The CKAN Action API and the gateway's DCAT record are reached over TLS, which the crate's
