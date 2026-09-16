@@ -12,7 +12,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -59,6 +59,10 @@ fn main() -> ExitCode {
             Some(options) => pipeline_test(&options),
             None => usage(),
         },
+        ["artifacts", "rebuild", rest @ ..] => match artifacts_options(rest) {
+            Some((dir, options)) => artifacts_rebuild(&dir, &options),
+            None => usage(),
+        },
         ["sync", rest @ ..] => match sync_options(rest) {
             Some((dir, options, as_json)) => sync(&dir, &options, as_json),
             None => usage(),
@@ -98,6 +102,54 @@ fn main() -> ExitCode {
         },
         _ => usage(),
     }
+}
+
+/// `artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]`.
+fn artifacts_options(rest: &[&str]) -> Option<(PathBuf, jcctl::commands::artifacts::Options)> {
+    let (mut repo_dir, mut out_dir, mut space, mut revision) = (None, None, None, None);
+    let mut rest = rest;
+    while let [flag, value, tail @ ..] = rest {
+        match *flag {
+            "--repo-dir" => repo_dir = Some(PathBuf::from(value)),
+            "--out-dir" => out_dir = Some(PathBuf::from(value)),
+            "--space" => space = Some((*value).to_owned()),
+            "--revision" => revision = Some((*value).to_owned()),
+            _ => return None,
+        }
+        rest = tail;
+    }
+    if !rest.is_empty() {
+        return None;
+    }
+    Some((
+        repo_dir?,
+        jcctl::commands::artifacts::Options {
+            out_dir: out_dir?,
+            space,
+            revision,
+        },
+    ))
+}
+
+/// Re-renders the artifact store from the repository (DM-44). The objects are written to a
+/// directory; mirroring them into the bucket is the store client's job, with the scoped
+/// credential this command never sees (PF-32).
+fn artifacts_rebuild(repo_dir: &Path, options: &jcctl::commands::artifacts::Options) -> ExitCode {
+    let report = match jcctl::commands::artifacts::rebuild(repo_dir, options) {
+        Ok(report) => report,
+        Err(error) => return fail(&error.to_string()),
+    };
+    for missing in &report.missing {
+        eprintln!(
+            "jcctl: {missing} is declared and not in the repository; run `jcctl model generate`"
+        );
+    }
+    println!(
+        "{} objects written to {}",
+        report.written.len(),
+        options.out_dir.display()
+    );
+    ExitCode::SUCCESS
 }
 
 /// `sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once]

@@ -1,6 +1,7 @@
 //! The `jcctl` subcommands (API/03 section 1).
 
 pub mod apply;
+pub mod artifacts;
 pub mod drift;
 pub mod export;
 pub mod import;
