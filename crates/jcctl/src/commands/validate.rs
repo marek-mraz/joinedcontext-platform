@@ -127,6 +127,15 @@ pub fn run(repo_dir: &Path) -> Report {
         });
     }
 
+    for (directory, message) in projects_without_a_manifest(repo_dir, &repo) {
+        report.findings.push(Finding {
+            path: directory,
+            document: 1,
+            line: 1,
+            message,
+        });
+    }
+
     for (id, actual, expected) in repo.misplaced() {
         let resource = repo.get(&id).expect("misplaced reports loaded resources");
         report.findings.push(Finding {
@@ -142,6 +151,41 @@ pub fn run(repo_dir: &Path) -> Report {
 
 /// Where a finding sits: the file, the document inside it and its first line.
 type Location = (PathBuf, usize, usize);
+
+/// Every directory under `projects/` that declares no `Project` (MF-01, PF-05).
+///
+/// A project directory without its manifest still serves spaces and endpoints, so nothing shows
+/// it is missing until a quota, an owner or a project role has nowhere to hang. Two of the three
+/// projects of the demo repository were in that state (T-0902).
+fn projects_without_a_manifest(repo_dir: &Path, repo: &Repository) -> Vec<(PathBuf, String)> {
+    let declared: BTreeSet<String> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "Project")
+        .map(|(id, _)| id.name.clone())
+        .collect();
+
+    let Ok(entries) = std::fs::read_dir(repo_dir.join("projects")) else {
+        return Vec::new();
+    };
+    let mut missing: Vec<(PathBuf, String)> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| !declared.contains(name))
+        .map(|name| {
+            let path = PathBuf::from("projects").join(&name);
+            (
+                path.clone(),
+                format!(
+                    "the project directory `{name}` declares no Project: add `{}` (MF-01, PF-05)",
+                    path.join("project.yaml").display()
+                ),
+            )
+        })
+        .collect();
+    missing.sort();
+    missing
+}
 
 /// Every `spec.source.dataSourceRef` that names no `DataSource` of the same project (PL-39).
 ///

@@ -246,3 +246,37 @@ fn a_malformed_document_reports_its_line() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A project directory with no `project.yaml` (MF-01, PF-05): the spaces under it load, so
+/// nothing else says the project itself was never declared (T-0902).
+#[test]
+fn a_project_directory_without_its_manifest_is_reported() {
+    let dir = valid_repo("no-project-manifest");
+    write(
+        &dir,
+        "projects/mobilita/spaces/mobilita/space.yaml",
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: ContextSpace
+metadata:
+  name: mobilita
+  namespace: mobilita
+spec:
+  isSandbox: true
+"#,
+    );
+
+    let report = validate::run(&dir);
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.path == PathBuf::from("projects/mobilita"))
+        .unwrap_or_else(|| panic!("the directory is named: {:?}", report.findings));
+    assert!(
+        finding.message.contains("projects/mobilita/project.yaml"),
+        "{}",
+        finding.message
+    );
+    assert!(!report.is_valid());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
