@@ -33,6 +33,23 @@
       ],
       "type": "object"
     },
+    "BundleSchemas": {
+      "additionalProperties": false,
+      "description": "The schemas of a complete export: one per kind in the bundle, and the LinkML source and JSON Schema of every `DataModel` it holds (MF-41).",
+      "properties": {
+        "kinds": {
+          "additionalProperties": true,
+          "description": "Kind name to its JSON Schema (draft-07).",
+          "type": "object"
+        },
+        "models": {
+          "additionalProperties": true,
+          "description": "DataModel name to `{linkml, jsonSchema}`; a member is absent when neither the repository nor Model Tools could produce it.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
     "BundleSpec": {
       "additionalProperties": false,
       "description": "Desired specification of a [`Bundle`][crate::kinds::Bundle] download index (MF-17, MF-18).\n\nA Bundle is generated on download and never stored in the repository; it travels inside the archive so the import wizard knows what it received and from where.",
@@ -66,6 +83,24 @@
           "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "readme": {
+          "description": "What the bundle holds, in prose: the text of the `README.md` a complete export carries at its root, so a stream export says the same thing as an archive (MF-41).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schemas": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BundleSchemas"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The schemas a complete export carries beside its manifests (MF-41)."
         },
         "sourceInstance": {
           "description": "Base URL of the instance it came from, so a re-import can be traced (MF-25).",

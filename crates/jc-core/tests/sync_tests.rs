@@ -352,3 +352,33 @@ fn bundle_item_namespace_is_optional_for_org_scoped_kinds() {
         .validate()
         .expect("org-scoped item without namespace validates");
 }
+
+#[test]
+fn a_complete_export_carries_its_readme_and_schemas_in_the_index() {
+    // MF-41: a stream export has no README file to put beside its manifests, so the index
+    // carries the same text and the same schemas an archive writes at its root.
+    let yaml = GOLDEN_BUNDLE.replace(
+        "  omitted: 2\n",
+        "  omitted: 2\n  readme: |\n    # bb-ovzdusie\n    Two resources.\n  schemas:\n    \
+         kinds:\n      Endpoint: { title: Endpoint }\n    models:\n      air-quality: { linkml: \
+         \"id: air\" }\n",
+    );
+    let bundle = Bundle::from_yaml(&yaml).expect("a bundle with a readme parses");
+    bundle.validate().expect("it validates");
+
+    let schemas = bundle.spec.schemas.as_ref().expect("schemas");
+    assert_eq!(schemas.kinds["Endpoint"]["title"], "Endpoint");
+    assert_eq!(schemas.models["air-quality"]["linkml"], "id: air");
+    assert!(bundle.spec.readme.as_deref().unwrap().contains("Two"));
+
+    let serialized = bundle.to_yaml().expect("serialize");
+    assert_eq!(bundle, Bundle::from_yaml(&serialized).expect("re-import"));
+}
+
+#[test]
+fn a_bundle_without_a_readme_serialises_without_the_member() {
+    let bundle = Bundle::from_yaml(GOLDEN_BUNDLE).expect("valid golden YAML");
+    let serialized = bundle.to_yaml().expect("serialize");
+    assert!(!serialized.contains("readme"), "{serialized}");
+    assert!(!serialized.contains("schemas"), "{serialized}");
+}

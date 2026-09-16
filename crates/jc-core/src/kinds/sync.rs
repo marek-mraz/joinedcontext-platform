@@ -370,6 +370,27 @@ pub struct BundleSpec {
     /// How many resources the caller was not allowed to read; names are never disclosed (MF-18).
     #[serde(default)]
     pub omitted: u32,
+    /// What the bundle holds, in prose: the text of the `README.md` a complete export carries
+    /// at its root, so a stream export says the same thing as an archive (MF-41).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readme: Option<String>,
+    /// The schemas a complete export carries beside its manifests (MF-41).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schemas: Option<BundleSchemas>,
+}
+
+/// The schemas of a complete export: one per kind in the bundle, and the LinkML source and
+/// JSON Schema of every `DataModel` it holds (MF-41).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BundleSchemas {
+    /// Kind name to its JSON Schema (draft-07).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub kinds: BTreeMap<String, serde_json::Value>,
+    /// DataModel name to `{linkml, jsonSchema}`; a member is absent when neither the
+    /// repository nor Model Tools could produce it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, serde_json::Value>,
 }
 
 impl Kind for BundleSpec {
