@@ -269,7 +269,7 @@ spec:
     let finding = report
         .findings
         .iter()
-        .find(|f| f.path == PathBuf::from("projects/mobilita"))
+        .find(|f| f.path == Path::new("projects/mobilita"))
         .unwrap_or_else(|| panic!("the directory is named: {:?}", report.findings));
     assert!(
         finding.message.contains("projects/mobilita/project.yaml"),
