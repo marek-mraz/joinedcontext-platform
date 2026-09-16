@@ -27,7 +27,9 @@ pub const WAVE_RUNTIME: u8 = 5;
 /// A kind missing here is not reconciled: `Bundle` is an export artifact (CC-22).
 const ORDER: &[(u8, &str)] = &[
     (WAVE_ROOTS, "Organization"),
-    // Who may change configuration converges before anything they may change (PF-49).
+    // Who may change configuration converges before anything they may change (PF-49), and the
+    // group a binding names before the binding that names it (PF-62, PF-63).
+    (WAVE_ROOTS, "Group"),
     (WAVE_ROOTS, "Role"),
     (WAVE_ROOTS, "RoleBinding"),
     (WAVE_ROOTS, "Project"),
