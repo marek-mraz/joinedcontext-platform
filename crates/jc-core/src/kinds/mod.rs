@@ -130,6 +130,8 @@ pub type Dashboard = crate::envelope::ResourceEnvelope<DashboardSpec>;
 pub type Layer = crate::envelope::ResourceEnvelope<LayerSpec>;
 /// `kind: UiSchema` as a whole manifest.
 pub type UiSchema = crate::envelope::ResourceEnvelope<UiSchemaSpec>;
+/// `kind: Group` as a whole manifest.
+pub type Group = crate::envelope::ResourceEnvelope<GroupSpec>;
 
 /// The default mirror interval of DM-49, in seconds: 24 hours.
 pub const MIRROR_INTERVAL_DEFAULT_SECONDS: u64 = 24 * 60 * 60;
