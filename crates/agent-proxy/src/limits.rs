@@ -12,6 +12,8 @@ struct RunUsage {
     rpm_window: Option<Instant>,
     rpm_count: u32,
     tokens_consumed: u64,
+    /// Model calls the run has made: one call is one step (AG-25, AG-51).
+    steps: u32,
 }
 
 /// One minute, the window `requests_per_minute` is counted over.
@@ -52,6 +54,23 @@ impl LimitManager {
         Ok(())
     }
 
+    /// Counts one model call of the run against the profile's `stepsPerRun`; refuses the one past
+    /// it, so a run that loops stops at the ceiling its profile declares (AG-25, AG-51). A limit of
+    /// `0` counts nothing: a Portal that does not send the field yet bounds the run by tokens alone.
+    pub async fn check_steps(&self, run_id: &str, limit: u32) -> Result<(), &'static str> {
+        if limit == 0 {
+            return Ok(());
+        }
+        // Counted in the same critical section that checks it, as the per-minute window is.
+        let mut map = self.runs.lock().await;
+        let entry = map.entry(run_id.to_string()).or_default();
+        if entry.steps >= limit {
+            return Err("step limit exceeded (stepsPerRun)");
+        }
+        entry.steps += 1;
+        Ok(())
+    }
+
     pub async fn check_tokens(&self, run_id: &str, limit: u64) -> Result<(), &'static str> {
         let map = self.runs.lock().await;
         let consumed = map.get(run_id).map_or(0, |entry| entry.tokens_consumed);
@@ -70,6 +89,29 @@ impl LimitManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_model_call_past_the_step_limit_is_refused_and_the_run_next_to_it_is_not() {
+        let limits = LimitManager::default();
+        for _ in 0..2 {
+            assert_eq!(limits.check_steps("run-1", 2).await, Ok(()));
+        }
+        assert_eq!(
+            limits.check_steps("run-1", 2).await,
+            Err("step limit exceeded (stepsPerRun)")
+        );
+        assert_eq!(limits.check_steps("run-2", 2).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_profile_without_a_step_limit_counts_nothing() {
+        let limits = LimitManager::default();
+        for _ in 0..50 {
+            assert_eq!(limits.check_steps("run-1", 0).await, Ok(()));
+        }
+        // The steps of the unbounded calls are not held against a limit that arrives later.
+        assert_eq!(limits.check_steps("run-1", 1).await, Ok(()));
+    }
 
     #[tokio::test]
     async fn the_request_past_the_limit_is_refused_and_the_window_restarts_after_a_minute() {

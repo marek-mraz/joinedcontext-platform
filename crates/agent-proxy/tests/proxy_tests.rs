@@ -34,6 +34,7 @@ fn sample_run(allows_write: bool, status: &str) -> RunContext {
         max_tokens: 1000,
         allowed_hosts: vec!["crates.io".to_string()],
         requests_per_minute: 100,
+        steps_per_run: 0,
         max_response_bytes: 1048576,
         created_by: "demo.steward@hel.fi".to_string(),
         model_name: "claude-3-7".to_string(),
@@ -195,6 +196,28 @@ async fn token_budget_exhaustion_returns_429() {
 
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn the_model_call_past_the_profiles_step_limit_returns_429() {
+    let mut run = sample_run(false, "building");
+    run.steps_per_run = 1;
+    let state = test_state(run);
+    let app = router(state.clone());
+    let call = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/llm/v1/chat/completions")
+            .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+            .header("x-jc-ticket", "secret-ticket-123")
+            .body(Body::from("{}"))
+            .unwrap()
+    };
+    // The first call spends the run's one step; it fails on the provider, not on the limit.
+    let first = app.clone().oneshot(call()).await.unwrap();
+    assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+    let second = app.oneshot(call()).await.unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]

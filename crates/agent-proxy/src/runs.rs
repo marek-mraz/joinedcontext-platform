@@ -25,6 +25,10 @@ pub struct RunContext {
     pub max_tokens: u64,
     pub allowed_hosts: Vec<String>,
     pub requests_per_minute: u32,
+    /// Model calls this run may make, from the profile's `limits.stepsPerRun` (AG-25, AG-51);
+    /// `0` when the Portal does not send it.
+    #[serde(default)]
+    pub steps_per_run: u32,
     pub max_response_bytes: u64,
     pub created_by: String,
     pub model_name: String,

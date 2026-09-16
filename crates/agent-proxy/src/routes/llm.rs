@@ -68,6 +68,15 @@ pub async fn handler(
             .into_response();
     }
 
+    // One model call is one step (AG-51): the run stops here however its driver loops.
+    if let Err(msg) = state.limits.check_steps(&run.id, run.steps_per_run).await {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            jc_core::ProblemDetails::new(429, "too-many-requests", msg),
+        )
+            .into_response();
+    }
+
     if let Err(msg) = state.limits.check_tokens(&run.id, run.max_tokens).await {
         return (
             StatusCode::TOO_MANY_REQUESTS,
