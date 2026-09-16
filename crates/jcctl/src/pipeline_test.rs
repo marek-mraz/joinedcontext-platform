@@ -106,10 +106,14 @@ pub fn harness(
                 SampleFormat::Csv => "content().string().parse_csv()",
                 _ => "content().parse_json()",
             };
+            // The page stays one message, the way the reconciler renders a live stream: the
+            // author's mapping runs over what the source answered, and the split into one
+            // entity per element happens after it (PL-47, PL-48). Splitting first would test a
+            // mapping against a shape production never gives it — an aggregate over the page
+            // would read one entity and answer zero (T-0911).
             processors.push(json!({ "mapping": format!(
-                "let rows = {parse}\nroot = if $rows.type() == \"array\" {{ $rows.slice(0, {MAX_MESSAGES}) }} else {{ [$rows] }}"
+                "let rows = {parse}\nroot = if $rows.type() == \"array\" {{ $rows.slice(0, {MAX_MESSAGES}) }} else {{ $rows }}"
             )}));
-            processors.push(json!({ "unarchive": { "format": "json_array" } }));
         }
     }
     processors.push(json!({ "mapping": "meta jc_input = content().string()" }));
@@ -340,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn a_csv_sample_is_generated_once_split_by_row_and_posted_to_the_capture_route() {
+    fn a_csv_sample_reaches_the_mapping_whole_and_its_output_is_posted_per_row() {
         let sample = Sample {
             text: Some("station_id,pm10\n01,18.2\n".into()),
             url: None,
@@ -362,8 +366,19 @@ mod tests {
         assert!(processors[0]["mapping"]
             .as_str()
             .is_some_and(|m| m.contains("parse_csv")));
-        assert_eq!(processors[1]["unarchive"]["format"], "json_array");
-        assert_eq!(processors[3]["mapping"], "root.id = this.station_id");
+        // The rows reach the author's mapping as one page, the way a live stream gives them
+        // (PL-47, T-0911): parse, record the input, map.
+        assert!(processors[1]["mapping"]
+            .as_str()
+            .is_some_and(|m| m.contains("meta jc_input")));
+        assert_eq!(processors[2]["mapping"], "root.id = this.station_id");
+        assert!(
+            processors
+                .iter()
+                .take(3)
+                .all(|p| p.get("unarchive").is_none()),
+            "nothing splits the page before the mapping: {processors:?}"
+        );
         let n = processors.len();
         assert_eq!(processors[n - 3]["catch"], json!([]));
         assert!(processors[n - 2]["mapping"].as_str().is_some_and(|m| m
