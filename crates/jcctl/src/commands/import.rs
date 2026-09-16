@@ -461,17 +461,36 @@ fn rewrite_urns(value: &mut Value, domain: &str) {
     }
 }
 
-/// One URN with its organisation domain replaced, or `None` when the string is not one.
+/// One URN, or one anchored `idPattern`, with its organisation domain replaced; `None` when
+/// the string is neither.
+///
+/// A Policy and a registration anchor their coverage with a pattern rather than an id
+/// (`^urn:ngsi-ld:AirQualityObserved:hel\.fi:air-quality:.*$`, R33), which is the same scheme
+/// behind a `^` with the domain's dots escaped. Left alone, an imported registration keeps
+/// routing at the organisation the bundle came from (MF-22, T-0826).
 fn with_domain(urn: &str, domain: &str) -> Option<String> {
-    let rest = urn.strip_prefix("urn:ngsi-ld:")?;
-    let mut segments: Vec<&str> = rest.split(':').collect();
+    let pattern = urn.starts_with('^');
+    let rest = urn
+        .strip_prefix('^')
+        .unwrap_or(urn)
+        .strip_prefix("urn:ngsi-ld:")?;
+    let mut segments: Vec<String> = rest.split(':').map(str::to_owned).collect();
     // Type, orgDomain, space, localId: a URN with fewer segments is not this scheme, and
     // rewriting one that is not would corrupt an identifier this command does not own.
     if segments.len() < 4 {
         return None;
     }
-    segments[1] = domain;
-    Some(format!("urn:ngsi-ld:{}", segments.join(":")))
+    segments[1] = if pattern {
+        regex::escape(domain)
+    } else {
+        domain.to_owned()
+    };
+    let joined = segments.join(":");
+    Some(if pattern {
+        format!("^urn:ngsi-ld:{joined}")
+    } else {
+        format!("urn:ngsi-ld:{joined}")
+    })
 }
 
 /// References the import would leave dangling (MF-24).

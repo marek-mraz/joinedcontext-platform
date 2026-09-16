@@ -1682,6 +1682,7 @@ dependencies = [
  "jc-core",
  "jsonschema",
  "minijinja",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

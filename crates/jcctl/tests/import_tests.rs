@@ -167,6 +167,58 @@ fn the_organisation_domain_of_every_entity_urn_is_rewritten() {
 }
 
 #[test]
+fn an_anchored_id_pattern_moves_to_the_importing_organisation() {
+    // T-0826: a registration and a Policy anchor their coverage with a pattern, which is a URN
+    // prefix behind a `^` with the domain's dots escaped (R33). Left alone it keeps routing at
+    // the city the bundle came from.
+    let source = temp_dir("import-pattern-src");
+    write_file(
+        &source,
+        "projects/vzduch/spaces/vzduch/space.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: vzduch\n  namespace: vzduch\nspec:\n  isSandbox: false\n",
+    );
+    write_file(
+        &source,
+        "projects/vzduch/spaces/vzduch/csrs/kosice.yaml",
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: ContextSourceRegistration
+metadata:
+  name: kosice
+  namespace: vzduch
+spec:
+  contextSpaceRef: vzduch
+  endpoint: https://kosice.sk/ngsi-ld/v1
+  information:
+    - entities:
+        - type: AirQualityObserved
+          idPattern: "^urn:ngsi-ld:AirQualityObserved:kosice\\.sk:vzduch:.*$"
+"#,
+    );
+    let dest = destination("import-pattern-dest");
+    let options = Options {
+        namespace: Some("ovzdusie".to_owned()),
+        org_domain: Some("banskabystrica.sk".to_owned()),
+        ..Options::default()
+    };
+
+    let report = collect(&source, &dest, &options).expect("import collects");
+
+    let registration = report
+        .imported
+        .iter()
+        .find(|i| i.manifest.kind == "ContextSourceRegistration")
+        .expect("the registration is in the bundle");
+    assert_eq!(
+        registration.manifest.spec["information"][0]["entities"][0]["idPattern"],
+        r"^urn:ngsi-ld:AirQualityObserved:banskabystrica\.sk:vzduch:.*$",
+        "the domain segment, escaped, and the space segment untouched"
+    );
+
+    let _ = std::fs::remove_dir_all(&source);
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
 fn a_string_that_is_not_an_entity_urn_is_left_alone() {
     let source = temp_dir("import-urn-untouched-src");
     write_file(
