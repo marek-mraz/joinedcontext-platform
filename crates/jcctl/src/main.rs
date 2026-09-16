@@ -12,7 +12,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --space <id> --out-dir <path> [--project <slug>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -57,6 +57,10 @@ fn main() -> ExitCode {
             Some(options) => pipeline_test(&options),
             None => usage(),
         },
+        ["sync", rest @ ..] => match sync_options(rest) {
+            Some((dir, options, as_json)) => sync(&dir, &options, as_json),
+            None => usage(),
+        },
         ["publish", "ckan", rest @ ..] => match publish_ckan_options(rest) {
             Some(options) => publish_ckan(&options),
             None => usage(),
@@ -91,6 +95,86 @@ fn main() -> ExitCode {
             }
         },
         _ => usage(),
+    }
+}
+
+/// `sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once]
+/// [--json]`, in any order after the verb.
+fn sync_options(rest: &[&str]) -> Option<(PathBuf, jcctl::commands::sync::Options, bool)> {
+    let (mut repo_dir, mut source, mut checkout, mut state) = (None, None, None, None);
+    let (mut once, mut as_json) = (false, false);
+    let mut rest = rest;
+    while let Some((flag, tail)) = rest.split_first() {
+        match *flag {
+            "--once" => {
+                once = true;
+                rest = tail;
+            }
+            "--json" => {
+                as_json = true;
+                rest = tail;
+            }
+            "--repo-dir" | "--source" | "--checkout" | "--state" => {
+                let (value, tail) = tail.split_first()?;
+                match *flag {
+                    "--repo-dir" => repo_dir = Some(PathBuf::from(value)),
+                    "--source" => source = Some((*value).to_owned()),
+                    "--checkout" => checkout = Some(PathBuf::from(value)),
+                    _ => state = Some(PathBuf::from(value)),
+                }
+                rest = tail;
+            }
+            _ => return None,
+        }
+    }
+    Some((
+        repo_dir?,
+        jcctl::commands::sync::Options {
+            source: source?,
+            checkout: checkout?,
+            state,
+            once,
+        },
+        as_json,
+    ))
+}
+
+/// Runs one tick of a `SyncSource`'s loop (MF-28, MF-34). Exit 2 means a proposal is open, the
+/// way `plan` and `drift` report pending work.
+fn sync(repo_dir: &Path, options: &jcctl::commands::sync::Options, as_json: bool) -> ExitCode {
+    let run = match jcctl::commands::sync::run(repo_dir, options) {
+        Ok(run) => run,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let report = jcctl::commands::sync::report(&run);
+    if as_json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else if let Some(proposal) = &run.proposal {
+        println!(
+            "{} at {}: {} file(s) to review",
+            proposal.name,
+            proposal.revision,
+            proposal.files.len()
+        );
+    } else {
+        println!("{:?}: {}", run.phase, run.reason);
+    }
+    for refused in run.proposal.iter().flat_map(|p| &p.rejected) {
+        eprintln!("{refused}");
+    }
+    if run.proposal.is_some() {
+        ExitCode::from(2)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
