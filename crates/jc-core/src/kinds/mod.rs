@@ -11,6 +11,7 @@ pub mod data_model;
 pub mod data_source;
 pub mod dataspace;
 pub mod endpoint;
+pub mod group;
 pub mod mapping;
 pub mod model_projection;
 pub mod organization;
@@ -52,6 +53,7 @@ pub use endpoint::{
     Audience, Caching, EndpointSlug, EndpointSpec, FileLimits, Projection, RateLimits,
     Representation, SharedSpaceReferenceSpec,
 };
+pub use group::{GroupSpec, Member};
 pub use mapping::{
     DataModelRef, MappingArtifacts, MappingSpec, MappingTest, NativeBlock, NativeLanguage,
     VocabularyAlignment,

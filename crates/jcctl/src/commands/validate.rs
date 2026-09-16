@@ -127,6 +127,15 @@ pub fn run(repo_dir: &Path) -> Report {
         });
     }
 
+    for (location, message) in bindings_to_undeclared_groups(&repo) {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
     for (directory, message) in projects_without_a_manifest(repo_dir, &repo) {
         report.findings.push(Finding {
             path: directory,
@@ -151,6 +160,52 @@ pub fn run(repo_dir: &Path) -> Report {
 
 /// Where a finding sits: the file, the document inside it and its first line.
 type Location = (PathBuf, usize, usize);
+
+/// Every `subjects[].group` of a `RoleBinding` that no `Group` manifest declares (PF-64).
+///
+/// A binding to a group nobody declared matches nobody, silently: the people it was written for
+/// read nothing and no error says why. The group's membership is configuration (PF-62), so the
+/// manifest is here to be found. A `ServiceAccount` names no group — its `spec.roles[]` carries a
+/// role and a scope and nothing else — so there is nothing of its to check here.
+fn bindings_to_undeclared_groups(repo: &Repository) -> Vec<(Location, String)> {
+    let declared: BTreeSet<&str> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "Group")
+        .map(|(id, _)| id.name.as_str())
+        .collect();
+
+    let mut findings = Vec::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "RoleBinding" {
+            continue;
+        }
+        let named = resource
+            .manifest
+            .spec
+            .get("subjects")
+            .and_then(|subjects| subjects.as_array())
+            .map(|subjects| {
+                subjects
+                    .iter()
+                    .filter_map(|subject| subject.get("group").and_then(|g| g.as_str()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for group in named {
+            if declared.contains(group) {
+                continue;
+            }
+            findings.push((
+                (resource.path.clone(), resource.document, resource.line),
+                format!(
+                    "{id} names group `{group}`, which no Group manifest of this organization \
+                     declares: add `users/groups/{group}.yaml` (PF-62, PF-64)"
+                ),
+            ));
+        }
+    }
+    findings
+}
 
 /// Every directory under `projects/` that declares no `Project` (MF-01, PF-05).
 ///

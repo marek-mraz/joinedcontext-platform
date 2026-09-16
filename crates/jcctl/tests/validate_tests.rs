@@ -66,9 +66,22 @@ spec:
     );
     write(&dir, ENDPOINT_PATH, ENDPOINT);
     write(&dir, "users/roles/pipeline-developer.yaml", ROLE);
+    write(&dir, "users/groups/air-quality-team.yaml", GROUP);
     write(&dir, ROLE_BINDING_PATH, ROLE_BINDING);
     dir
 }
+
+/// The group the binding names: a binding to a group no manifest declares matches nobody (PF-64).
+const GROUP: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Group
+metadata:
+  name: air-quality-team
+  namespace: org
+spec:
+  description: The air quality domain, measurement and modelling
+  members:
+    - { user: jana.kovacova@banskabystrica.sk }
+"#;
 
 const ROLE: &str = r#"apiVersion: joinedcontext.com/v1alpha1
 kind: Role
@@ -145,7 +158,7 @@ fn a_valid_repository_has_no_findings() {
 
     let report = validate::run(&dir);
     assert_eq!(report.findings, vec![]);
-    assert_eq!(report.checked, 6);
+    assert_eq!(report.checked, 7);
     assert!(report.is_valid());
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -166,7 +179,7 @@ fn a_cross_field_invariant_is_reported_with_the_file_that_broke_it() {
     );
 
     let report = validate::run(&dir);
-    assert_eq!(report.checked, 5);
+    assert_eq!(report.checked, 6);
     assert_eq!(report.findings.len(), 1);
 
     let finding = &report.findings[0];
@@ -196,7 +209,7 @@ fn a_field_that_is_not_in_the_kind_is_refused() {
     );
 
     let report = validate::run(&dir);
-    assert_eq!(report.checked, 5);
+    assert_eq!(report.checked, 6);
     assert_eq!(report.findings.len(), 1);
     assert!(
         report.findings[0].message.contains("token"),
@@ -216,7 +229,7 @@ fn a_manifest_at_the_wrong_path_is_reported() {
     write(&dir, "projects/ovzdusie/public-air.yaml", ENDPOINT);
 
     let report = validate::run(&dir);
-    assert_eq!(report.checked, 6);
+    assert_eq!(report.checked, 7);
     assert_eq!(report.findings.len(), 1);
     assert!(
         report.findings[0].message.contains(ENDPOINT_PATH),
@@ -277,6 +290,73 @@ spec:
         finding.message
     );
     assert!(!report.is_valid());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A binding to a group no manifest declares (PF-62, PF-64): it matches nobody, and nothing but
+/// this says so.
+#[test]
+fn a_binding_to_an_undeclared_group_is_refused_and_a_declared_one_is_not() {
+    let dir = valid_repo("undeclared-group");
+    write(
+        &dir,
+        "users/roles/pipeline-developer.yaml",
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Role
+metadata:
+  name: pipeline-developer
+  namespace: org
+spec:
+  rules:
+    - kinds: [Pipeline]
+      verbs: [propose]
+"#,
+    );
+    write(
+        &dir,
+        "users/assignments/ovzdusie-developers.yaml",
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: RoleBinding
+metadata:
+  name: ovzdusie-developers
+  namespace: org
+spec:
+  subjects:
+    - group: nobody
+  role: pipeline-developer
+  scope: { project: ovzdusie }
+"#,
+    );
+
+    let report = validate::run(&dir);
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.message.contains("group `nobody`"))
+        .unwrap_or_else(|| panic!("the group is named: {:?}", report.findings));
+    assert!(
+        finding.message.contains("users/groups/nobody.yaml"),
+        "{}",
+        finding.message
+    );
+
+    write(
+        &dir,
+        "users/groups/nobody.yaml",
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Group
+metadata:
+  name: nobody
+  namespace: org
+spec:
+  description: The team that maintains the air quality pipelines
+  members:
+    - { user: jana.kovacova@banskabystrica.sk }
+"#,
+    );
+    let report = validate::run(&dir);
+    assert_eq!(report.findings, vec![], "the declared group is accepted");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

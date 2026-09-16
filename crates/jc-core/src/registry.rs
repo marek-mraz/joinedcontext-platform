@@ -89,6 +89,7 @@ catalogue!(
     crate::kinds::UiSchemaSpec,
     crate::kinds::RoleSpec,
     crate::kinds::RoleBindingSpec,
+    crate::kinds::GroupSpec,
     crate::kinds::DashboardSpec,
     crate::kinds::LayerSpec,
 );
