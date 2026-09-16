@@ -153,3 +153,50 @@ fn both_kinds_live_in_users_of_the_organization_repository() {
     let err = binding("namespace: org", "namespace: ovzdusie").expect_err("organization scope");
     assert!(err.to_string().contains("org"), "{err}");
 }
+
+/// PF-59: `read` is a verb of its own, and `propose` implies it, because nobody proposes a
+/// change to what they may not see. `approve` and `delete` imply nothing: a role that only
+/// approves reads nothing by that rule.
+#[test]
+fn propose_implies_read_and_approve_does_not() {
+    let rule = jc_core::kinds::role::Rule {
+        kinds: vec!["Pipeline".to_owned()],
+        verbs: vec![Verb::Propose],
+        constraints: vec![],
+    };
+    assert!(rule.grants("Pipeline", Verb::Read));
+    assert!(rule.grants("Pipeline", Verb::Propose));
+    assert!(!rule.grants("Pipeline", Verb::Approve));
+    assert!(
+        !rule.grants("Endpoint", Verb::Read),
+        "never outside its kinds"
+    );
+
+    let approving = jc_core::kinds::role::Rule {
+        kinds: vec!["Endpoint".to_owned()],
+        verbs: vec![Verb::Approve, Verb::Delete],
+        constraints: vec![],
+    };
+    assert!(!approving.grants("Endpoint", Verb::Read));
+    assert!(approving.grants("Endpoint", Verb::Approve));
+
+    let reading = jc_core::kinds::role::Rule {
+        kinds: vec!["Endpoint".to_owned()],
+        verbs: vec![Verb::Read],
+        constraints: vec![],
+    };
+    assert!(reading.grants("Endpoint", Verb::Read));
+    assert!(
+        !reading.grants("Endpoint", Verb::Propose),
+        "read grants nothing else"
+    );
+}
+
+/// The verb is written `read` in a manifest, beside the three that were there before.
+#[test]
+fn the_read_verb_parses_from_a_manifest() {
+    let viewer = role("verbs: [propose]", "verbs: [read]").expect("a viewer role validates");
+    assert_eq!(viewer.spec.rules[0].verbs, vec![Verb::Read]);
+    let yaml = serde_norway::to_string(&viewer).expect("serializes");
+    assert!(yaml.contains("- read"), "serde name is `read`: {yaml}");
+}

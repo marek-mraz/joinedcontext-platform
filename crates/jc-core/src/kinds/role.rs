@@ -13,10 +13,12 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// What a rule allows on its kinds (PF-49).
+/// What a rule allows on its kinds (PF-49, PF-59).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Verb {
+    /// Read and list a manifest of the kind.
+    Read,
     /// Create or edit a manifest, opening a Change.
     Propose,
     /// Approve a Change of the kind.
@@ -40,6 +42,19 @@ pub struct Constraint {
     /// The value must equal this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equals: Option<String>,
+}
+
+impl Rule {
+    /// Whether the rule grants `verb` on `kind`. `propose` implies `read`, because nobody
+    /// proposes a change to what they may not see; `approve` and `delete` imply nothing, so a
+    /// role that only approves reads nothing by that rule alone (PF-59). The implication lives
+    /// here alone, so the Portal, jcctl's policy compiler and Conftest cannot disagree.
+    pub fn grants(&self, kind: &str, verb: Verb) -> bool {
+        if !self.kinds.iter().any(|k| k == kind) {
+            return false;
+        }
+        self.verbs.contains(&verb) || (verb == Verb::Read && self.verbs.contains(&Verb::Propose))
+    }
 }
 
 /// One rule: the verbs allowed on the kinds, under the constraints.
@@ -108,7 +123,7 @@ impl RoleSpec {
                 return Err(Error::Name {
                     field: "spec.rules[].verbs",
                     value: String::new(),
-                    reason: "a rule names at least one verb of propose, approve, delete",
+                    reason: "a rule names at least one verb of read, propose, approve, delete",
                 });
             }
             for constraint in &rule.constraints {

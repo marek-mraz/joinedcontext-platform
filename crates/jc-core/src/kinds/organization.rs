@@ -23,6 +23,79 @@ pub struct OrganizationSpec {
     /// Administrative, technical, data protection, or security contacts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contacts: Vec<Contact>,
+    /// How projects are opened and who sees them (PF-61, PF-65).
+    #[serde(default)]
+    pub projects: ProjectsPolicy,
+}
+
+/// The organization's rules for its projects (PF-61, PF-65).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProjectsPolicy {
+    /// Who may open a project: `anyone`, `group:<name>` or `org-admin` (PF-65).
+    #[serde(default)]
+    pub creation: ProjectCreation,
+    /// Who holds the seeded `viewer` role at organization scope: every signed-in person of the
+    /// organization (`organization`, the default) or only whoever a binding names (`members`)
+    /// (PF-61).
+    #[serde(default)]
+    pub visibility: ProjectVisibility,
+}
+
+/// Who may open a project (PF-65). `group:<name>` names a `Group` of the organization.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub enum ProjectCreation {
+    /// Every signed-in person of the organization.
+    Anyone,
+    /// The members of one group.
+    Group(String),
+    /// Whoever holds `propose` on `Project`, the seeded `org-admin`.
+    #[default]
+    OrgAdmin,
+}
+
+impl TryFrom<String> for ProjectCreation {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        match value.as_str() {
+            "anyone" => Ok(Self::Anyone),
+            "org-admin" => Ok(Self::OrgAdmin),
+            other => match other.strip_prefix("group:") {
+                Some(name) if names::validate_dns1123_label(name).is_ok() => {
+                    Ok(Self::Group(name.to_owned()))
+                }
+                Some(_) => Err(format!(
+                    "'{other}' names no group: write `group:<name>` with a DNS-1123 label (PF-65)"
+                )),
+                None => Err(format!(
+                    "'{other}' is not one of anyone, group:<name>, org-admin (PF-65)"
+                )),
+            },
+        }
+    }
+}
+
+impl From<ProjectCreation> for String {
+    fn from(value: ProjectCreation) -> Self {
+        match value {
+            ProjectCreation::Anyone => "anyone".to_owned(),
+            ProjectCreation::Group(name) => format!("group:{name}"),
+            ProjectCreation::OrgAdmin => "org-admin".to_owned(),
+        }
+    }
+}
+
+/// Who holds the seeded `viewer` role at organization scope (PF-61).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectVisibility {
+    /// Every signed-in person of the organization reads every project.
+    #[default]
+    Organization,
+    /// Only a principal a binding names reads a project.
+    Members,
 }
 
 /// Contact information for an organization role.

@@ -211,6 +211,18 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "projects": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProjectsPolicy"
+            }
+          ],
+          "default": {
+            "creation": "org-admin",
+            "visibility": "organization"
+          },
+          "description": "How projects are opened and who sees them (PF-61, PF-65)."
         }
       },
       "required": [
@@ -259,6 +271,82 @@
           "type": "string"
         }
       ]
+    },
+    "ProjectCreation": {
+      "description": "Who may open a project (PF-65). `group:<name>` names a `Group` of the organization.",
+      "oneOf": [
+        {
+          "description": "Every signed-in person of the organization.",
+          "enum": [
+            "Anyone"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The members of one group.",
+          "properties": {
+            "Group": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Group"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Whoever holds `propose` on `Project`, the seeded `org-admin`.",
+          "enum": [
+            "OrgAdmin"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ProjectVisibility": {
+      "description": "Who holds the seeded `viewer` role at organization scope (PF-61).",
+      "oneOf": [
+        {
+          "description": "Every signed-in person of the organization reads every project.",
+          "enum": [
+            "organization"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Only a principal a binding names reads a project.",
+          "enum": [
+            "members"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ProjectsPolicy": {
+      "additionalProperties": false,
+      "description": "The organization's rules for its projects (PF-61, PF-65).",
+      "properties": {
+        "creation": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProjectCreation"
+            }
+          ],
+          "default": "org-admin",
+          "description": "Who may open a project: `anyone`, `group:<name>` or `org-admin` (PF-65)."
+        },
+        "visibility": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProjectVisibility"
+            }
+          ],
+          "default": "organization",
+          "description": "Who holds the seeded `viewer` role at organization scope: every signed-in person of the organization (`organization`, the default) or only whoever a binding names (`members`) (PF-61)."
+        }
+      },
+      "type": "object"
     },
     "Status": {
       "additionalProperties": false,

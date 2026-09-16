@@ -285,8 +285,15 @@
       "description": "A human label or description (UI-50): one plain string in the author's language. The legacy language map is still read, through release `v0.9`, and resolves to one string."
     },
     "Verb": {
-      "description": "What a rule allows on its kinds (PF-49).",
+      "description": "What a rule allows on its kinds (PF-49, PF-59).",
       "oneOf": [
+        {
+          "description": "Read and list a manifest of the kind.",
+          "enum": [
+            "read"
+          ],
+          "type": "string"
+        },
         {
           "description": "Create or edit a manifest, opening a Change.",
           "enum": [

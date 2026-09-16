@@ -187,6 +187,7 @@ fn organization_names_validators_smoke() {
             locales: vec!["sk".to_string()],
             default_locale: "sk".to_string(),
             contacts: vec![],
+            projects: Default::default(),
         }
     )
     .resource_path()
@@ -195,4 +196,55 @@ fn organization_names_validators_smoke() {
 
 fn org_meta() -> jc_core::ObjectMeta {
     jc_core::ObjectMeta::new("banskabystrica", "org")
+}
+
+/// PF-61, PF-65: the organization says who opens a project and who sees one. Both default,
+/// so an organization written before this existed keeps the behaviour it had: every signed-in
+/// person reads, and only an administrator opens.
+#[test]
+fn the_projects_policy_defaults_and_parses() {
+    use jc_core::kinds::organization::{ProjectCreation, ProjectVisibility};
+
+    let org = Organization::from_yaml(GOLDEN).expect("parse");
+    assert_eq!(
+        org.spec.projects.visibility,
+        ProjectVisibility::Organization
+    );
+    assert_eq!(org.spec.projects.creation, ProjectCreation::OrgAdmin);
+
+    let written = GOLDEN.replace(
+        "  contacts:",
+        "  projects:\n    creation: \"group:air-quality-team\"\n    visibility: members\n  contacts:",
+    );
+    let org = Organization::from_yaml(&written).expect("parse with a projects policy");
+    org.validate().expect("valid");
+    assert_eq!(org.spec.projects.visibility, ProjectVisibility::Members);
+    assert_eq!(
+        org.spec.projects.creation,
+        ProjectCreation::Group("air-quality-team".to_owned())
+    );
+    let yaml = serde_norway::to_string(&org).expect("serializes");
+    assert!(yaml.contains("creation: group:air-quality-team"), "{yaml}");
+    let again = Organization::from_yaml(&yaml).expect("reads its own output back");
+    assert_eq!(again.spec.projects, org.spec.projects);
+}
+
+/// An unknown value is refused rather than read as a default, so a typo in the one setting
+/// that decides who may open a project cannot open it to everyone.
+#[test]
+fn an_unknown_visibility_or_creation_is_refused() {
+    for (field, value) in [
+        ("visibility", "public"),
+        ("creation", "everyone"),
+        ("creation", "group:"),
+    ] {
+        let written = GOLDEN.replace(
+            "  contacts:",
+            &format!("  projects:\n    {field}: \"{value}\"\n  contacts:"),
+        );
+        assert!(
+            Organization::from_yaml(&written).is_err(),
+            "{field}: {value} was accepted"
+        );
+    }
 }
