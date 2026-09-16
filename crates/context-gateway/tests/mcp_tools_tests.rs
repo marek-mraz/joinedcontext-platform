@@ -623,3 +623,123 @@ async fn the_space_surface_serves_the_same_tools_as_the_endpoint() {
     assert_eq!(hop.path, "/ngsi-ld/v1/entities");
     assert_eq!(hop.tenant, "ovzdusie");
 }
+
+/// EP-46, EP-52, AG-29: the agent reads every formalism the REST schema surface renders, and
+/// `entityType` narrows the answer (T-0845).
+#[tokio::test]
+async fn describe_schema_renders_every_formalism_the_rest_surface_serves() {
+    let realm = common::Realm::new();
+    for (format, must_contain) in [
+        ("shacl", "sh:NodeShape"),
+        ("owl", "owl:Class"),
+        ("rdf", "rdfs:Class"),
+        ("linkml", "classes:"),
+        ("markdown", "AirQualityObserved"),
+    ] {
+        let (_, answer, _) = send(
+            app("http://127.0.0.1:1", &realm),
+            message(
+                &format!("/api/endpoint/{PUBLIC}/mcp"),
+                None,
+                call("describe_schema", json!({ "format": format })),
+            ),
+        )
+        .await;
+        let result = &answer["result"];
+        assert_eq!(result["isError"], json!(false), "{format}: {answer}");
+        assert_eq!(result["structuredContent"]["format"], json!(format));
+        let document = result["structuredContent"]["document"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            document.contains(must_contain),
+            "{format} renders the model: {document}"
+        );
+    }
+}
+
+/// The two JSON formalisms and the summary keep answering as they did.
+#[tokio::test]
+async fn describe_schema_still_answers_the_summary_and_the_json_formalisms() {
+    let realm = common::Realm::new();
+    for (format, key) in [("summary", "models"), ("json-schema", "$defs")] {
+        let (_, answer, _) = send(
+            app("http://127.0.0.1:1", &realm),
+            message(
+                &format!("/api/endpoint/{PUBLIC}/mcp"),
+                None,
+                call("describe_schema", json!({ "format": format })),
+            ),
+        )
+        .await;
+        assert_eq!(answer["result"]["isError"], json!(false), "{answer}");
+        assert!(
+            answer["result"]["structuredContent"].get(key).is_some(),
+            "{format} answers the document itself: {answer}"
+        );
+    }
+}
+
+/// An `entityType` is accepted, and one the caller may not read is refused the way an unknown
+/// name is: the schema never says which of the two it was (EP-47, SP-15).
+#[tokio::test]
+async fn describe_schema_narrows_to_one_entity_type_and_refuses_the_rest() {
+    let realm = common::Realm::new();
+    let (_, answer, _) = send(
+        app("http://127.0.0.1:1", &realm),
+        message(
+            &format!("/api/endpoint/{PUBLIC}/mcp"),
+            None,
+            call(
+                "describe_schema",
+                json!({ "format": "json-schema", "entityType": "AirQualityObserved" }),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(answer["result"]["isError"], json!(false), "{answer}");
+    let defs = answer["result"]["structuredContent"]["$defs"]
+        .as_object()
+        .expect("the definitions");
+    assert!(defs.contains_key("AirQualityObserved"), "{answer}");
+
+    let (_, refused, _) = send(
+        app("http://127.0.0.1:1", &realm),
+        message(
+            &format!("/api/endpoint/{PUBLIC}/mcp"),
+            None,
+            call("describe_schema", json!({ "entityType": "SecretReading" })),
+        ),
+    )
+    .await;
+    assert_eq!(refused["result"]["isError"], json!(true), "{refused}");
+    let text = refused["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(text.contains("SecretReading"), "{refused}");
+}
+
+/// A format nobody renders is refused by the tool's own schema, before anything is built
+/// (AG-31), and the refusal names the formalisms that are served.
+#[tokio::test]
+async fn describe_schema_refuses_a_formalism_nobody_renders() {
+    let realm = common::Realm::new();
+    let (_, answer, _) = send(
+        app("http://127.0.0.1:1", &realm),
+        message(
+            &format!("/api/endpoint/{PUBLIC}/mcp"),
+            None,
+            call("describe_schema", json!({ "format": "protobuf" })),
+        ),
+    )
+    .await;
+    let said = serde_json::to_string(&answer).unwrap_or_default();
+    assert!(
+        said.contains("protobuf") && said.contains("json-schema"),
+        "{said}"
+    );
+    assert_eq!(
+        answer["result"]["structuredContent"]["document"],
+        Value::Null
+    );
+}

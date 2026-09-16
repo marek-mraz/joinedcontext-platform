@@ -246,9 +246,13 @@ const TOOLS: &[Tool] = &[
                 "properties": {
                     "format": {
                         "type": "string",
-                        "enum": ["summary", "json-schema", "context"],
-                        "description": "summary lists the models and their artifacts; the others render one",
+                        "enum": [
+                            "summary", "json-schema", "context",
+                            "linkml", "shacl", "owl", "rdf", "markdown",
+                        ],
+                        "description": "summary lists the models and their artifacts; the others render one, the text formalisms as {format, mediaType, document}",
                     },
+                    "entityType": { "type": "string", "description": "Describe this one entity type instead of every type the caller may read" },
                     "version": { "type": "integer", "minimum": 1, "description": "Model major version" },
                 },
                 "additionalProperties": false,
@@ -830,17 +834,35 @@ fn refused(text: &str, payload: &Value) -> Value {
     })
 }
 
+/// The artifact one `format` name renders, for the five formalisms that are text rather than
+/// JSON. The REST route names them by file name or path segment; here the name is the format.
+fn text_formalism(format: &str) -> Option<schema::Artifact> {
+    match format {
+        "linkml" => Some(schema::Artifact::LinkMl),
+        "shacl" => Some(schema::Artifact::Shacl),
+        "owl" => Some(schema::Artifact::Owl),
+        "rdf" => Some(schema::Artifact::Rdf),
+        "markdown" => Some(schema::Artifact::Markdown),
+        _ => None,
+    }
+}
+
 /// The data model, in the formalism asked for and narrowed to the caller's grant (EP-47).
 ///
-/// The gateway renders the two artifacts it can compile from the model; SHACL, OWL, RDF,
-/// LinkML and Markdown come from Model Tools and are served beside the model, so they are
-/// named as not served here rather than approximated.
+/// Every formalism the REST schema surface renders is rendered here from the same projected
+/// JSON Schema, so an agent reads exactly what a browser reads for the same token (EP-46,
+/// EP-52, T-0845); the text ones come back as `{format, mediaType, document}`.
 fn describe_schema(
     endpoint: &Endpoint,
     subject: &Subject,
     arguments: &Map<String, Value>,
 ) -> Result<Value, String> {
-    let visible = schema::visible(subject, endpoint, crate::pdp::now());
+    let mut visible = schema::visible(subject, endpoint, crate::pdp::now());
+    if let Some(wanted) = arguments.get("entityType").and_then(Value::as_str) {
+        visible = visible.only(wanted).ok_or_else(|| {
+            format!("`{wanted}` is not an entity type this endpoint describes for you")
+        })?;
+    }
     let format = arguments
         .get("format")
         .and_then(Value::as_str)
@@ -867,10 +889,19 @@ fn describe_schema(
     match format {
         "json-schema" => Ok(schema::json_schema(&models, &visible, &mut redacted)),
         "context" => Ok(schema::context(&models, &visible, &mut redacted)),
-        other => Err(format!(
-            "`{other}` is not rendered here: this endpoint serves summary, json-schema and context, \
-             and the other formalisms are served beside the model once Model Tools has committed them"
-        )),
+        // The five text formalisms, rendered from the projected schema the way the REST route
+        // renders them; `Accept` plays no part here, the name of the format decides.
+        other => match text_formalism(other) {
+            Some(artifact) => Ok(json!({
+                "format": other,
+                "mediaType": artifact.media_type(),
+                "document": schema::render(&models, artifact, &visible),
+            })),
+            None => Err(format!(
+                "`{other}` is not a formalism this endpoint renders: it serves summary, \
+                 json-schema, context, linkml, shacl, owl, rdf and markdown"
+            )),
+        },
     }
 }
 

@@ -196,6 +196,17 @@ pub struct Visible {
 }
 
 impl Visible {
+    /// The same surface narrowed to one entity type, or `None` when the caller may not read it
+    /// (EP-47): a type nobody granted is refused exactly as an unknown one is.
+    pub fn only(&self, entity_type: &str) -> Option<Visible> {
+        if !self.covers_type(entity_type) {
+            return None;
+        }
+        let mut narrowed = self.clone();
+        narrowed.types = BTreeSet::from([entity_type.to_owned()]);
+        Some(narrowed)
+    }
+
     /// Whether the model may describe this entity type at all.
     fn covers_type(&self, name: &str) -> bool {
         !self.denied_types.contains(name) && (self.types.is_empty() || self.types.contains(name))
