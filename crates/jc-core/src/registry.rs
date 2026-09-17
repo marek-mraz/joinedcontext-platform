@@ -94,6 +94,7 @@ catalogue!(
     crate::kinds::RoleSpec,
     crate::kinds::RoleBindingSpec,
     crate::kinds::GroupSpec,
+    crate::kinds::EnvironmentSpec,
     crate::kinds::DashboardSpec,
     crate::kinds::LayerSpec,
 );

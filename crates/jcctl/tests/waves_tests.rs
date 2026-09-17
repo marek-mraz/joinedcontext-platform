@@ -73,7 +73,7 @@ fn every_catalogued_kind_has_a_wave_or_is_a_known_artifact() {
     // it rendered, each of which has a wave of its own (CC-25) - and a UiSchema has no
     // counterpart outside the repository, because the Portal reads the arrangement and
     // draws the form itself (UI-02).
-    let artifacts = ["Bundle", "Blueprint", "UiSchema"];
+    let artifacts = ["Bundle", "Blueprint", "UiSchema", "Environment"];
 
     for info in jc_core::registry::KINDS {
         match wave_of(info.kind) {

@@ -11,6 +11,7 @@ pub mod data_model;
 pub mod data_source;
 pub mod dataspace;
 pub mod endpoint;
+pub mod environment;
 pub mod group;
 pub mod mapping;
 pub mod model_projection;
@@ -53,6 +54,7 @@ pub use endpoint::{
     Audience, Caching, EndpointSlug, EndpointSpec, FileLimits, Projection, RateLimits,
     Representation, SharedSpaceReferenceSpec,
 };
+pub use environment::{EnvironmentSpec, SecretBackend};
 pub use group::{GroupSpec, Member};
 pub use mapping::{
     DataModelRef, MappingArtifacts, MappingSpec, MappingTest, NativeBlock, NativeLanguage,
@@ -130,6 +132,9 @@ pub type Dashboard = crate::envelope::ResourceEnvelope<DashboardSpec>;
 pub type Layer = crate::envelope::ResourceEnvelope<LayerSpec>;
 /// `kind: UiSchema` as a whole manifest.
 pub type UiSchema = crate::envelope::ResourceEnvelope<UiSchemaSpec>;
+/// `kind: Environment` as a whole manifest.
+pub type Environment = crate::envelope::ResourceEnvelope<EnvironmentSpec>;
+
 /// `kind: Group` as a whole manifest.
 pub type Group = crate::envelope::ResourceEnvelope<GroupSpec>;
 

@@ -203,13 +203,90 @@ pub enum LoadError {
         /// Parser error message.
         message: String,
     },
+
+    /// The environment overlay `JC_ENVIRONMENT` names is not one (CC-73, CC-75).
+    #[error("environment overlay {path} is not a valid Environment: {message}")]
+    Overlay {
+        /// Repository-relative path of the overlay.
+        path: PathBuf,
+        /// Why it was refused.
+        message: String,
+    },
+
+    /// `JC_ENVIRONMENT` names an overlay the repository does not hold (CC-73).
+    #[error("JC_ENVIRONMENT names `{name}`, and the repository holds no environments/{name}.yaml")]
+    NoSuchEnvironment {
+        /// The name that was asked for.
+        name: String,
+    },
 }
+
+/// Replaces every `{orgDomain}` of every string of `value`, however deep (CC-74).
+///
+/// The spec is where a domain appears — a URN, a `q` filter, a host in a source URL — and the
+/// metadata is names and labels, which are DNS labels and locales and carry no domain.
+pub(crate) fn render_in_place(value: &mut serde_json::Value, org_domain: &str) {
+    match value {
+        serde_json::Value::String(text) => {
+            if text.contains(ORG_DOMAIN_PLACEHOLDER) {
+                *text = text.replace(ORG_DOMAIN_PLACEHOLDER, org_domain);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                render_in_place(item, org_domain);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, item) in map.iter_mut() {
+                render_in_place(item, org_domain);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every string of `value` that carries `org_domain` written out (CC-74).
+fn literal_strings(value: &serde_json::Value, org_domain: &str, found: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => {
+            if text.contains(org_domain) {
+                found.push(text.clone());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                literal_strings(item, org_domain, found);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values() {
+                literal_strings(item, org_domain, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// What a manifest writes instead of a domain (CC-74).
+pub const ORG_DOMAIN_PLACEHOLDER: &str = "{orgDomain}";
 
 /// In-memory indexed repository of loaded manifests (CC-08, MF-06).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Repository {
     root: PathBuf,
     resources: BTreeMap<ResourceId, LoadedResource>,
+    /// The overlay this load rendered with, when `JC_ENVIRONMENT` named one (CC-73).
+    environment: Option<String>,
+    /// The organization's domain as this load rendered it: the overlay's `orgDomain`, else the
+    /// `Organization` manifest's own `spec.domain` (CC-74).
+    org_domain: Option<String>,
+    /// The hosts of the environment, by component; empty without an overlay.
+    hosts: BTreeMap<String, String>,
+    /// Manifests that wrote the domain out instead of `{orgDomain}` (CC-74), as
+    /// `(resource, path, the string)`. A finding while `dev`'s repository is being migrated,
+    /// an error once it is.
+    literal_domains: Vec<(ResourceId, PathBuf, String)>,
 }
 
 /// Every regular file under `root`, in deterministic path order (CC-08).
@@ -306,8 +383,17 @@ pub(crate) fn walk_files(root: &Path) -> Result<Vec<walkdir::DirEntry>, LoadErro
 }
 
 impl Repository {
-    /// Loads and indexes an organization repository from a directory path (CC-08, MF-06).
+    /// Loads and indexes an organization repository from a directory path (CC-08, MF-06),
+    /// rendered with the environment `JC_ENVIRONMENT` names (CC-73).
     pub fn load(root: &Path) -> Result<Self, LoadError> {
+        let environment = std::env::var("JC_ENVIRONMENT")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        Self::load_for(root, environment.as_deref())
+    }
+
+    /// The same load, with the environment named rather than read from the process (CC-73).
+    pub fn load_for(root: &Path, environment: Option<&str>) -> Result<Self, LoadError> {
         let mut resources: BTreeMap<ResourceId, LoadedResource> = BTreeMap::new();
 
         for entry in walk_files(root)? {
@@ -400,10 +486,97 @@ impl Repository {
             }
         }
 
+        // One repository, every environment (CC-73, CC-74): the overlay `JC_ENVIRONMENT` names
+        // is merged over the manifests before anything validates them, so a manifest carries
+        // `{orgDomain}` and never a host of its own.
+        let wanted = environment
+            .map(str::to_owned)
+            .filter(|value| !value.trim().is_empty());
+        let mut environment = None;
+        let mut org_domain = None;
+        let mut hosts = BTreeMap::new();
+        if let Some(name) = wanted {
+            let overlay = resources
+                .iter()
+                .find(|(id, _)| id.kind == "Environment" && id.name == name)
+                .ok_or_else(|| LoadError::NoSuchEnvironment { name: name.clone() })?;
+            let (_, loaded) = overlay;
+            let path = loaded.path.clone();
+            let spec: jc_core::kinds::EnvironmentSpec =
+                serde_json::from_value(loaded.manifest.spec.clone()).map_err(|err| {
+                    LoadError::Overlay {
+                        path: path.clone(),
+                        message: err.to_string(),
+                    }
+                })?;
+            spec.validate().map_err(|err| LoadError::Overlay {
+                path,
+                message: err.to_string(),
+            })?;
+            org_domain = spec.org_domain.clone();
+            hosts = spec.hosts.clone();
+            environment = Some(name);
+        }
+        // Without an overlay, or one that sets no domain, the organization's own is what every
+        // manifest rendered with until now.
+        if org_domain.is_none() {
+            org_domain = resources
+                .iter()
+                .find(|(id, _)| id.kind == "Organization")
+                .and_then(|(_, loaded)| {
+                    loaded
+                        .manifest
+                        .spec
+                        .get("domain")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                });
+        }
+        let mut literal_domains = Vec::new();
+        if let Some(domain) = org_domain.as_deref() {
+            for (id, loaded) in resources.iter_mut() {
+                // An `Environment` is where a domain is written out; every other manifest
+                // writes `{orgDomain}` and is rendered here (CC-74).
+                if id.kind != "Environment" {
+                    let mut written = Vec::new();
+                    literal_strings(&loaded.manifest.spec, domain, &mut written);
+                    for text in written {
+                        literal_domains.push((id.clone(), loaded.path.clone(), text));
+                    }
+                }
+                render_in_place(&mut loaded.manifest.spec, domain);
+            }
+        }
+
         Ok(Self {
             root: root.to_path_buf(),
             resources,
+            environment,
+            org_domain,
+            hosts,
+            literal_domains,
         })
+    }
+
+    /// The strings that wrote the organization's domain out where `{orgDomain}` belongs
+    /// (CC-74), as `(resource, path, the string)`.
+    pub fn literal_domains(&self) -> &[(ResourceId, PathBuf, String)] {
+        &self.literal_domains
+    }
+
+    /// The overlay this repository was loaded with, when `JC_ENVIRONMENT` named one (CC-73).
+    pub fn environment(&self) -> Option<&str> {
+        self.environment.as_deref()
+    }
+
+    /// The organization's domain as this load rendered it (CC-74).
+    pub fn org_domain(&self) -> Option<&str> {
+        self.org_domain.as_deref()
+    }
+
+    /// The hosts of the environment, by component; empty without an overlay.
+    pub fn hosts(&self) -> &BTreeMap<String, String> {
+        &self.hosts
     }
 
     /// Looks up a loaded resource by its identity (MF-06).

@@ -262,6 +262,10 @@ fn validate(dir: &Path) -> ExitCode {
     for finding in &report.findings {
         eprintln!("{finding}");
     }
+    // Not invalid yet, and the repository has to be migrated before it can be (CC-74).
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
+    }
     if report.is_valid() {
         println!("{} manifests valid", report.checked);
         ExitCode::SUCCESS

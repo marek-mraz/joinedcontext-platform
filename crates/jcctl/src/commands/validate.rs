@@ -46,6 +46,10 @@ pub struct Report {
     pub checked: usize,
     /// Manifests that did not, in repository order.
     pub findings: Vec<Finding>,
+    /// What is not wrong yet: a manifest that wrote the organization's domain out where
+    /// `{orgDomain}` belongs, so the same file cannot render two environments (CC-74). A
+    /// warning while a repository is being migrated, an error once it is.
+    pub warnings: Vec<Finding>,
 }
 
 impl Report {
@@ -67,6 +71,7 @@ pub fn run(repo_dir: &Path) -> Report {
             return Report {
                 checked: 0,
                 findings: vec![finding_of(err)],
+                warnings: Vec::new(),
             }
         }
     };
@@ -74,7 +79,23 @@ pub fn run(repo_dir: &Path) -> Report {
     let mut report = Report {
         checked: 0,
         findings: Vec::new(),
+        warnings: Vec::new(),
     };
+
+    for (id, path, text) in repo.literal_domains() {
+        let where_from = repo.get(id);
+        report.warnings.push(Finding {
+            path: path.clone(),
+            document: where_from.map(|r| r.document).unwrap_or(1),
+            line: where_from.map(|r| r.line).unwrap_or(1),
+            message: format!(
+                "{} writes the organization's domain out: `{text}`. Write {} instead, so the \
+                 same manifest renders every environment (CC-74).",
+                id.kind,
+                crate::loader::ORG_DOMAIN_PLACEHOLDER
+            ),
+        });
+    }
 
     for (id, resource) in repo.iter() {
         let yaml = match serde_norway::to_string(&resource.manifest) {
@@ -446,9 +467,11 @@ fn finding_of(err: LoadError) -> Finding {
         LoadError::ApiVersion { path, document, .. }
         | LoadError::UnknownKind { path, document, .. } => (path.clone(), *document, 1),
         LoadError::DuplicateIdentity { second, .. } => (second.clone(), 1, 1),
-        LoadError::PathEscapesRepository { path } | LoadError::Io { path, .. } => {
-            (path.clone(), 1, 1)
-        }
+        LoadError::PathEscapesRepository { path }
+        | LoadError::Io { path, .. }
+        | LoadError::Overlay { path, .. } => (path.clone(), 1, 1),
+        // The overlay is missing, so there is no file to point at.
+        LoadError::NoSuchEnvironment { .. } => (PathBuf::from("environments"), 1, 1),
     };
     Finding {
         path,

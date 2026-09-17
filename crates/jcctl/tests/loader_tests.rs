@@ -717,3 +717,269 @@ fn a_legacy_language_map_collapses_to_one_string() {
     );
     assert_eq!(collapsed(json!("Air")), Some(json!("Air")));
 }
+
+/// CC-73, CC-74: one repository, every environment. The same manifests render with the overlay
+/// `JC_ENVIRONMENT` names, so a URN carries `{orgDomain}` and never a domain of its own.
+fn repository_with_overlays(test_name: &str) -> PathBuf {
+    let dir = unique_temp_dir(test_name);
+    std::fs::write(
+        dir.join("org.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata: { name: my-city, namespace: org }
+spec:
+  domain: banskabystrica.sk
+  locales: ["sk", "en"]
+  defaultLocale: sk
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("environments")).unwrap();
+    std::fs::write(
+        dir.join("environments/dev.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Environment
+metadata: { name: dev, namespace: org }
+spec:
+  orgDomain: dev.banskabystrica.sk
+  hosts: { portal: portal.dev.bb.example }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("environments/staging.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Environment
+metadata: { name: staging, namespace: org }
+spec:
+  orgDomain: staging.banskabystrica.sk
+"#,
+    )
+    .unwrap();
+    let project = dir.join("projects/doprava");
+    std::fs::create_dir_all(project.join("spaces/mhd")).unwrap();
+    std::fs::write(
+        project.join("project.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Project
+metadata: { name: doprava, namespace: org }
+spec:
+  organizationRef: my-city
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("spaces/mhd/space.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: ContextSpace
+metadata:
+  name: mhd
+  namespace: doprava
+spec:
+  isSandbox: false
+"#,
+    )
+    .unwrap();
+    // A URN and a query string, the two places a domain reaches a manifest.
+    std::fs::create_dir_all(project.join("pipelines/stops")).unwrap();
+    std::fs::write(
+        project.join("pipelines/stops/pipeline.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata: { name: stops, namespace: doprava }
+spec:
+  class: resident
+  source:
+    endpointRef: { kind: Endpoint, name: stops }
+    query: { q: 'owner=="{orgDomain}"' }
+  compute: { kind: bloblang, bloblang: "root = this" }
+  targetEndpoint: "urn:ngsi-ld:Endpoint:{orgDomain}:mhd:stops"
+"#,
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn the_same_repository_renders_the_domain_of_the_environment_it_is_loaded_for() {
+    let dir = repository_with_overlays("overlays");
+    let pipeline = ResourceId::new(
+        "joinedcontext.com",
+        "Pipeline",
+        Some("doprava".into()),
+        "stops",
+    );
+
+    let seed = |environment: Option<&str>| {
+        let repo = Repository::load_for(&dir, environment).expect("loads");
+        let rendered = repo
+            .get(&pipeline)
+            .expect("the pipeline")
+            .manifest
+            .spec
+            .get("targetEndpoint")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        (repo.org_domain().map(str::to_owned), rendered)
+    };
+
+    // Without an overlay: the Organization's own domain, which is what happened until now.
+    let (domain, rendered) = seed(None);
+    assert_eq!(domain.as_deref(), Some("banskabystrica.sk"));
+    assert_eq!(rendered, "urn:ngsi-ld:Endpoint:banskabystrica.sk:mhd:stops");
+
+    let (dev, dev_urn) = seed(Some("dev"));
+    let (staging, staging_urn) = seed(Some("staging"));
+    assert_eq!(dev.as_deref(), Some("dev.banskabystrica.sk"));
+    assert_eq!(staging.as_deref(), Some("staging.banskabystrica.sk"));
+    // The same manifest, two environments, no diff of its own.
+    assert_eq!(
+        dev_urn,
+        "urn:ngsi-ld:Endpoint:dev.banskabystrica.sk:mhd:stops"
+    );
+    assert_eq!(
+        staging_urn,
+        "urn:ngsi-ld:Endpoint:staging.banskabystrica.sk:mhd:stops"
+    );
+
+    // The hosts come with the overlay, so the reconciler reads them from the load.
+    let repo = Repository::load_for(&dir, Some("dev")).expect("loads");
+    assert_eq!(
+        repo.hosts().get("portal").map(String::as_str),
+        Some("portal.dev.bb.example")
+    );
+    assert_eq!(repo.environment(), Some("dev"));
+}
+
+#[test]
+fn the_placeholder_is_rendered_inside_a_urn_and_inside_a_query() {
+    let dir = unique_temp_dir("placeholder");
+    std::fs::write(
+        dir.join("org.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata: { name: my-city, namespace: org }
+spec:
+  domain: banskabystrica.sk
+  locales: ["sk"]
+  defaultLocale: sk
+"#,
+    )
+    .unwrap();
+    let project = dir.join("projects/doprava");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("project.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Project
+metadata: { name: doprava, namespace: org }
+spec:
+  organizationRef: my-city
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("pipeline.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata: { name: stops, namespace: doprava }
+spec:
+  class: resident
+  source:
+    endpointRef: { kind: Endpoint, name: stops }
+    query: 'q=owner=="{orgDomain}"'
+  compute: { kind: bloblang, bloblang: "root = this" }
+  targetEndpoint: "urn:ngsi-ld:Endpoint:{orgDomain}:mhd:stops"
+"#,
+    )
+    .unwrap();
+
+    let repo = Repository::load_for(&dir, None).expect("loads");
+    let pipeline = repo
+        .get(&ResourceId::new(
+            "joinedcontext.com",
+            "Pipeline",
+            Some("doprava".into()),
+            "stops",
+        ))
+        .expect("the pipeline");
+    assert_eq!(
+        pipeline.manifest.spec["targetEndpoint"],
+        json!("urn:ngsi-ld:Endpoint:banskabystrica.sk:mhd:stops")
+    );
+    assert_eq!(
+        pipeline.manifest.spec["source"]["query"],
+        json!("q=owner==\"banskabystrica.sk\"")
+    );
+}
+
+#[test]
+fn an_overlay_with_an_unknown_field_is_refused_and_so_is_one_that_is_not_there() {
+    let dir = unique_temp_dir("bad-overlay");
+    std::fs::create_dir_all(dir.join("environments")).unwrap();
+    std::fs::write(
+        dir.join("environments/dev.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Environment
+metadata: { name: dev, namespace: org }
+spec:
+  orgDomain: dev.banskabystrica.sk
+  secrets: { backend: openbao, value: hunter2 }
+"#,
+    )
+    .unwrap();
+
+    let refused = Repository::load_for(&dir, Some("dev")).expect_err("a secret value");
+    assert!(matches!(refused, LoadError::Overlay { .. }), "{refused:?}");
+    assert!(format!("{refused}").contains("value"), "{refused}");
+
+    let missing = Repository::load_for(&dir, Some("production")).expect_err("no such overlay");
+    assert!(
+        matches!(missing, LoadError::NoSuchEnvironment { .. }),
+        "{missing:?}"
+    );
+}
+
+/// CC-74: a manifest that writes the organization's domain out is named while the repository is
+/// migrated, and the overlay itself — the one place a domain belongs — is not.
+#[test]
+fn a_manifest_that_writes_the_domain_out_is_reported_and_the_overlay_is_not() {
+    let dir = repository_with_overlays("literal-domain");
+    let project = dir.join("projects/doprava");
+    std::fs::write(
+        project.join("pipelines/stops/pipeline.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata: { name: stops, namespace: doprava }
+spec:
+  class: resident
+  source:
+    endpointRef: { kind: Endpoint, name: stops }
+    query: { q: 'owner=="dev.banskabystrica.sk"' }
+  compute: { kind: bloblang, bloblang: "root = this" }
+  targetEndpoint: "urn:ngsi-ld:Endpoint:{orgDomain}:mhd:stops"
+"#,
+    )
+    .unwrap();
+
+    let repo = Repository::load_for(&dir, Some("dev")).expect("loads");
+    let written: Vec<&str> = repo
+        .literal_domains()
+        .iter()
+        .map(|(_, _, text)| text.as_str())
+        .collect();
+    assert_eq!(written, ["owner==\"dev.banskabystrica.sk\""], "{written:?}");
+
+    let report = jcctl::commands::validate::run(&dir);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("{orgDomain}")),
+        "{:?}",
+        report.warnings
+    );
+    // A warning is not a refusal while the repository is being migrated.
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+}
