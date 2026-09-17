@@ -966,6 +966,50 @@ mod request_bodies {
     }
 }
 
+/// T-0981, AG-46/AG-52: the inbox a workspace reads is its own run's, because the run comes off
+/// the ticket. Nothing in the request names a run, and a request that tries to name one is
+/// answered with the caller's own inbox all the same.
+#[tokio::test]
+async fn the_inbox_is_the_ticket_s_run_and_never_one_the_request_names() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let other = "11111111-2222-3333-4444-555555555555";
+    let portal = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/internal/agent-runs/e3b0c442-98fc-1c14-9afb-4c7b2756a120/inbox",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "items": [] })))
+        .mount(&portal)
+        .await;
+
+    let app = router(test_state_with_portal(
+        sample_run(false, "building"),
+        &portal.uri(),
+    ));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/runs/inbox?after=0&run={other}&id={other}"))
+                .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+                .header("x-jc-ticket", "secret-ticket-123")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let asked = portal.received_requests().await.unwrap_or_default();
+    assert_eq!(asked.len(), 1);
+    assert!(
+        !asked[0].url.as_str().contains(other),
+        "a run the request named reached the Portal: {}",
+        asked[0].url
+    );
+}
+
 /// T-0850, AG-45/AG-46: an event is one line of a conversation. The route's own 64 KiB ceiling
 /// (Architecture/19 §4) refuses a larger one before the Portal ever sees it, so a workspace
 /// cannot decide how much of the run store and of every reader's stream one event takes.
