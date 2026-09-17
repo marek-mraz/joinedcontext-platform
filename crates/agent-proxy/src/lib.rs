@@ -19,6 +19,9 @@ pub struct ProxyState {
     pub credentials: inject::CredentialManager,
     pub limits: limits::LimitManager,
     pub http: reqwest::Client,
+    /// The client the fetch route uses. It follows no redirect of its own: every hop is checked
+    /// against the run's allow-list first, which `reqwest`'s policy cannot do (AG-65).
+    pub egress: reqwest::Client,
 }
 
 pub fn router(state: Arc<ProxyState>) -> Router {
@@ -36,6 +39,7 @@ pub fn router(state: Arc<ProxyState>) -> Router {
             "/v1/forge/{*rest}",
             axum::routing::any(routes::forge::handler),
         )
+        .route("/v1/fetch", get(routes::fetch::handler))
         .route("/v1/llm/{*rest}", post(routes::llm::handler))
         .route(
             "/v1/packages/{host}/{*rest}",

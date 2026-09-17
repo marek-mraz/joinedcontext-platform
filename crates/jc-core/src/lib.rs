@@ -45,6 +45,7 @@ pub use kinds::{
     ServiceAccountSpec, SharedSpaceReference, SharedSpaceReferenceSpec, SourceQuery,
     SubscriptionTrigger, SyncMode, SyncOrigin, SyncSource, SyncSourceSpec, TemporalConstraint,
     TemporalWindow, Trigger, Validity, VocabularyAlignment, Widget, Workload,
+    DEFAULT_EGRESS_BYTES_PER_RUN,
 };
 pub use registry::{by_kind, by_plural, KindInfo, KINDS};
 pub use urn::Urn;

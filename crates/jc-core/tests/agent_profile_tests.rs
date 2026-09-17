@@ -250,3 +250,76 @@ fn reasoning_effort_is_optional_and_one_of_three() {
     let err = AgentProfile::from_yaml(&yaml).unwrap_err().to_string();
     assert!(err.contains("reasoningEffort"), "{err}");
 }
+
+/// The per-run byte budget of T-0557 (AG-65): what a profile has to say to get egress, and what
+/// it must not say.
+mod egress_budget {
+    use super::*;
+    use jc_core::DEFAULT_EGRESS_BYTES_PER_RUN;
+
+    #[test]
+    fn a_builder_that_names_hosts_and_no_budget_gets_the_default() {
+        let profile = AgentProfile::from_yaml(VALID_YAML).expect("valid yaml");
+        profile.validate().expect("valid profile");
+        assert_eq!(profile.spec.egress.max_bytes_per_run, None);
+        assert_eq!(
+            profile.spec.egress.max_bytes_per_run(),
+            DEFAULT_EGRESS_BYTES_PER_RUN
+        );
+    }
+
+    #[test]
+    fn a_profile_that_names_a_budget_keeps_it_through_a_round_trip() {
+        let yaml = VALID_YAML.replace(
+            "    allowedHosts:",
+            "    maxBytesPerRun: 1048576\n    allowedHosts:",
+        );
+        let profile = AgentProfile::from_yaml(&yaml).expect("valid yaml");
+        profile.validate().expect("valid profile");
+        assert_eq!(profile.spec.egress.max_bytes_per_run(), 1_048_576);
+
+        let again = AgentProfile::from_yaml(&profile.to_yaml().expect("serialize"))
+            .expect("the serialized profile parses");
+        assert_eq!(again.spec.egress.max_bytes_per_run, Some(1_048_576));
+    }
+
+    #[test]
+    fn a_profile_with_no_host_has_no_budget_whatever_it_writes() {
+        // The rule the proxy leans on: the budget is zero when there is nowhere to spend it,
+        // so "reaches nothing" needs no second check at the door.
+        let mut profile = AgentProfile::from_yaml(VALID_YAML).expect("valid yaml");
+        profile.spec.egress.allowed_hosts.clear();
+        profile.spec.egress.max_bytes_per_run = Some(999_999);
+        assert_eq!(profile.spec.egress.max_bytes_per_run(), 0);
+    }
+
+    #[test]
+    fn a_budget_of_zero_is_refused_rather_than_read_as_no_egress() {
+        // Zero would be an allow-list that cannot be used: two ways to say "no egress", one of
+        // which leaves reviewed hosts sitting in the manifest looking live.
+        let yaml = VALID_YAML.replace(
+            "    allowedHosts:",
+            "    maxBytesPerRun: 0\n    allowedHosts:",
+        );
+        let profile = AgentProfile::from_yaml(&yaml).expect("valid yaml");
+        let refused = profile.validate().expect_err("zero is refused");
+        assert!(refused.to_string().contains("maxBytesPerRun"), "{refused}");
+    }
+
+    #[test]
+    fn a_steward_may_not_carry_a_budget() {
+        let yaml = VALID_YAML
+            .replace("role: builder", "role: steward")
+            .replace(
+                "    allowedHosts:\n      - static.crates.io\n      - index.crates.io\n      - registry.npmjs.org",
+                "    maxBytesPerRun: 1048576",
+            )
+            .replace(
+                "  tools:\n    - shell\n    - cargo\n    - pnpm\n    - git\n    - playwright\n",
+                "",
+            );
+        let profile = AgentProfile::from_yaml(&yaml).expect("valid yaml");
+        let refused = profile.validate().expect_err("a steward reaches nothing");
+        assert!(refused.to_string().contains("maxBytesPerRun"), "{refused}");
+    }
+}

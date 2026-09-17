@@ -23,6 +23,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let credentials = CredentialManager::new(config_arc.clone());
     let limits = LimitManager::default();
     let http = reqwest::Client::new();
+    // No redirect of its own: the fetch route checks every hop against the run's allow-list.
+    let egress = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
 
     let state = Arc::new(ProxyState {
         config: config_arc,
@@ -30,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         credentials,
         limits,
         http,
+        egress,
     });
 
     let listener = tokio::net::TcpListener::bind(config.bind).await?;

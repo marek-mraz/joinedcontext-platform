@@ -96,13 +96,40 @@ pub struct AgentLimits {
     pub max_response_bytes: u64,
 }
 
-/// Network egress allow-listing for package registries and documentation (AG-50).
+/// What one run may read from the internet, and how much of it (AG-50, AG-65).
+///
+/// The default is nothing: a profile that names no host reaches no host, and the workspace has
+/// no route of its own to fall back on (AG-34).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentEgress {
-    /// Bare hostnames the package route may reach; everything else is refused (AG-50).
+    /// Bare hostnames the package and fetch routes may reach; everything else is refused (AG-50).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_hosts: Vec<String>,
+    /// Bytes one run may read from those hosts in total, across every fetch (AG-65).
+    ///
+    /// Absent means [`DEFAULT_EGRESS_BYTES_PER_RUN`]: reading documentation is what the
+    /// allow-list is for, and a profile that had to name a number to get it would have every
+    /// author guessing one. The cap is what stops a run from mirroring a site, not what stops
+    /// it from reading a page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes_per_run: Option<u64>,
+}
+
+/// What a profile that names hosts but no budget gets: enough for the documentation of a
+/// handful of libraries, far too little to mirror anything.
+pub const DEFAULT_EGRESS_BYTES_PER_RUN: u64 = 16 * 1024 * 1024;
+
+impl AgentEgress {
+    /// The run's total byte budget. Zero when the profile names no host, because a budget
+    /// without a host is a number nothing can spend.
+    pub fn max_bytes_per_run(&self) -> u64 {
+        if self.allowed_hosts.is_empty() {
+            return 0;
+        }
+        self.max_bytes_per_run
+            .unwrap_or(DEFAULT_EGRESS_BYTES_PER_RUN)
+    }
 }
 
 /// Available coding and debugging tools in the builder workspace.
@@ -390,8 +417,25 @@ impl AgentProfileSpec {
             }
         }
 
+        if self.egress.max_bytes_per_run == Some(0) {
+            return Err(Error::Name {
+                field: "egress.maxBytesPerRun",
+                value: "0".to_string(),
+                reason: "a budget of zero is an allow-list nothing can use; leave the field out \
+                         to take the default, or drop allowedHosts to have no egress (AG-65)",
+            });
+        }
+
         match self.role {
             AgentProfileRole::Steward => {
+                if self.egress.max_bytes_per_run.is_some() {
+                    return Err(Error::Name {
+                        field: "egress.maxBytesPerRun",
+                        value: "declared".to_string(),
+                        reason: "steward profile has no internet access; a byte budget would \
+                                 suggest it has (AG-26)",
+                    });
+                }
                 if !self.tools.is_empty() {
                     return Err(Error::Name {
                         field: "tools",

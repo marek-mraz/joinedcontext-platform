@@ -36,6 +36,7 @@ fn sample_run(allows_write: bool, status: &str) -> RunContext {
         requests_per_minute: 100,
         steps_per_run: 0,
         max_response_bytes: 1048576,
+        max_egress_bytes_per_run: 0,
         created_by: "demo.steward@hel.fi".to_string(),
         model_name: "claude-3-7".to_string(),
         reasoning_effort: None,
@@ -83,6 +84,12 @@ fn test_state_with(run: RunContext, gateway: &str, model: &str, forge: &str) -> 
     let runs = RunResolver::with_cached(run);
     let limits = LimitManager::default();
     let http = reqwest::Client::new();
+    // No redirect of its own: the fetch route checks every hop against the run's allow-list.
+    let egress = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
 
     Arc::new(ProxyState {
         config: config_arc,
@@ -90,6 +97,7 @@ fn test_state_with(run: RunContext, gateway: &str, model: &str, forge: &str) -> 
         credentials,
         limits,
         http,
+        egress,
     })
 }
 
@@ -727,4 +735,114 @@ async fn a_directory_listing_inside_the_application_passes_and_a_literal_dot_dot
     let resp = router(state).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     assert_eq!(forge.received_requests().await.unwrap_or_default().len(), 1);
+}
+
+/// The egress allow-list of T-0557: what the builder may read, how much of it, and what the
+/// upstream is never told (AG-50, AG-65).
+mod fetch {
+    use super::*;
+
+    fn run_with_egress(hosts: &[&str], budget: u64) -> RunContext {
+        RunContext {
+            allowed_hosts: hosts.iter().map(|h| (*h).to_string()).collect(),
+            max_egress_bytes_per_run: budget,
+            ..sample_run(false, "running")
+        }
+    }
+
+    async fn fetch(state: Arc<ProxyState>, url: &str) -> axum::http::Response<Body> {
+        let uri = format!(
+            "/v1/fetch?url={}",
+            url::form_urlencoded::byte_serialize(url.as_bytes()).collect::<String>()
+        );
+        router(state)
+            .oneshot(ticketed("GET", &uri, Body::empty()))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_profile_that_names_no_host_reaches_nothing() {
+        // The default, and the one the kit builder keeps: no allow-list, no budget, no door.
+        let state = test_state(run_with_egress(&[], 0));
+        let resp = fetch(state, "https://docs.maplibre.org/api/").await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_host_the_profile_did_not_name_is_refused_with_the_rule_that_refused_it() {
+        let state = test_state(run_with_egress(&["docs.maplibre.org"], 1024));
+        let resp = fetch(state, "https://cdn.evil.test/payload").await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let said = String::from_utf8_lossy(&body);
+        assert!(said.contains("egress allow-list"), "{said}");
+        assert!(said.contains("AG-50"), "{said}");
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_budget_is_spent_is_refused_before_anything_leaves() {
+        // Nothing listens on the host below, so a 429 here is proof the budget is checked
+        // before the request rather than after it.
+        let state = test_state(run_with_egress(&["docs.maplibre.org"], 512));
+        state
+            .limits
+            .record_egress(&sample_run(false, "running").id, 512, 512)
+            .await;
+        let resp = fetch(state, "https://docs.maplibre.org/api/").await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers()
+                .get("X-JC-Egress-Remaining")
+                .and_then(|v| v.to_str().ok()),
+            Some("0")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_budget_counts_down_across_fetches_of_one_run_and_not_between_runs() {
+        let limits = LimitManager::default();
+        assert_eq!(limits.egress_remaining("run-1", 1000).await, 1000);
+        assert_eq!(limits.record_egress("run-1", 600, 1000).await, 400);
+        assert_eq!(limits.record_egress("run-1", 400, 1000).await, 0);
+        assert_eq!(limits.egress_remaining("run-1", 1000).await, 0);
+        assert_eq!(limits.egress_remaining("run-2", 1000).await, 1000);
+        // One answer may cross the budget; the arithmetic must not wrap when it does.
+        assert_eq!(limits.record_egress("run-1", 5_000, 1000).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_url_with_userinfo_or_a_token_parameter_is_refused_and_so_is_a_missing_one() {
+        let state = test_state(run_with_egress(&["docs.maplibre.org"], 1024));
+        for url in [
+            "https://user:pass@docs.maplibre.org/api/",
+            "https://docs.maplibre.org/api/?access_token=abcdef",
+        ] {
+            let resp = fetch(state.clone(), url).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{url}");
+        }
+        let resp = router(state)
+            .oneshot(ticketed("GET", "/v1/fetch", Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_fetch_without_a_ticket_is_refused_like_every_other_route() {
+        let state = test_state(run_with_egress(&["docs.maplibre.org"], 1024));
+        let request = Request::builder()
+            .method("GET")
+            .uri("/v1/fetch?url=https%3A%2F%2Fdocs.maplibre.org%2Fapi%2F")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router(state).oneshot(request).await.unwrap();
+        assert!(
+            resp.status() == StatusCode::UNAUTHORIZED || resp.status() == StatusCode::FORBIDDEN,
+            "an unauthenticated fetch answered {}",
+            resp.status()
+        );
+    }
 }

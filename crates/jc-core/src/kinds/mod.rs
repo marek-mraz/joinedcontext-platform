@@ -26,7 +26,7 @@ pub mod ui_schema;
 
 pub use agent_profile::{
     AgentEgress, AgentLimits, AgentModel, AgentProfileRole, AgentProfileSpec, AgentRuntime,
-    AgentTool, AgentWorkspace, ModelProvider,
+    AgentTool, AgentWorkspace, ModelProvider, DEFAULT_EGRESS_BYTES_PER_RUN,
 };
 pub use app::{
     AppBuild, AppClass, AppLifecycle, AppLimits, AppSource, AppSpec, AppVisibility,

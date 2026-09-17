@@ -14,6 +14,8 @@ struct RunUsage {
     tokens_consumed: u64,
     /// Model calls the run has made: one call is one step (AG-25, AG-51).
     steps: u32,
+    /// Bytes the run has read from the internet through the fetch route (AG-65).
+    egress_bytes: u64,
 }
 
 /// One minute, the window `requests_per_minute` is counted over.
@@ -78,6 +80,27 @@ impl LimitManager {
             return Err("token budget exhausted");
         }
         Ok(())
+    }
+
+    /// What is left of the run's egress budget. `0` refuses the next fetch, and it is also what
+    /// a run with no budget at all has, so a profile that names no host reaches nothing without
+    /// a second rule saying so (AG-50, AG-65).
+    pub async fn egress_remaining(&self, run_id: &str, budget: u64) -> u64 {
+        let map = self.runs.lock().await;
+        let spent = map.get(run_id).map_or(0, |entry| entry.egress_bytes);
+        budget.saturating_sub(spent)
+    }
+
+    /// Counts one answer against the budget and says what is left.
+    ///
+    /// Counted after the answer arrives rather than reserved before it: the size is not known
+    /// until then, and one answer is already bounded by the run's `maxResponseBytes`. So a run
+    /// may cross its budget by at most one answer, and the fetch after it is refused.
+    pub async fn record_egress(&self, run_id: &str, bytes: u64, budget: u64) -> u64 {
+        let mut map = self.runs.lock().await;
+        let entry = map.entry(run_id.to_string()).or_default();
+        entry.egress_bytes = entry.egress_bytes.saturating_add(bytes);
+        budget.saturating_sub(entry.egress_bytes)
     }
 
     pub async fn record_tokens(&self, run_id: &str, count: u64) {

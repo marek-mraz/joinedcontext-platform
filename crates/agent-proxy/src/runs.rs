@@ -30,6 +30,11 @@ pub struct RunContext {
     #[serde(default)]
     pub steps_per_run: u32,
     pub max_response_bytes: u64,
+    /// Bytes this run may read from the allow-listed hosts in total, from the profile's
+    /// `egress.maxBytesPerRun` (AG-65). `0` — a Portal that does not send it, or a profile that
+    /// names no host — is a run that reaches nothing.
+    #[serde(default)]
+    pub max_egress_bytes_per_run: u64,
     pub created_by: String,
     pub model_name: String,
     /// The profile's `model.reasoningEffort`, absent when it names none (AG-72).
