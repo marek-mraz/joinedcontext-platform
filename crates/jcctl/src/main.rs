@@ -13,7 +13,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -30,7 +30,9 @@ fn main() -> ExitCode {
             None => usage(),
         },
         ["drift", "--repo-dir", dir, rest @ ..] => match drift_options(rest) {
-            Some((as_json, adopt_dir)) => drift(Path::new(dir), as_json, adopt_dir.as_deref()),
+            Some((as_json, adopt_dir, live)) => {
+                drift(Path::new(dir), as_json, adopt_dir.as_deref(), live)
+            }
             None => usage(),
         },
         ["import", source, rest @ ..] => match bundle_options(rest) {
@@ -334,7 +336,7 @@ fn exit_of(clean: bool) -> ExitCode {
 /// Exit 2 means drift, the same code `plan` uses for pending changes: a scheduled run is a
 /// cron job whose exit code is the alert, and an operator reads the two resolutions per
 /// resource (CC-38, UI-26).
-fn drift(dir: &Path, as_json: bool, adopt_dir: Option<&Path>) -> ExitCode {
+fn drift(dir: &Path, as_json: bool, adopt_dir: Option<&Path>, live: Connection) -> ExitCode {
     let repo = match Repository::load(dir) {
         Ok(repo) => repo,
         Err(err) => return fail(&err.to_string()),
@@ -369,16 +371,33 @@ fn drift(dir: &Path, as_json: bool, adopt_dir: Option<&Path>) -> ExitCode {
         print!("{}", report.render());
     }
 
-    if report.is_clean() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(2)
+    // A seed entity the broker no longer holds as declared is drift too, and the same
+    // comparison `plan` makes says so (CC-21, CC-72). Nothing is written, and nothing is
+    // adopted: a live entity is data, and data is not adopted into the repository.
+    let gateway = match live.open() {
+        Ok(gateway) => gateway,
+        Err(err) => return fail(&err),
+    };
+    let seeds = match &gateway {
+        None => None,
+        Some(gateway) => match commands::seed::plan(dir, gateway) {
+            Ok(seeds) => Some(seeds),
+            Err(err) => return fail(&err.to_string()),
+        },
+    };
+    if let Some(seeds) = &seeds {
+        if !as_json {
+            print!("{}", seeds.render());
+        }
     }
+
+    exit_of(report.is_clean() && seeds.as_ref().is_none_or(commands::seed::Report::is_clean))
 }
 
 /// Parses `--json` and the optional `--adopt-dir <path>`, in any order.
-fn drift_options(args: &[&str]) -> Option<(bool, Option<PathBuf>)> {
+fn drift_options(args: &[&str]) -> Option<(bool, Option<PathBuf>, Connection)> {
     let (mut as_json, mut adopt_dir) = (false, None);
+    let mut live = Connection::default();
     let mut rest = args;
     while let Some((flag, tail)) = rest.split_first() {
         match *flag {
@@ -393,10 +412,10 @@ fn drift_options(args: &[&str]) -> Option<(bool, Option<PathBuf>)> {
                 }
                 None => return None,
             },
-            _ => return None,
+            flag => rest = live.take(flag, tail)?,
         }
     }
-    Some((as_json, adopt_dir))
+    Some((as_json, adopt_dir, live))
 }
 
 /// Converges the platform and prints the per-resource result (CC-18, CC-20).
@@ -1345,10 +1364,21 @@ mod tests {
         assert_eq!(live.token_file.as_deref(), Some("/var/run/secrets/token"));
 
         // A flag nobody declared, and a flag whose value is missing: both are the usage text.
+        let (_, adopt, live) = drift_options(&[
+            "--adopt-dir",
+            "/tmp/adopt",
+            "--gateway-url",
+            "http://gw:9090",
+        ])
+        .expect("drift takes the same connection");
+        assert_eq!(adopt, Some(PathBuf::from("/tmp/adopt")));
+        assert_eq!(live.gateway_url.as_deref(), Some("http://gw:9090"));
+
         assert!(plan_options(&["--gateway"]).is_none());
         assert!(plan_options(&["--gateway-url"]).is_none());
         assert!(apply_options(&["--token-file"]).is_none());
         assert!(apply_options(&["--broker-url", "http://broker:1026"]).is_none());
+        assert!(drift_options(&["--adopt-dir"]).is_none());
     }
 
     /// A run that names no gateway is repository-only rather than a run against an empty
