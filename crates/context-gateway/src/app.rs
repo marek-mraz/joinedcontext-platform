@@ -46,8 +46,9 @@ use std::sync::Arc;
 // task, and a limit is a better answer than an out-of-memory kill either way.
 const MAX_BODY: usize = 8 * 1024 * 1024;
 
-/// The header that tells a caller their answer was narrowed by policy (R22).
-const RESULTS_RESTRICTED: &str = "ngsild-results-restricted";
+// The header that tells a caller their answer was narrowed by policy, and the layer that
+// removes it again when they did not ask (R22).
+use crate::middleware::response::RESULTS_RESTRICTED;
 
 /// The methods a view endpoint answers at all (RFC 9110 section 9.2.1).
 const SAFE: &[Method] = &[Method::GET, Method::HEAD, Method::OPTIONS];
@@ -283,6 +284,11 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/metrics", get(telemetry::metrics))
         .with_state(gateway)
         .fallback(missing)
+        // Outside every handler, so nothing the gateway concluded for itself — the tenant,
+        // and the narrowing signal nobody asked for — leaves in a header (SP-05, R22).
+        .layer(axum::middleware::from_fn(
+            crate::middleware::response::scrub,
+        ))
         .layer(axum::middleware::from_fn(telemetry::record))
 }
 

@@ -371,7 +371,9 @@ async fn a_tool_call_reaches_the_broker_pinned_to_the_space_and_carrying_the_cal
     )
     .await;
     assert_eq!(answer["result"]["isError"], false);
-    assert!(answer["result"]["structuredContent"].is_array());
+    // The structured half is an object naming what it carries, never the broker's bare
+    // list: a client that reads it by name reads nothing from a list (T-0946).
+    assert!(answer["result"]["structuredContent"]["entities"].is_array());
 
     let seen = log.lock().expect("the log").clone();
     assert_eq!(seen.len(), 1, "one tool call, one broker request");
@@ -531,7 +533,7 @@ async fn the_describing_tools_answer_from_the_endpoint_and_never_from_the_broker
     )
     .await;
     assert_eq!(access["result"]["isError"], false);
-    let permissions = &access["result"]["structuredContent"];
+    let permissions = &access["result"]["structuredContent"]["access"];
     assert_eq!(permissions["resource"]["id"], SLUG);
     assert_eq!(permissions["resource"]["space"], "ovzdusie");
     assert!(
@@ -548,7 +550,10 @@ async fn the_describing_tools_answer_from_the_endpoint_and_never_from_the_broker
         message(SLUG, None, call(12, "describe_schema", json!({}))),
     )
     .await;
-    assert_eq!(summary["result"]["structuredContent"]["endpoint"], SLUG);
+    assert_eq!(
+        summary["result"]["structuredContent"]["schema"]["endpoint"],
+        SLUG
+    );
 
     let (_, shacl) = send(
         app(&broker, &realm),
@@ -609,7 +614,7 @@ async fn describe_access_answers_each_format_with_the_document_the_http_surface_
         .await;
         assert_eq!(answer["result"]["isError"], false, "{format}: {answer}");
         assert_eq!(
-            answer["result"]["structuredContent"],
+            answer["result"]["structuredContent"]["access"],
             over_http(accept).await,
             "{format} over MCP is the {accept} document"
         );
@@ -645,4 +650,141 @@ async fn describe_access_answers_each_format_with_the_document_the_http_surface_
         over_http("application/odrl+json").await,
         "the resource takes the same format"
     );
+}
+
+/// AG-21, T-0944: an argument that cannot denote an entity type is a bad request, not an
+/// empty result. A caller who reads `[]` learns that the parameter was accepted.
+#[tokio::test]
+async fn a_type_argument_that_is_not_a_type_name_is_refused_by_name() {
+    let realm = common::Realm::new();
+    let (broker, log) = stub_broker().await;
+    let hostile = [
+        "path/../../../../etc/passwd%00trailing-null-byte-attempt",
+        "../../secrets",
+        "AirQualityObserved OR 1=1",
+        "urn:ngsi-ld:AirQualityObserved:hel.fi:helsinki:x",
+        "",
+    ];
+    for argument in hostile {
+        let (_, answer) = send(
+            app(&broker, &realm),
+            message(
+                SLUG,
+                None,
+                json!({ "jsonrpc": "2.0", "id": 31, "method": "tools/call", "params": {
+                    "name": "query_entities",
+                    "arguments": { "type": argument },
+                }}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            answer["result"]["isError"], true,
+            "`{argument}` was accepted as an entity type: {answer}"
+        );
+        let text = answer["result"]["content"][0]["text"]
+            .as_str()
+            .expect("a refusal an agent can read");
+        assert!(
+            text.contains("/type"),
+            "the refusal does not name the parameter it refused: {text}"
+        );
+    }
+    assert!(
+        log.lock().expect("the log").is_empty(),
+        "a refused argument still reached the broker"
+    );
+}
+
+/// AG-21: an `id` that is not an NGSI-LD URN is refused the same way, and a legal type name
+/// still goes through — the pattern refuses hostile values, not the catalogue.
+#[tokio::test]
+async fn an_id_argument_is_a_urn_and_a_plain_type_name_still_passes() {
+    let realm = common::Realm::new();
+    let token = steward(&realm);
+    let (broker, log) = stub_broker().await;
+
+    let (_, refused) = send(
+        app(&broker, &realm),
+        message(
+            SLUG,
+            Some(&token),
+            json!({ "jsonrpc": "2.0", "id": 32, "method": "tools/call", "params": {
+                "name": "get_entity",
+                "arguments": { "id": "../../../etc/passwd" },
+            }}),
+        ),
+    )
+    .await;
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(log.lock().expect("the log").is_empty());
+
+    let (_, allowed) = send(
+        app(&broker, &realm),
+        message(
+            SLUG,
+            Some(&token),
+            json!({ "jsonrpc": "2.0", "id": 33, "method": "tools/call", "params": {
+                "name": "query_entities",
+                "arguments": { "type": "AirQualityObserved", "limit": 1 },
+            }}),
+        ),
+    )
+    .await;
+    assert_eq!(allowed["result"]["isError"], false, "{allowed}");
+    assert_eq!(log.lock().expect("the log").len(), 1);
+}
+
+/// T-0946, AG-13: `structuredContent` is an object naming what it carries, and every tool
+/// publishes the output schema that says so.
+#[tokio::test]
+async fn the_structured_half_of_a_result_is_an_object_the_output_schema_describes() {
+    let realm = common::Realm::new();
+    let token = steward(&realm);
+    let (broker, _log) = stub_broker().await;
+
+    let (_, listed) = send(
+        app(&broker, &realm),
+        message(
+            SLUG,
+            Some(&token),
+            json!({ "jsonrpc": "2.0", "id": 34, "method": "tools/list" }),
+        ),
+    )
+    .await;
+    let tools = listed["result"]["tools"]
+        .as_array()
+        .expect("the catalogue")
+        .clone();
+    for tool in &tools {
+        let schema = &tool["outputSchema"];
+        assert_eq!(schema["type"], "object", "{}: {schema}", tool["name"]);
+        let key = schema["required"][0]
+            .as_str()
+            .expect("the output schema names what the result carries");
+        assert!(
+            schema["properties"][key].is_object(),
+            "{}: the required key is not a property of the schema",
+            tool["name"]
+        );
+    }
+
+    let (_, answer) = send(
+        app(&broker, &realm),
+        message(
+            SLUG,
+            Some(&token),
+            json!({ "jsonrpc": "2.0", "id": 35, "method": "tools/call", "params": {
+                "name": "query_entities",
+                "arguments": { "type": "AirQualityObserved", "limit": 5 },
+            }}),
+        ),
+    )
+    .await;
+    let structured = &answer["result"]["structuredContent"];
+    assert!(
+        structured.is_object(),
+        "a bare list is read as nothing by a client that reads the structured half by name: {structured}"
+    );
+    assert!(structured["entities"].is_array(), "{structured}");
 }

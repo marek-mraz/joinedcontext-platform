@@ -54,6 +54,17 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// Arguments that would choose a space instead of describing data (AG-05, SP-14, SP-20).
 const SELECTOR_ARGUMENTS: &[&str] = &["space", "tenant", "contextspace", "slug", "endpoint"];
 
+/// An NGSI-LD entity type name, as the models of this platform spell it: a term, never a
+/// path, a URL or an escape sequence (AG-21).
+///
+/// A value outside this is a bad request and is refused by name. Answering it with an empty
+/// result would tell the caller the argument was accepted, which is how a traversal probe
+/// reads `[]`: as "the parameter went through and there was nothing there".
+const TYPE_NAME: &str = "^[A-Za-z][A-Za-z0-9_-]*$";
+
+/// An NGSI-LD entity id, which on this platform is always the URN of ADR 001.
+const ENTITY_URN: &str = "^urn:ngsi-ld:[^\\s]+$";
+
 /// One tool of the catalogue of Architecture/07 section 2.
 struct Tool {
     name: &'static str,
@@ -67,6 +78,10 @@ struct Tool {
     /// does rather than what would be convenient (AG-07).
     read_only: bool,
     schema: fn() -> Value,
+    /// What the broker's answer is called in the structured half of the result. MCP's
+    /// `structuredContent` is an object matching the tool's output schema, so a bare list
+    /// is read as nothing by every client that reads it by name (T-0946, AG-13).
+    result_key: &'static str,
 }
 
 const TOOLS: &[Tool] = &[
@@ -79,8 +94,8 @@ const TOOLS: &[Tool] = &[
             json!({
                 "type": "object",
                 "properties": {
-                    "type": { "type": "string", "description": "NGSI-LD entity type, e.g. AirQualityObserved" },
-                    "q": { "type": "string", "description": "NGSI-LD query filter, e.g. pm25>35" },
+                    "type": type_schema(),
+                    "q": { "type": "string", "maxLength": 4096, "description": "NGSI-LD query filter, e.g. pm25>35" },
                     "scopeQ": { "type": "string", "description": "NGSI-LD scope query, e.g. /geo/SK/BB" },
                     "georel": { "type": "string", "description": "NGSI-LD geo relation, e.g. near;maxDistance==2000" },
                     "geometry": { "type": "string", "enum": ["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"] },
@@ -93,6 +108,7 @@ const TOOLS: &[Tool] = &[
                 "additionalProperties": false,
             })
         },
+        result_key: "entities",
     },
     Tool {
         name: "get_entity",
@@ -103,13 +119,14 @@ const TOOLS: &[Tool] = &[
             json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "Entity URN, urn:ngsi-ld:{Type}:{domain}:{space}:{localId}" },
+                    "id": id_schema(),
                     "attrs": attrs_schema(),
                 },
                 "required": ["id"],
                 "additionalProperties": false,
             })
         },
+        result_key: "entity",
     },
     Tool {
         name: "list_types",
@@ -128,6 +145,7 @@ const TOOLS: &[Tool] = &[
                 "additionalProperties": false,
             })
         },
+        result_key: "entityTypes",
     },
     Tool {
         name: "list_attributes",
@@ -146,6 +164,7 @@ const TOOLS: &[Tool] = &[
                 "additionalProperties": false,
             })
         },
+        result_key: "attributes",
     },
     Tool {
         name: "query_temporal",
@@ -153,6 +172,7 @@ const TOOLS: &[Tool] = &[
         description: "Query the history of this context space's entities in a time window.",
         read_only: true,
         schema: temporal_schema,
+        result_key: "entities",
     },
     Tool {
         name: "retrieve_temporal",
@@ -164,13 +184,11 @@ const TOOLS: &[Tool] = &[
             let object = schema
                 .as_object_mut()
                 .expect("the temporal schema is an object");
-            object["properties"]["id"] = json!({
-                "type": "string",
-                "description": "Entity URN, urn:ngsi-ld:{Type}:{domain}:{space}:{localId}",
-            });
+            object["properties"]["id"] = id_schema();
             object["required"] = json!(["id", "timerel", "timeAt"]);
             schema
         },
+        result_key: "entity",
     },
     Tool {
         name: "batch_query",
@@ -183,17 +201,18 @@ const TOOLS: &[Tool] = &[
                 "properties": {
                     "ids": {
                         "type": "array",
-                        "items": { "type": "string" },
+                        "items": id_schema(),
                         "description": "Entity URNs to fetch; a type may be given instead",
                     },
-                    "type": { "type": "string" },
-                    "q": { "type": "string", "description": "NGSI-LD query filter" },
+                    "type": type_schema(),
+                    "q": { "type": "string", "maxLength": 4096, "description": "NGSI-LD query filter" },
                     "attrs": attrs_schema(),
                     "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
                 },
                 "additionalProperties": false,
             })
         },
+        result_key: "entities",
     },
     Tool {
         name: "list_subscriptions",
@@ -209,6 +228,7 @@ const TOOLS: &[Tool] = &[
                 "additionalProperties": false,
             })
         },
+        result_key: "subscriptions",
     },
     Tool {
         name: "describe_access",
@@ -227,6 +247,7 @@ const TOOLS: &[Tool] = &[
                 "additionalProperties": false,
             })
         },
+        result_key: "access",
     },
     Tool {
         name: "describe_schema",
@@ -252,12 +273,13 @@ const TOOLS: &[Tool] = &[
                         ],
                         "description": "summary lists the models and their artifacts; the others render one, the text formalisms as {format, mediaType, document}",
                     },
-                    "entityType": { "type": "string", "description": "Describe this one entity type instead of every type the caller may read" },
+                    "entityType": type_schema(),
                     "version": { "type": "integer", "minimum": 1, "description": "Model major version" },
                 },
                 "additionalProperties": false,
             })
         },
+        result_key: "schema",
     },
     Tool {
         name: "upsert_entity",
@@ -274,6 +296,7 @@ const TOOLS: &[Tool] = &[
                 "additionalProperties": false,
             })
         },
+        result_key: "entity",
     },
     Tool {
         name: "create_subscription",
@@ -294,8 +317,29 @@ const TOOLS: &[Tool] = &[
                 "additionalProperties": false,
             })
         },
+        result_key: "subscription",
     },
 ];
+
+/// The `type` argument, which every tool that takes one spells the same way (AG-21).
+fn type_schema() -> Value {
+    json!({
+        "type": "string",
+        "maxLength": 256,
+        "pattern": TYPE_NAME,
+        "description": "NGSI-LD entity type, e.g. AirQualityObserved",
+    })
+}
+
+/// The `id` argument: one entity, named by the URN of ADR 001 (AG-21).
+fn id_schema() -> Value {
+    json!({
+        "type": "string",
+        "maxLength": 512,
+        "pattern": ENTITY_URN,
+        "description": "Entity URN, urn:ngsi-ld:{Type}:{domain}:{space}:{localId}",
+    })
+}
 
 /// The `attrs` argument, which every read tool spells the same way.
 fn attrs_schema() -> Value {
@@ -314,8 +358,8 @@ fn temporal_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "type": { "type": "string" },
-            "q": { "type": "string", "description": "NGSI-LD query filter" },
+            "type": type_schema(),
+            "q": { "type": "string", "maxLength": 4096, "description": "NGSI-LD query filter" },
             "attrs": attrs_schema(),
             "timerel": { "type": "string", "enum": ["before", "after", "between"] },
             "timeAt": { "type": "string", "description": "ISO 8601 instant" },
@@ -387,6 +431,7 @@ pub fn tools_for(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> V
                 "name": tool.name,
                 "description": tool.description,
                 "inputSchema": (tool.schema)(),
+                "outputSchema": output_schema(tool),
                 "annotations": {
                     "readOnlyHint": tool.read_only,
                     "destructiveHint": !tool.read_only,
@@ -545,11 +590,11 @@ async fn call_tool(
                 .and_then(Value::as_str)
                 .unwrap_or("permissions");
             let document = access_document(&gateway, &subject, &endpoint, format);
-            return result(id, answered(&document));
+            return result(id, answered(&document, tool.result_key, false));
         }
         "describe_schema" => {
             return match describe_schema(&endpoint, &subject, &arguments) {
-                Ok(document) => result(id, answered(&document)),
+                Ok(document) => result(id, answered(&document, tool.result_key, false)),
                 Err(message) => result(id, refused(&message, &Value::Null)),
             };
         }
@@ -590,6 +635,12 @@ async fn call_tool(
     .await;
 
     let status = answer.status();
+    // The handler sets this whenever it narrowed, and it is read here rather than from the
+    // wire: the response layer removes it again from the answer a caller who did not ask
+    // sees, and a tool result has no request header to ask with (AG-13, R22).
+    let restricted = answer
+        .headers()
+        .contains_key(&crate::middleware::response::RESULTS_RESTRICTED);
     let payload = axum::body::to_bytes(answer.into_body(), 8 * 1024 * 1024)
         .await
         .ok()
@@ -599,7 +650,7 @@ async fn call_tool(
     // A refusal is a tool error the agent can read, never an empty result it would mistake
     // for "there is nothing there" (SP-17, MIM0-R8).
     match status.is_success() {
-        true => result(id, answered(&payload)),
+        true => result(id, answered(&payload, tool.result_key, restricted)),
         false => result(id, refused(&refusal_text(status, &payload), &payload)),
     }
 }
@@ -814,23 +865,61 @@ fn contents(uri: &str, payload: &Value) -> Value {
 }
 
 /// A tool result an agent can both read and parse.
-fn answered(payload: &Value) -> Value {
+///
+/// The structured half is an object matching the tool's output schema, never the broker's
+/// bare list: a client that reads `structuredContent` by name reads nothing from a list, and
+/// MCP defines the field as an object (T-0946). `restricted` says that the policy removed
+/// something, never what (AG-13, R20); unlike the REST header it is not asked for, because a
+/// tool result is read by a model, which has no request header to ask with.
+fn answered(payload: &Value, result_key: &str, restricted: bool) -> Value {
+    let mut structured = Map::new();
+    structured.insert(result_key.to_owned(), payload.clone());
+    if restricted {
+        structured.insert("restricted".to_owned(), Value::Bool(true));
+    }
+    let structured = Value::Object(structured);
     json!({
         "isError": false,
         "content": [{
             "type": "text",
             "text": serde_json::to_string(payload).unwrap_or_else(|_| "null".to_owned()),
         }],
-        "structuredContent": payload,
+        "structuredContent": structured,
     })
 }
 
 /// A tool error: what was refused, in the agent's own channel for it.
+///
+/// The problem document rides along when there is one; nothing does when the refusal is the
+/// gateway's own words, because `structuredContent` is an object or it is absent.
 fn refused(text: &str, payload: &Value) -> Value {
-    json!({
+    let mut result = json!({
         "isError": true,
         "content": [{ "type": "text", "text": text }],
-        "structuredContent": payload,
+    });
+    if let Value::Object(document) = payload {
+        result["structuredContent"] = Value::Object(document.clone());
+    }
+    result
+}
+
+/// What a tool's `structuredContent` looks like, published beside its input schema so a
+/// client can validate the half it parses (MCP `outputSchema`).
+///
+/// The payload's own shape is the data model's, not MCP's — a schema here would be a second
+/// copy of it that drifts — so the output schema names what the object carries and leaves the
+/// value to `describe_schema`.
+fn output_schema(tool: &Tool) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            tool.result_key: { "description": tool.description },
+            "restricted": {
+                "type": "boolean",
+                "description": "Present when the policy narrowed this answer (AG-13, R22)",
+            },
+        },
+        "required": [tool.result_key],
     })
 }
 
