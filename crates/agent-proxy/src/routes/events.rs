@@ -3,11 +3,18 @@
 use crate::audit::{log_request, AuditEntry};
 use crate::auth::authenticate;
 use crate::ProxyState;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::Json;
 use std::time::Instant;
+
+/// One event is one line of a conversation (Architecture/19 §4).
+///
+/// The cap is this route's, not axum's default: without it a workspace decides how much of the
+/// Portal's run store and of every connected browser's event stream one event may take (AG-45,
+/// AG-46). Counted on the bytes that arrived, before anything is parsed from them.
+const MAX_EVENT_BYTES: usize = 64 * 1024;
 
 #[derive(serde::Deserialize)]
 pub struct EventPayload {
@@ -18,12 +25,38 @@ pub struct EventPayload {
 pub async fn handler(
     State(state): State<ProxyState>,
     headers: HeaderMap,
-    Json(body): Json<EventPayload>,
+    raw: Bytes,
 ) -> impl IntoResponse {
     let start = Instant::now();
     let run = match authenticate(&headers, &state.runs, &state.config).await {
         Ok(r) => r,
         Err(p) => return (*p).into_response(),
+    };
+
+    if raw.len() > MAX_EVENT_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            jc_core::ProblemDetails::new(
+                413,
+                "payload-too-large",
+                format!(
+                    "an event is at most {MAX_EVENT_BYTES} bytes; this one is {}",
+                    raw.len()
+                ),
+            ),
+        )
+            .into_response();
+    }
+
+    let body: EventPayload = match serde_json::from_slice(&raw) {
+        Ok(body) => body,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                jc_core::ProblemDetails::new(400, "invalid-body", err.to_string()),
+            )
+                .into_response()
+        }
     };
 
     if let Err(msg) = state

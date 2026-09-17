@@ -450,7 +450,7 @@ fn validate(index: usize, arguments: &Map<String, Value>) -> Result<(), String> 
     }
 }
 
-/// Names the rule an argument broke, without repeating what the caller sent (SP-15, AG-21).
+/// Names the rule an argument broke, without repeating what the caller sent (GW31, AG-21).
 ///
 /// A validator writes the offending value into its own message, and a tool error is read by a
 /// model: a refusal that quotes the argument carries whatever was typed into the next prompt.

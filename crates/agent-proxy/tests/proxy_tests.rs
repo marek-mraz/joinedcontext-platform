@@ -64,7 +64,29 @@ fn test_state_with_forge(run: RunContext, forge: &str) -> Arc<ProxyState> {
     )
 }
 
+/// A proxy whose Portal is a stub, so a test can see what reached it and what never did.
+fn test_state_with_portal(run: RunContext, portal: &str) -> Arc<ProxyState> {
+    test_state_with_all(
+        run,
+        "http://context-gateway:8080",
+        "https://api.anthropic.com",
+        "http://gitea-http:3000",
+        Some(portal),
+    )
+}
+
 fn test_state_with(run: RunContext, gateway: &str, model: &str, forge: &str) -> Arc<ProxyState> {
+    test_state_with_all(run, gateway, model, forge, None)
+}
+
+fn test_state_with_all(
+    run: RunContext,
+    gateway: &str,
+    model: &str,
+    forge: &str,
+    portal: Option<&str>,
+) -> Arc<ProxyState> {
+    let portal = portal.map(str::to_string);
     let gateway = gateway.to_string();
     let model = model.to_string();
     let forge = forge.to_string();
@@ -75,6 +97,7 @@ fn test_state_with(run: RunContext, gateway: &str, model: &str, forge: &str) -> 
         "JC_FORGE_BASE" => Some(forge.clone()),
         "JC_MODEL_KEY" => Some("mock-model-key".to_string()),
         "JC_FORGE_TOKEN" => Some("mock-forge-token".to_string()),
+        "JC_PORTAL_BASE" => portal.clone(),
         _ => None,
     })
     .unwrap();
@@ -941,4 +964,73 @@ mod request_bodies {
             1
         );
     }
+}
+
+/// T-0850, AG-45/AG-46: an event is one line of a conversation. The route's own 64 KiB ceiling
+/// (Architecture/19 §4) refuses a larger one before the Portal ever sees it, so a workspace
+/// cannot decide how much of the run store and of every reader's stream one event takes.
+#[tokio::test]
+async fn an_event_over_the_cap_is_refused_and_never_reaches_the_portal() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let portal = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/internal/agent-runs/events"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({ "seq": 1 })))
+        .mount(&portal)
+        .await;
+
+    let event = |text: &str| {
+        Body::from(
+            serde_json::to_vec(
+                &serde_json::json!({ "kind": "message", "payload": { "text": text } }),
+            )
+            .unwrap(),
+        )
+    };
+    let send = |body: Body| {
+        let app = router(test_state_with_portal(
+            sample_run(false, "building"),
+            &portal.uri(),
+        ));
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/runs/events")
+                .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+                .header("x-jc-ticket", "secret-ticket-123")
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        )
+    };
+
+    // One byte over, counted on what arrived rather than on what it parses into.
+    let resp = send(event(&"x".repeat(65 * 1024))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        portal
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "the over-size event was forwarded"
+    );
+
+    // An event that fits is forwarded, so the cap refuses size and nothing else.
+    let resp = send(event("the pipeline is green")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        portal.received_requests().await.unwrap_or_default().len(),
+        1
+    );
+
+    // A small body that is not an event is still the old refusal, not a 413.
+    let resp = send(Body::from("{\"kind\":")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        portal.received_requests().await.unwrap_or_default().len(),
+        1
+    );
 }
