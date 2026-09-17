@@ -788,3 +788,43 @@ async fn the_structured_half_of_a_result_is_an_object_the_output_schema_describe
     );
     assert!(structured["entities"].is_array(), "{structured}");
 }
+
+/// T-1006, AG-08: the person's answer gates every tool that changes something, not the
+/// subscription alone. `upsert_entity` is annotated `destructiveHint: true`, so a model that
+/// calls it without carrying an answer is asked first and nothing is written.
+#[tokio::test]
+async fn a_write_tool_asks_the_person_before_it_changes_anything() {
+    let realm = common::Realm::new();
+    let token = steward(&realm);
+    let arguments = json!({ "entity": {
+        "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:st-1",
+        "type": "AirQualityObserved",
+        "pm10": { "type": "Property", "value": 12.5 }
+    }});
+
+    let (_, asked) = send(
+        app("http://127.0.0.1:1", &realm),
+        message(
+            SLUG,
+            Some(&token),
+            json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {
+                "name": "upsert_entity", "arguments": arguments,
+            }}),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        asked["result"]["status"],
+        json!("input_required"),
+        "a write runs on the person's word, not the model's: {asked}"
+    );
+    assert!(
+        asked["result"]["structuredContent"]["elicitation"]["elicitationId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "the question carries the server's own id, so the model cannot answer it: {asked}"
+    );
+    // The broker is unreachable in this test; reaching it at all would fail the call instead.
+    assert_ne!(asked["result"]["isError"], json!(true), "{asked}");
+}
