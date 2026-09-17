@@ -7,7 +7,6 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use http_body_util::BodyExt;
 use std::time::Instant;
 
 pub async fn handler(
@@ -23,13 +22,9 @@ pub async fn handler(
         Err(p) => return (*p).into_response(),
     };
 
-    let body_bytes = match req.into_body().collect().await {
-        Ok(b) => b.to_bytes(),
-        Err(_) => {
-            return jc_core::ProblemDetails::bad_request()
-                .with_detail("failed to read body")
-                .into_response()
-        }
+    let body_bytes = match super::body::bounded(req.into_body()).await {
+        Ok(bytes) => bytes,
+        Err(refusal) => return *refusal,
     };
 
     let mut body_val = serde_json::from_slice::<serde_json::Value>(&body_bytes).ok();

@@ -1,3 +1,4 @@
+pub mod body;
 pub mod data;
 pub mod diagnostics;
 pub mod events;

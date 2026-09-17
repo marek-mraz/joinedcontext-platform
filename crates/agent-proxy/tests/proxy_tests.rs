@@ -846,3 +846,99 @@ mod fetch {
         );
     }
 }
+
+/// One ceiling on every door (AG-41, T-0811): the proxy is shared by every run in the
+/// organization, so a body one run sends is memory taken from all of them.
+mod request_bodies {
+    use super::*;
+    use agent_proxy::routes::body::MAX_REQUEST_BYTES;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn oversized() -> Body {
+        Body::from(vec![b'x'; MAX_REQUEST_BYTES + 1])
+    }
+
+    #[tokio::test]
+    async fn a_body_past_the_ceiling_is_refused_on_the_data_route_and_never_forwarded() {
+        let gateway = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&gateway)
+            .await;
+        let state = test_state_with_gateway(sample_run(true, "running"), &gateway.uri());
+
+        let resp = router(state)
+            .oneshot(ticketed(
+                "POST",
+                "/v1/data/ngsi-ld/v1/entities",
+                oversized(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            gateway
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "the gateway was asked to read a body the proxy refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_past_the_ceiling_is_refused_on_the_forge_route_and_never_forwarded() {
+        let forge = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&forge)
+            .await;
+        let state = test_state_with_forge(sample_run(true, "running"), &forge.uri());
+
+        let resp = router(state)
+            .oneshot(ticketed(
+                "POST",
+                "/v1/forge/contents/projects/helsinki/apps/bikes/src/app.tsx",
+                oversized(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            forge
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "the forge was asked to read a body the proxy refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_at_the_ceiling_still_goes_through() {
+        // The ceiling is a ceiling, not a margin: the largest legitimate body is a model call
+        // carrying a long conversation, and refusing it would break the run it belongs to.
+        let gateway = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&gateway)
+            .await;
+        let state = test_state_with_gateway(sample_run(true, "running"), &gateway.uri());
+
+        let body = serde_json::json!({ "filler": "x".repeat(MAX_REQUEST_BYTES - 64) }).to_string();
+        assert!(body.len() <= MAX_REQUEST_BYTES);
+        let resp = router(state)
+            .oneshot(ticketed(
+                "POST",
+                "/v1/data/ngsi-ld/v1/entities",
+                Body::from(body),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            gateway.received_requests().await.unwrap_or_default().len(),
+            1
+        );
+    }
+}

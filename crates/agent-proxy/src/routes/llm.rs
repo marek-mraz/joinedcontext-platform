@@ -7,7 +7,6 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::time::Instant;
 
@@ -85,26 +84,10 @@ pub async fn handler(
             .into_response();
     }
 
-    let body_bytes = match req.into_body().collect().await {
-        Ok(b) => b.to_bytes(),
-        Err(_) => {
-            return jc_core::ProblemDetails::bad_request()
-                .with_detail("failed to read body")
-                .into_response()
-        }
+    let body_bytes = match super::body::bounded(req.into_body()).await {
+        Ok(bytes) => bytes,
+        Err(refusal) => return *refusal,
     };
-
-    if body_bytes.len() > 4 * 1024 * 1024 {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            jc_core::ProblemDetails::new(
-                413,
-                "payload-too-large",
-                "request body exceeds 4 MiB limit",
-            ),
-        )
-            .into_response();
-    }
 
     let body_bytes = match run.reasoning_effort.as_deref() {
         Some(effort) => with_reasoning(&body_bytes, &rest, effort),
