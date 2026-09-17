@@ -248,6 +248,35 @@ def test_a_reference_to_anything_but_the_commons_is_left_alone():
     }
 
 
+def test_a_relative_reference_is_left_alone_and_imports_anyway(
+    sdm_schema, sdm_context, sdm_provenance, sdm_commons
+):
+    """T-1115: a `$ref` the importer cannot follow — a same-document pointer, a sibling file —
+    leaves that one attribute shapeless and nothing else. It is never fetched (DM-10: this
+    importer reaches the catalogue's own repository and the commons, and nowhere else), and it
+    never stops the import: a model is worth more with one untyped attribute than not at all."""
+    schema = yaml.safe_load(yaml.safe_dump(sdm_schema))
+    inline = schema["allOf"][-1]["properties"]
+    inline["chargePoint"] = {"$ref": "#/definitions/ChargePoint"}
+    inline["socket"] = {"$ref": "./socket-schema.json#/definitions/Socket"}
+    schema["definitions"] = {"ChargePoint": {"type": "object"}}
+
+    # `resolve` is what the fetch would have run; neither reference is touched by it.
+    resolved = resolve(schema, sdm_commons)
+    assert resolved["allOf"][-1]["properties"]["chargePoint"] == {
+        "$ref": "#/definitions/ChargePoint"
+    }
+    assert resolved["allOf"][-1]["properties"]["socket"] == {
+        "$ref": "./socket-schema.json#/definitions/Socket"
+    }
+
+    imported = convert(MODEL, schema, sdm_context, None, sdm_provenance, sdm_commons)
+    assert "chargePoint" in imported["slots"]
+    assert "socket" in imported["slots"]
+    # The attributes around them are unaffected.
+    assert imported["slots"]["dateObserved"]["range"] == "datetime"
+
+
 def test_a_reference_that_points_at_itself_terminates():
     """A malformed commons document must cost an error message, never a hung import."""
     commons = {
