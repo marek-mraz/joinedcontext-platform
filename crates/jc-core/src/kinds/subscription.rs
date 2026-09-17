@@ -141,6 +141,10 @@ impl Kind for SubscriptionSpec {
         names::validate_dns1123_label(&meta.name)?;
         self.validate()
     }
+
+    fn context_space(&self) -> Option<&str> {
+        Some(self.context_space_ref.name())
+    }
 }
 
 /// Query parameters that carry a credential often enough that one in a notification URI is a

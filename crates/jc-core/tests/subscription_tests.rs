@@ -39,6 +39,16 @@ fn the_golden_manifest_parses_validates_and_round_trips() {
 }
 
 #[test]
+fn the_manifest_is_filed_under_the_space_it_watches() {
+    let subscription = Subscription::from_yaml(GOLDEN).expect("parses");
+    assert_eq!(
+        subscription.resource_path().expect("resource path"),
+        "projects/helsinki/spaces/air-quality/subscriptions/air-quality-alerts.yaml",
+        "the space comes from contextSpaceRef, not from the project slug"
+    );
+}
+
+#[test]
 fn the_registry_routes_the_kind() {
     assert!(
         matches!(
