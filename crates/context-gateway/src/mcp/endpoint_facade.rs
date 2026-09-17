@@ -98,10 +98,10 @@ const TOOLS: &[Tool] = &[
                 "properties": {
                     "type": type_schema(),
                     "q": { "type": "string", "maxLength": 4096, "description": "NGSI-LD query filter, e.g. pm25>35" },
-                    "scopeQ": { "type": "string", "description": "NGSI-LD scope query, e.g. /geo/SK/BB" },
-                    "georel": { "type": "string", "description": "NGSI-LD geo relation, e.g. near;maxDistance==2000" },
+                    "scopeQ": { "type": "string", "maxLength": 1024, "description": "NGSI-LD scope query, e.g. /geo/SK/BB" },
+                    "georel": { "type": "string", "maxLength": 256, "description": "NGSI-LD geo relation, e.g. near;maxDistance==2000" },
                     "geometry": { "type": "string", "enum": ["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"] },
-                    "coordinates": { "type": "string", "description": "GeoJSON coordinates of the reference geometry" },
+                    "coordinates": { "type": "string", "maxLength": 8192, "description": "GeoJSON coordinates of the reference geometry" },
                     "attrs": attrs_schema(),
                     "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
                     "cursor": { "type": "integer", "minimum": 0, "description": "Rows to skip; the previous page's offset plus its size" },
@@ -373,7 +373,10 @@ fn id_schema() -> Value {
 fn attrs_schema() -> Value {
     json!({
         "type": "array",
-        "items": { "type": "string" },
+        // Bounded like every other argument (T-0972): the broker parses what arrives, so an
+        // unbounded list is a way to spend its memory through a tool the grant allows.
+        "maxItems": 256,
+        "items": { "type": "string", "maxLength": 256 },
         "description": "The attributes to return; all the grant covers when absent",
     })
 }

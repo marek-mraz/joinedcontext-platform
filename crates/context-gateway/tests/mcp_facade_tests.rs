@@ -828,3 +828,58 @@ async fn a_write_tool_asks_the_person_before_it_changes_anything() {
     // The broker is unreachable in this test; reaching it at all would fail the call instead.
     assert_ne!(asked["result"]["isError"], json!(true), "{asked}");
 }
+
+/// T-0972: every argument a tool takes is bounded, and the bound is enforced by the schema
+/// validator rather than only described. The broker parses whatever arrives, so an unbounded
+/// filter or attribute list is a way to spend its memory through a tool the grant allows.
+#[tokio::test]
+async fn an_oversized_argument_is_refused_before_the_broker_sees_it() {
+    let realm = common::Realm::new();
+    let token = steward(&realm);
+    let huge = "x".repeat(20_000);
+
+    for (name, arguments) in [
+        (
+            "coordinates",
+            json!({ "type": "AirQualityObserved", "coordinates": huge.clone() }),
+        ),
+        (
+            "scopeQ",
+            json!({ "type": "AirQualityObserved", "scopeQ": huge.clone() }),
+        ),
+        (
+            "georel",
+            json!({ "type": "AirQualityObserved", "georel": huge.clone() }),
+        ),
+        (
+            "q",
+            json!({ "type": "AirQualityObserved", "q": huge.clone() }),
+        ),
+        (
+            "attrs",
+            json!({
+                "type": "AirQualityObserved",
+                "attrs": (0..5_000).map(|n| format!("a{n}")).collect::<Vec<_>>()
+            }),
+        ),
+    ] {
+        let (_, answered) = send(
+            app("http://127.0.0.1:1", &realm),
+            message(
+                SLUG,
+                Some(&token),
+                json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {
+                    "name": "query_entities", "arguments": arguments,
+                }}),
+            ),
+        )
+        .await;
+        // The reason, not only the failure: an unreachable broker also answers isError, so
+        // the assertion is that the schema refused it before any call was made.
+        let said = format!("{answered}");
+        assert!(
+            said.contains("is longer than") || said.contains("has more than"),
+            "{name} is bounded by the schema, not by the broker being away: {answered}"
+        );
+    }
+}
