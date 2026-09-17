@@ -277,3 +277,90 @@ async fn probes_and_unlimited_endpoints_are_never_throttled() {
         assert_ne!(unlimited.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }
+
+/// T-0813: the canonical surface of a space is the one a member uses directly, and it was
+/// counted by nothing in the gateway — the limiter matched `/api/endpoint/` alone, so one
+/// client could spend the edge's shared anonymous bucket for everybody.
+#[tokio::test]
+async fn the_canonical_space_surface_is_counted_per_caller() {
+    use context_gateway::resolver::Space;
+    use jc_core::kinds::PolicySpec;
+
+    const SPACE: &str = "ovzdusie";
+    let policy: PolicySpec = serde_norway::from_str(
+        r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+operations: [queryEntity, retrieveEntity]
+information:
+  - entities:
+      - type: AirQualityObserved
+"#,
+    )
+    .expect("the policy spec parses");
+    let space = Space {
+        endpoint: Arc::new(Endpoint {
+            space: SPACE.to_owned(),
+            slug: SPACE.to_owned(),
+            project: SPACE.to_owned(),
+            base_path: format!("/cs/{SPACE}"),
+            representations: vec![Representation::NgsiLd, Representation::Mcp],
+            // The record carries none: the limiter's own default is what counts it.
+            rate_limit: None,
+            policies: vec![policy],
+            ..endpoint(None)
+        }),
+        title: std::collections::BTreeMap::new(),
+        description: std::collections::BTreeMap::new(),
+        is_sandbox: false,
+        default_locale: None,
+    };
+    let app = router(Arc::new(
+        Gateway::new(
+            Broker::new("http://127.0.0.1:1".to_owned()),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve_spaces([space]),
+    ));
+
+    let read = |app: axum::Router, address: &'static str| async move {
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/cs/{SPACE}"))
+                .header("x-forwarded-for", address)
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers")
+    };
+
+    let first = read(app.clone(), "203.0.113.7").await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(
+        first
+            .headers()
+            .get("ratelimit-limit")
+            .and_then(|value| value.to_str().ok()),
+        Some("600"),
+        "the surface advertises the bucket it is counted in (MIM0-R7)"
+    );
+
+    // The burst is 50 and the read above spent one of them: 49 more empty it.
+    for _ in 0..49 {
+        assert_eq!(
+            read(app.clone(), "203.0.113.7").await.status(),
+            StatusCode::OK
+        );
+    }
+    let refused = read(app.clone(), "203.0.113.7").await;
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(refused.headers().get("retry-after").is_some());
+
+    // And the caller next to it still has its own: the bucket is per caller, not per space.
+    assert_eq!(
+        read(app.clone(), "198.51.100.4").await.status(),
+        StatusCode::OK
+    );
+}

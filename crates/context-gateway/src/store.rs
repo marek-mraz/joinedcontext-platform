@@ -245,6 +245,8 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
                 audience: Audience::Public,
                 allowed_projects: Vec::new(),
                 representations: vec![Representation::NgsiLd, Representation::Mcp],
+                // No limit of its own: the manifest has no field for one, and the limiter
+                // counts the canonical surface in its own default bucket (T-0813).
                 rate_limit: None,
                 file_limits: None,
                 // A space is the whole space: narrowing is a decision of a published
