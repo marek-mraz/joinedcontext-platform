@@ -216,6 +216,9 @@ impl<S: Kind> ResourceEnvelope<S> {
             }
         }
 
+        if let Some(status) = &self.status {
+            status.validate()?;
+        }
         self.spec.validate_spec(&self.metadata)
     }
 
@@ -402,6 +405,73 @@ pub struct Status {
     /// Reconciler condition transitions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+    /// What the build lane published for an `App`, and the only place its artifact is named
+    /// (AP-13a). Written back by the build lane in the commit that publishes the artifact; an
+    /// App without it renders no pod, and no other principal may set it (AP-73).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<Build>,
+}
+
+impl Status {
+    /// Checks what a status carries that a person could get wrong (AP-13a).
+    pub fn validate(&self) -> Result<()> {
+        match &self.build {
+            Some(build) => build.validate(),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The artifact one build of an `App` published, as the build lane writes it back (AP-13a).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Build {
+    /// The artifact's digest, `sha256:` and 64 lowercase hexadecimal characters. The reconciler
+    /// deploys this and nothing else (AP-72).
+    pub digest: String,
+    /// The commit of the source the artifact was built from, 7 to 40 lowercase hexadecimal
+    /// characters.
+    pub commit: String,
+    /// The version of the app SDK the artifact was built against.
+    pub sdk_version: String,
+    /// When the build lane published it.
+    pub built_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl Build {
+    /// Refuses a digest, a commit or an SDK version nothing could have built (AP-13a).
+    pub fn validate(&self) -> Result<()> {
+        let hex = |text: &str| {
+            text.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        };
+        let digest = self
+            .digest
+            .strip_prefix("sha256:")
+            .filter(|rest| rest.len() == 64 && hex(rest));
+        if digest.is_none() {
+            return Err(Error::Name {
+                field: "status.build.digest",
+                value: self.digest.clone(),
+                reason: "a digest is `sha256:` and 64 lowercase hexadecimal characters (AP-13a)",
+            });
+        }
+        if !(7..=40).contains(&self.commit.len()) || !hex(&self.commit) {
+            return Err(Error::Name {
+                field: "status.build.commit",
+                value: self.commit.clone(),
+                reason: "a commit is 7 to 40 lowercase hexadecimal characters (AP-13a)",
+            });
+        }
+        if self.sdk_version.trim().is_empty() {
+            return Err(Error::Name {
+                field: "status.build.sdkVersion",
+                value: self.sdk_version.clone(),
+                reason: "the SDK version the artifact was built against is required (AP-13a)",
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Lifecycle phase enumeration.

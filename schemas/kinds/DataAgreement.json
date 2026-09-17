@@ -96,6 +96,36 @@
         }
       ]
     },
+    "Build": {
+      "additionalProperties": false,
+      "description": "The artifact one build of an `App` published, as the build lane writes it back (AP-13a).",
+      "properties": {
+        "builtAt": {
+          "description": "When the build lane published it.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "commit": {
+          "description": "The commit of the source the artifact was built from, 7 to 40 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "digest": {
+          "description": "The artifact's digest, `sha256:` and 64 lowercase hexadecimal characters. The reconciler deploys this and nothing else (AP-72).",
+          "type": "string"
+        },
+        "sdkVersion": {
+          "description": "The version of the app SDK the artifact was built against.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "builtAt",
+        "commit",
+        "digest",
+        "sdkVersion"
+      ],
+      "type": "object"
+    },
     "Condition": {
       "additionalProperties": false,
       "description": "Status condition entry.",
@@ -380,6 +410,17 @@
       "additionalProperties": false,
       "description": "Server-computed lifecycle and reconciliation status (MF-04). Never stored in Git.",
       "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Build"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the build lane published for an `App`, and the only place its artifact is named (AP-13a). Written back by the build lane in the commit that publishes the artifact; an App without it renders no pod, and no other principal may set it (AP-73)."
+        },
         "conditions": {
           "description": "Reconciler condition transitions.",
           "items": {

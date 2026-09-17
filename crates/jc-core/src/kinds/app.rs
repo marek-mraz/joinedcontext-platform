@@ -447,9 +447,26 @@ impl Kind for AppSpec {
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
+        // The artifact an App runs is named in `status.build`, written back by the build lane
+        // in the commit that publishes it. An annotation naming an image or a module is a
+        // digest somebody typed, and it would deploy something this platform never built
+        // (AP-11, AP-13a).
+        for key in BUILT_ANNOTATIONS {
+            if meta.annotations.contains_key(key) {
+                return Err(Error::Name {
+                    field: "metadata.annotations",
+                    value: key.to_owned(),
+                    reason: "the digest lives in status.build, written by the build lane (AP-13a)",
+                });
+            }
+        }
         self.validate()
     }
 }
+
+/// The digest the build lane writes back when it publishes an image (AP-13a), and the digest of
+/// a compiled module. Neither is ever written by hand, and neither travels in a bundle.
+pub const BUILT_ANNOTATIONS: [&str; 2] = ["joinedcontext.com/image", "joinedcontext.com/module"];
 
 impl AppSpec {
     /// Validates source, build, data needs, limits and CSP.

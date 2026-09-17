@@ -394,3 +394,59 @@ fn lifecycle_transitions_ap18() {
         }
     ));
 }
+
+/// AP-13a: the artifact an App runs is named in `status.build`, written back by the build lane.
+#[test]
+fn the_build_status_parses_and_a_malformed_one_is_refused() {
+    let digest = format!("sha256:{}", "a1b2c3d4".repeat(8));
+    let with_build = format!(
+        "{GOLDEN}status:\n  phase: Live\n  build:\n    digest: \"{digest}\"\n    \
+         commit: 8c56954a1f0e\n    sdkVersion: 0.4.1\n    builtAt: \"2026-09-17T06:00:00Z\"\n"
+    );
+    let app = App::from_yaml(&with_build).expect("parse");
+    app.validate().expect("valid");
+    let build = app
+        .status
+        .as_ref()
+        .and_then(|s| s.build.as_ref())
+        .expect("build");
+    assert_eq!(build.digest, digest);
+    assert_eq!(build.sdk_version, "0.4.1");
+
+    for (field, line) in [
+        ("digest", "    digest: \"sha256:deadbeef\"\n"),
+        ("commit", "    commit: nothexadecimal\n"),
+        ("sdkVersion", "    sdkVersion: \"\"\n"),
+    ] {
+        let broken = with_build
+            .lines()
+            .map(|text| {
+                if text.trim_start().starts_with(&format!("{field}:")) {
+                    line.trim_end().to_owned()
+                } else {
+                    text.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let app = App::from_yaml(&broken).expect("parses");
+        let refused = app.validate().expect_err(&format!("{field} is refused"));
+        assert!(format!("{refused}").contains(field), "{field}: {refused}");
+    }
+}
+
+/// AP-13a: a digest somebody typed into an annotation would deploy an artifact this platform
+/// never built, so the manifest is refused rather than quietly stripped.
+#[test]
+fn an_image_or_module_annotation_on_an_app_is_refused() {
+    for key in ["joinedcontext.com/image", "joinedcontext.com/module"] {
+        let written = GOLDEN.replace(
+            "    joinedcontext.com/generated-by:",
+            &format!("    {key}: \"sha256:deadbeef\"\n    joinedcontext.com/generated-by:"),
+        );
+        let app = App::from_yaml(&written).expect("parses");
+        let refused = app.validate().expect_err("the annotation is refused");
+        assert!(format!("{refused}").contains(key), "{refused}");
+        assert!(format!("{refused}").contains("status.build"), "{refused}");
+    }
+}
