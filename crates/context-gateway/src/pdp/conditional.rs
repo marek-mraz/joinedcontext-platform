@@ -34,7 +34,7 @@ const MAX_PROBE: usize = 1024 * 1024;
 /// Whether the grants decide from the entity as it is stored, rather than from the payload
 /// the caller sent alone (R45).
 pub fn state_dependent(constraints: &Constraints) -> bool {
-    constraints.q.is_some() || !constraints.geo_grants.is_empty()
+    constraints.q.is_some() || !constraints.geo_areas.is_empty()
 }
 
 /// Whether this write has to be preceded by a read.
@@ -50,6 +50,30 @@ pub fn required(
     operation.is_write()
         && operations::addressed_entity(path).is_some()
         && (headers.contains_key(IF_MATCH) || state_dependent(constraints))
+}
+
+/// The batch write a state-dependent grant cannot decide (R45, GW16, GW18, T-0807).
+///
+/// A batch addresses its entities in the payload, so there is no one entity to read and no
+/// `If-Match` to carry: the payload would be the only thing consulted, and a payload can sit
+/// inside the grant while the entity it names is stored outside it. `entityOperations/create`
+/// is not one of these — it creates, and a create has no stored state — so what is refused is
+/// upsert, update, merge and delete. R45 answers this case by partitioning write authority by
+/// URN prefix rather than by a condition, which is what the detail points the caller at.
+pub fn batch_refusal(operation: Operation, constraints: &Constraints) -> Option<ProblemDetails> {
+    let touches_stored_entities = matches!(
+        operation,
+        Operation::UpsertBatch
+            | Operation::UpdateBatch
+            | Operation::MergeBatch
+            | Operation::DeleteBatch
+    );
+    (touches_stored_entities && state_dependent(constraints)).then(|| {
+        ProblemDetails::forbidden().with_detail(
+            "this caller's write authority is decided from the stored entity, which a batch \
+             operation does not address; write one entity per request",
+        )
+    })
 }
 
 /// What the read before the write decided.
@@ -138,7 +162,9 @@ pub async fn evaluate(
     // The stored entity has to be one this caller may see at all, by the two filters a read
     // is narrowed by here rather than at the broker (R24, GW11). A write to an entity the
     // caller cannot see is a miss, not a refusal (R20).
-    let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
+    // Every granted area, not only the ones a read filters here: this read is a retrieve by
+    // id, which carries no `geoQ` at all, so nothing narrowed it upstream (T-0807).
+    let areas = geo::Areas::of(&constraints.geo_areas, constraints.geo_caller.as_deref());
     if !projection::permitted(&read.body, &constraints.id_patterns)
         || !areas.as_ref().is_none_or(|areas| areas.admits(&read.body))
     {

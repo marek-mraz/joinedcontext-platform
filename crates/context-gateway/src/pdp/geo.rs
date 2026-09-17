@@ -85,6 +85,13 @@ pub struct Intersected {
     /// Grant geometries the answer is filtered against here, because the broker was given
     /// something wider. An entity must lie inside at least one of them.
     pub grants: Vec<String>,
+    /// Every granted geometry, whichever of them the broker was given (T-0807).
+    ///
+    /// `grants` is about a read, where the broker already narrowed what it sent back; this
+    /// is about the grant itself, and a write is decided against the grant. The two differ
+    /// exactly when one grant area was forwarded: the read needs no second filter, the
+    /// write still may not leave that area.
+    pub areas: Vec<String>,
     /// The caller's own geometry, when the broker was given the grant's instead.
     pub caller: Option<String>,
     /// Whether the caller's own area was replaced by a smaller one (R22).
@@ -99,6 +106,7 @@ pub struct Intersected {
 /// two polygons into a third would be a geometry the caller never asked for and the grant
 /// never drew.
 pub fn intersect(caller: Option<&str>, grants: &[&str]) -> Intersected {
+    let areas: Vec<String> = grants.iter().map(|grant| (*grant).to_owned()).collect();
     let Some((first, rest)) = grants.split_first() else {
         // Nothing granted narrows space, so the caller's own area stands.
         return Intersected {
@@ -112,7 +120,8 @@ pub fn intersect(caller: Option<&str>, grants: &[&str]) -> Intersected {
     if !rest.is_empty() {
         return Intersected {
             geo_q: caller.map(str::to_owned),
-            grants: grants.iter().map(|grant| (*grant).to_owned()).collect(),
+            grants: areas.clone(),
+            areas,
             caller: None,
             restricted: true,
         };
@@ -122,6 +131,7 @@ pub fn intersect(caller: Option<&str>, grants: &[&str]) -> Intersected {
     let Some(asked) = caller else {
         return Intersected {
             geo_q: Some(granted),
+            areas,
             restricted: true,
             ..Intersected::default()
         };
@@ -131,6 +141,7 @@ pub fn intersect(caller: Option<&str>, grants: &[&str]) -> Intersected {
         // The caller asked for less than it was given: its own area is the narrower query.
         (Some(inner), Some(outer)) if inner.within(&outer) => Intersected {
             geo_q: Some(asked.to_owned()),
+            areas,
             ..Intersected::default()
         },
         // They overlap, or the caller's is a shape this parser cannot read. Either way the
@@ -140,6 +151,7 @@ pub fn intersect(caller: Option<&str>, grants: &[&str]) -> Intersected {
         (_, Some(_)) => Intersected {
             geo_q: Some(granted.clone()),
             grants: vec![granted],
+            areas,
             caller: Some(asked.to_owned()),
             restricted: true,
         },
@@ -148,6 +160,7 @@ pub fn intersect(caller: Option<&str>, grants: &[&str]) -> Intersected {
         (_, None) => Intersected {
             geo_q: Some(granted.clone()),
             grants: vec![granted],
+            areas,
             caller: Some(asked.to_owned()),
             restricted: true,
         },

@@ -614,6 +614,17 @@ async fn serve_ngsi_ld(
         }
     }
 
+    // A grant that decides from the stored entity cannot decide a batch, which names its
+    // entities in the payload and not in the path (T-0807).
+    if let Some(problem) = conditional::batch_refusal(operation, &constraints) {
+        tracing::info!(
+            slug = %endpoint.slug,
+            %operation,
+            "batch write refused: the grant decides from the stored entity"
+        );
+        return problem.into_response();
+    }
+
     // A grant that decides from the stored entity, or a caller that sent `If-Match`, turns
     // the write into a read, an evaluation and then a conditional write (R45, GW16).
     if conditional::required(operation, &path, &parts.headers, &constraints) {

@@ -391,3 +391,157 @@ fn the_strong_comparison_is_the_one_rfc_9110_asks_for() {
         "an entity tag is quoted; an unquoted one is not one"
     );
 }
+
+// --- the grant that draws an area rather than a condition (T-0807) -------------------------
+
+/// The district the grant draws, far from where the sensor is stored (19.15, 48.73).
+const DISTRICT: &str = "georel=within;geometry=Polygon;coordinates=[[[21.0,48.0],[21.5,48.0],[21.5,48.5],[21.0,48.5],[21.0,48.0]]]";
+
+/// A grant over the sensor, narrowed by whatever `narrowing` says — an area, a filter, or
+/// nothing — and allowing exactly the operations named.
+///
+/// The area case is the one that used to disappear: a `geoQ` forwarded to the broker left
+/// the constraint set with no area of its own, so nothing here knew the grant drew one.
+fn grant(operations: &str, narrowing: &str) -> PolicySpec {
+    serde_norway::from_str(&format!(
+        "contextSpaceRef: {SPACE}\n\
+         assigner: did:web:{DOMAIN}\n\
+         assignee: {{ kind: role, id: public }}\n\
+         operations: [{operations}]\n\
+         {narrowing}\n\
+         information:\n\
+         \x20 - entities:\n\
+         \x20     - type: AirQualityObserved\n\
+         \x20   propertyNames: [temperature, location]\n"
+    ))
+    .expect("the policy spec parses")
+}
+
+/// The grant of the two area tests: one district, no filter.
+fn in_the_district(operations: &str) -> PolicySpec {
+    grant(operations, &format!("geoQ: '{DISTRICT}'"))
+}
+
+/// One request through a gateway serving `policies`, and everything the broker was asked.
+async fn through(
+    policies: Vec<PolicySpec>,
+    method: Method,
+    uri: &str,
+    body: Body,
+    stored: Stored,
+) -> (StatusCode, Vec<Call>) {
+    let (upstream, calls) = broker(stored).await;
+    let endpoint = Endpoint {
+        policies,
+        ..endpoint(None)
+    };
+    let gateway = Arc::new(
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint]),
+    );
+    let response = router(gateway)
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(format!("/api/endpoint/{SLUG}{uri}"))
+                .header("content-type", "application/json")
+                .body(body)
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+
+    let status = response.status();
+    let made = calls.lock().expect("the call log").clone();
+    (status, made)
+}
+
+/// The grant is an area and the payload carries no location, so GW16 has nothing to test:
+/// the only thing that says where this entity is, is the entity as the broker holds it.
+#[tokio::test]
+async fn a_grant_that_is_only_an_area_reads_the_stored_entity_before_it_edits_one() {
+    let (status, calls) = through(
+        vec![in_the_district("retrieveEntity, queryEntity, updateAttrs")],
+        Method::PATCH,
+        &format!("/ngsi-ld/v1/entities/{SENSOR}/attrs"),
+        Body::from(json!({ "temperature": { "type": "Property", "value": 21.0 } }).to_string()),
+        holding(Some(ETAG), true),
+    )
+    .await;
+
+    // A write to an entity the caller cannot see is a miss, not a refusal (R20).
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        writes(&calls).is_empty(),
+        "the entity is stored outside the granted district, so nothing was written: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|call| call.method == Method::GET),
+        "the stored entity was read before the decision: {calls:?}"
+    );
+}
+
+/// The same grant, the same district, an entity stored inside it: the write goes through and
+/// carries the tag it was decided on.
+#[tokio::test]
+async fn a_grant_that_is_only_an_area_still_lets_a_write_inside_it_through() {
+    let inside = Stored {
+        entity: Some(json!({
+            "id": SENSOR,
+            "type": "AirQualityObserved",
+            "temperature": { "type": "Property", "value": 19.5 },
+            "location": {
+                "type": "GeoProperty",
+                "value": { "type": "Point", "coordinates": [21.2, 48.2] }
+            }
+        })),
+        ..holding(Some(ETAG), true)
+    };
+    let (status, calls) = through(
+        vec![in_the_district("retrieveEntity, queryEntity, updateAttrs")],
+        Method::PATCH,
+        &format!("/ngsi-ld/v1/entities/{SENSOR}/attrs"),
+        Body::from(json!({ "temperature": { "type": "Property", "value": 21.0 } }).to_string()),
+        inside,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        writes(&calls)[0].if_match.as_deref(),
+        Some(ETAG),
+        "a state-dependent write is conditional upstream (R45)"
+    );
+}
+
+/// A batch names its entities in the payload, so there is no stored entity to read and no
+/// tag to carry. The payload alone cannot decide a grant that decides from stored state.
+#[tokio::test]
+async fn a_batch_write_under_a_state_dependent_grant_never_reaches_the_broker() {
+    const ALLOWED: &str = "retrieveEntity, queryEntity, upsertBatch";
+    for narrowing in ["q: temperature<100", &format!("geoQ: '{DISTRICT}'")] {
+        let (status, calls) = through(
+            vec![grant(ALLOWED, narrowing)],
+            Method::POST,
+            "/ngsi-ld/v1/entityOperations/upsert",
+            // Inside the granted district, and a legal payload in every other way: what is
+            // refused is the operation, not the body.
+            Body::from(
+                json!([{
+                    "id": SENSOR,
+                    "type": "AirQualityObserved",
+                    "temperature": { "type": "Property", "value": 21.0 },
+                    "location": {
+                        "type": "GeoProperty",
+                        "value": { "type": "Point", "coordinates": [21.2, 48.2] }
+                    }
+                }])
+                .to_string(),
+            ),
+            holding(Some(ETAG), true),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(calls.is_empty(), "the broker was never called: {calls:?}");
+    }
+}

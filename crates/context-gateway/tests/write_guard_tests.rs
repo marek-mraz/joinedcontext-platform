@@ -5,6 +5,10 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 const SPACE: &str = "ovzdusie";
+/// The bounding box of the city, as the golden policy draws it.
+const CITY: &str = "georel=within;geometry=Polygon;coordinates=[[[19.10,48.70],[19.20,48.70],[19.20,48.76],[19.10,48.76],[19.10,48.70]]]";
+/// A second district of the same grant, well away from the first.
+const KOSICE: &str = "georel=within;geometry=Polygon;coordinates=[[[21.20,48.70],[21.30,48.70],[21.30,48.76],[21.20,48.76],[21.20,48.70]]]";
 const ORG: &str = "banskabystrica.sk";
 
 /// The grant the golden policy expresses: one type, four attributes, Radvaň and below,
@@ -15,10 +19,10 @@ fn grant() -> Constraints {
         types: names(&["AirQualityObserved"]),
         attrs: names(&["pm10", "pm25", "dateObserved", "location"]),
         granted_scopes: Some("/geo/SK/BB".to_owned()),
-        geo_q: Some(
-            "georel=within;geometry=Polygon;coordinates=[[[19.10,48.70],[19.20,48.70],[19.20,48.76],[19.10,48.76],[19.10,48.70]]]"
-                .to_owned(),
-        ),
+        geo_q: Some(CITY.to_owned()),
+        // What the broker was given and what the grant draws are two different things, and a
+        // write is decided against the grant (T-0807). The evaluator fills both.
+        geo_areas: vec![CITY.to_owned()],
         ..Constraints::default()
     }
 }
@@ -268,4 +272,45 @@ fn an_identifier_outside_the_granted_type_or_pattern_is_refused_on_its_own() {
     // And the refusal is a policy decision: 403, no rule named (GW6).
     let problem = ProblemDetails::from(Refusal::IdOutsideGrant("x".to_owned()));
     assert_eq!(problem.status, 403);
+}
+
+/// T-0807: with two or more granted areas the broker is given the caller's own `geoQ`, so a
+/// payload checked against `geo_q` would be checked against a polygon the caller drew itself.
+/// Every granted area decides, and the entity has to be inside one of them.
+#[test]
+fn coordinates_outside_every_granted_area_are_refused_when_the_grant_draws_several() {
+    let two_districts = Constraints {
+        // What the broker was given: the caller's own area, which happens to contain the
+        // point the payload carries.
+        geo_q: Some(
+            "georel=within;geometry=Polygon;coordinates=[[[22.00,48.00],[23.00,48.00],[23.00,49.00],[22.00,49.00],[22.00,48.00]]]"
+                .to_owned(),
+        ),
+        geo_areas: vec![CITY.to_owned(), KOSICE.to_owned()],
+        ..grant()
+    };
+
+    let mut outside = entity();
+    outside["location"]["value"]["coordinates"] = json!([22.5, 48.5]);
+    assert_eq!(
+        check(&outside, &two_districts, SPACE, ORG),
+        Err(Refusal::LocationOutsideGrant),
+        "inside the caller's own polygon is not inside a grant"
+    );
+
+    // Inside the second of the two granted districts: one of them is enough.
+    let mut inside = entity();
+    inside["location"]["value"]["coordinates"] = json!([21.25, 48.73]);
+    check(&inside, &two_districts, SPACE, ORG).expect("the second district is granted too");
+
+    // An area this parser cannot read is an area no write can be shown to be inside, even
+    // when another area of the same grant would admit it.
+    let unreadable = Constraints {
+        geo_areas: vec![CITY.to_owned(), "georel=near;maxDistance=500".to_owned()],
+        ..grant()
+    };
+    assert_eq!(
+        check(&entity(), &unreadable, SPACE, ORG),
+        Err(Refusal::LocationOutsideGrant)
+    );
 }

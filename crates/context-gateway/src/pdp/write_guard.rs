@@ -159,10 +159,15 @@ pub fn check_identifier(
 /// GW16: "may edit only data in location X" is a statement about the entity's own
 /// coordinates, so the grant's area is tested against the payload, not against a query
 /// parameter the caller could leave out.
+///
+/// Every granted area, and the entity has to be inside one of them (T-0807). Not `geo_q`,
+/// which is what the broker was given: with two grants that is the caller's own area, so a
+/// caller could draw its own polygon around the point it wanted to write, and with one
+/// grant and a narrower caller area it is the caller's too.
 fn check_location(entity: &Value, constraints: &Constraints) -> Result<(), Refusal> {
-    let Some(geo_q) = constraints.geo_q.as_deref() else {
+    if constraints.geo_areas.is_empty() {
         return Ok(());
-    };
+    }
     // No location at all is not a location outside the area: an entity that says nothing
     // about where it is cannot be placed outside the grant.
     let Some(point) = entity_point(entity) else {
@@ -173,10 +178,20 @@ fn check_location(entity: &Value, constraints: &Constraints) -> Result<(), Refus
         };
     };
 
-    match granted_polygon(geo_q) {
-        Some(area) if area.contains(point) => Ok(()),
-        // An area the parser cannot read is an area the write cannot be shown to be in.
-        _ => Err(Refusal::LocationOutsideGrant),
+    let areas: Vec<_> = constraints
+        .geo_areas
+        .iter()
+        .map(|area| granted_polygon(area))
+        .collect();
+    // An area the parser cannot read is an area the write cannot be shown to be outside of
+    // either, so one unreadable grant refuses the write rather than leaving the rest to
+    // decide it.
+    if areas.iter().any(Option::is_none) {
+        return Err(Refusal::LocationOutsideGrant);
+    }
+    match areas.into_iter().flatten().any(|area| area.contains(point)) {
+        true => Ok(()),
+        false => Err(Refusal::LocationOutsideGrant),
     }
 }
 

@@ -109,6 +109,12 @@ pub struct Constraints {
     /// Grant areas the answer is filtered against here, because the broker was given
     /// something wider; an entity must lie inside at least one (GW11).
     pub geo_grants: Vec<String>,
+    /// Every granted area, whichever of them the broker was given (GW16, T-0807).
+    ///
+    /// What a write is decided against: a read may lean on the broker for the one area it
+    /// forwarded, a write may not, because the broker is not told where the entity has to
+    /// stay. Empty means no grant narrows space at all.
+    pub geo_areas: Vec<String>,
     /// The caller's own area, when the broker was given the grant's instead (R14).
     pub geo_caller: Option<String>,
     /// The `temporalQ` sent to the broker.
@@ -320,6 +326,7 @@ fn intersect(
         granted_scopes: union(grants.iter().filter_map(|policy| policy.scope_q.as_deref())),
         geo_q: geo.geo_q,
         geo_grants: geo.grants,
+        geo_areas: geo.areas,
         geo_caller: geo.caller,
         temporal_q: clamped.temporal_q,
         temporal_windows: clamped.windows,
