@@ -124,6 +124,17 @@ pub fn passthrough(params: &[(String, String)]) -> String {
     render(&kept(params))
 }
 
+/// Whether the caller's own query names a selector, as CIM 009 5.7.2 requires of one.
+///
+/// This asks what the *caller* sent, not what the grants added: a grant narrows the answer to
+/// a well-formed query and never supplies the selector a malformed one is missing (GW33). An
+/// `id` list or an `idPattern` alone is exactly the case 5.7.2.4 calls `BadRequestData`, so
+/// neither counts here; nor does `limit`, `offset` or any other window.
+pub fn unselected(params: &[(String, String)]) -> bool {
+    let asked = requested(params);
+    asked.types.is_empty() && asked.attrs.is_empty() && asked.q.is_none() && asked.geo_q.is_none()
+}
+
 /// Whether the query the gateway is about to send selects anything at all.
 ///
 /// CIM 009 5.7.2 refuses a query carrying none of `type`, `attrs`, `q` and `georel`, and a
@@ -324,7 +335,7 @@ mod tests {
         let refused = |raw: &str| malformed(&parse(raw));
         assert!(
             refused("idPattern=.*&limit=1").is_none(),
-            "a selector is the grants' to add"
+            "well formed, though it selects nothing: that is `unselected`'s refusal, not this one"
         );
         assert!(refused(
             "georel=near%3BmaxDistance%3D%3D100&geometry=Point&coordinates=%5B1%2C2%5D"
@@ -464,5 +475,33 @@ mod tests {
                 ("timeAt".to_owned(), "P-1D".to_owned()),
             ]
         );
+    }
+
+    /// GW33, CIM 009 5.7.2.4: a query names a selector, and an `id` list or an `idPattern`
+    /// alone is not one. The grants do not supply what the caller left out (T-0780).
+    #[test]
+    fn a_query_naming_no_selector_is_not_rescued_by_the_grants() {
+        for raw in [
+            "",
+            "limit=20",
+            "limit=1&offset=40",
+            "id=urn:ngsi-ld:AirQualityObserved:hel.fi:ovzdusie:station-1",
+            "id=urn:ngsi-ld:Device:hel.fi:s:a,urn:ngsi-ld:Device:hel.fi:s:b&limit=5",
+            "idPattern=.*&limit=1",
+            "options=keyValues",
+        ] {
+            assert!(unselected(&parse(raw)), "{raw} names no selector");
+        }
+
+        for raw in [
+            "type=AirQualityObserved",
+            "type=Device&id=urn:ngsi-ld:Device:hel.fi:s:a",
+            "attrs=temperature",
+            "q=temperature>20",
+            "georel=near%3BmaxDistance%3D%3D100&geometry=Point&coordinates=%5B1%2C2%5D",
+            "type=Ovzdu%C5%A1ie",
+        ] {
+            assert!(!unselected(&parse(raw)), "{raw} names a selector");
+        }
     }
 }

@@ -257,6 +257,35 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     assert_eq!(entity["id"], json!(STATION));
     assert_eq!(entity["pm10"]["value"], json!(34.2));
 
+    // GW33, CIM 009 5.7.2.4: a query names a selector, and the grants do not supply one the
+    // caller left out. An `id` list or an `idPattern` alone is the case the specification
+    // calls `BadRequestData`, however narrow the grant behind it is (T-0780).
+    for raw in [
+        "/entities",
+        "/entities?limit=20",
+        &format!("/entities?id={STATION}"),
+        "/entities?idPattern=.%2A&limit=1",
+    ] {
+        let (status, body) = call(&app, get(PUBLIC_SLUG, raw)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{raw}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let problem: Value = serde_json::from_slice(&body).expect("problem details");
+        assert!(
+            problem["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("selector")),
+            "{raw}: the refusal says what a query needs: {problem}"
+        );
+    }
+
+    // The same entity by id is a retrieve, not a query, and keeps answering.
+    let (status, _) = call(&app, get(PUBLIC_SLUG, &format!("/entities/{STATION}"))).await;
+    assert_eq!(status, StatusCode::OK, "a retrieve names no selector");
+
     // Query it back the way DEMO step 4 does.
     let (status, body) = call(&app, get(PUBLIC_SLUG, "/entities?type=AirQualityObserved")).await;
     assert_eq!(
@@ -552,13 +581,27 @@ information:
 
     // A token from a Keycloak client no manifest names is valid and still worthless.
     let stranger = realm.workload_token("ovzdusie-never-declared", json!(WRITER_SLUG));
-    let (status, _) = call(&app, authorized(get(WRITER_SLUG, "/entities"), &stranger)).await;
+    let (status, _) = call(
+        &app,
+        authorized(
+            get(WRITER_SLUG, "/entities?type=AirQualityObserved"),
+            &stranger,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     // The right realm, the right account, the wrong resource: 401, because the token was
     // never issued for this endpoint (RFC 8707).
     let elsewhere = realm.workload_token("ovzdusie-writer", json!(PUBLIC_SLUG));
-    let (status, body) = call(&app, authorized(get(WRITER_SLUG, "/entities"), &elsewhere)).await;
+    let (status, body) = call(
+        &app,
+        authorized(
+            get(WRITER_SLUG, "/entities?type=AirQualityObserved"),
+            &elsewhere,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let problem: Value = serde_json::from_slice(&body).expect("problem+json");
     assert!(problem["type"]
@@ -572,11 +615,18 @@ information:
             "https://2.28.67.127.sslip.io/api/endpoint/{WRITER_SLUG}"
         )),
     );
-    let (status, _) = call(&app, authorized(get(WRITER_SLUG, "/entities"), &by_uri)).await;
+    let (status, _) = call(
+        &app,
+        authorized(
+            get(WRITER_SLUG, "/entities?type=AirQualityObserved"),
+            &by_uri,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     // No token at all on an endpoint that is not public.
-    let (status, _) = call(&app, get(WRITER_SLUG, "/entities")).await;
+    let (status, _) = call(&app, get(WRITER_SLUG, "/entities?type=AirQualityObserved")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // An expired token is refused before any of it is believed.
@@ -587,7 +637,14 @@ information:
         "azp": "ovzdusie-writer",
         "exp": common::in_seconds(-3600),
     }));
-    let (status, _) = call(&app, authorized(get(WRITER_SLUG, "/entities"), &stale)).await;
+    let (status, _) = call(
+        &app,
+        authorized(
+            get(WRITER_SLUG, "/entities?type=AirQualityObserved"),
+            &stale,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Clean up, so a rerun starts from the same place.

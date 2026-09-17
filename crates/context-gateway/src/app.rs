@@ -512,6 +512,20 @@ async fn serve_ngsi_ld(
                 .with_detail(why)
                 .into_response();
         }
+        // GW33: a query naming no selector is `400 BadRequestData` (CIM 009 5.7.2.4), an `id`
+        // list or an `idPattern` alone included. The grants would have supplied a type and
+        // answered it, which is the narrowing this refusal replaces: a grant decides which of
+        // the well-formed answers a caller sees, never which status code the surface returns.
+        if query::unselected(&params) {
+            return ProblemDetails::bad_request()
+                .with_detail(
+                    "a query names at least one of type, attrs, q or georel; an id list or \
+                     idPattern alone is not a selector (CIM 009 5.7.2.4). Ask \
+                     /ngsi-ld/v1/types for the types this endpoint serves, or retrieve one \
+                     entity at /ngsi-ld/v1/entities/{id}",
+                )
+                .into_response();
+        }
     }
 
     let verdict = gateway
