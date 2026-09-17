@@ -220,3 +220,24 @@ fn refs_accept_both_the_bare_and_the_typed_form() {
     // MF-07: a reference is a name or a typed object, never a file path object.
     assert!(serde_json::from_str::<Ref>(r#"{"path":"spaces/ovzdusie.yaml"}"#).is_err());
 }
+
+/// T-0453, UI-25: the six lifecycle states the chip renders are the six the contract carries,
+/// and each is the one word a manifest writes.
+#[test]
+fn every_lifecycle_phase_the_ui_shows_round_trips_through_the_envelope() {
+    for (phase, written) in [
+        (Phase::Draft, "\"Draft\""),
+        (Phase::Pending, "\"Pending\""),
+        (Phase::Deploying, "\"Deploying\""),
+        (Phase::Live, "\"Live\""),
+        (Phase::Error, "\"Error\""),
+        (Phase::Drifted, "\"Drifted\""),
+    ] {
+        let json = serde_json::to_string(&phase).expect("a phase serialises");
+        assert_eq!(json, written);
+        assert_eq!(
+            serde_json::from_str::<Phase>(&json).expect("and reads back"),
+            phase
+        );
+    }
+}

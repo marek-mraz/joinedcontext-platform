@@ -488,6 +488,11 @@ pub enum Phase {
     Live,
     /// Reconciliation error.
     Error,
+    /// The platform holds something the repository does not declare, or no longer holds what it
+    /// does (CC-21, UI-25). Configuration cannot reach this phase — every component reads it
+    /// from the repository (CC-72) — so it is a space whose seed entities the broker answers
+    /// differently, and the two resolutions of UI-26 are what a person does about it.
+    Drifted,
 }
 
 /// Status condition entry.
