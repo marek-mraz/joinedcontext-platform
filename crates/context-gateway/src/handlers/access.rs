@@ -17,16 +17,33 @@ pub fn permissions(subject: &Subject, endpoint: &Endpoint, now: DateTime<Utc>) -
         .into_iter()
         .partition(|policy| policy.effect.is_prohibition());
 
-    json!({
-        "subject": subject_of(subject),
-        "resource": {
+    let mut document = Map::new();
+    document.insert("subject".to_owned(), subject_of(subject));
+    document.insert(
+        "resource".to_owned(),
+        json!({
             "type": "endpoint",
             "id": endpoint.slug,
             "space": endpoint.space,
-        },
-        "permissions": entries(&grants),
-        "prohibitions": entries(&prohibitions),
-    })
+        }),
+    );
+    document.insert("permissions".to_owned(), json!(entries(&grants)));
+    document.insert("prohibitions".to_owned(), json!(entries(&prohibitions)));
+    // The Endpoint's own rate, so a caller learns it before it hits it (EP-56). It is a
+    // property of the Endpoint, not of the caller's grants: every caller of this Endpoint
+    // meets the same limit, and an Endpoint without one says nothing.
+    if let Some(limits) = &endpoint.rate_limit {
+        let mut named = Map::new();
+        named.insert(
+            "requestsPerMinute".to_owned(),
+            json!(limits.requests_per_minute),
+        );
+        if let Some(burst) = limits.burst {
+            named.insert("burst".to_owned(), json!(burst));
+        }
+        document.insert("limits".to_owned(), Value::Object(named));
+    }
+    Value::Object(document)
 }
 
 /// One AuthZEN decision for one prospective request (R51).

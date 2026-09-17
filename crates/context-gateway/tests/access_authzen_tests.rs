@@ -134,6 +134,27 @@ async fn the_access_document_lists_the_callers_grants() {
     assert_eq!(grant["constraints"]["q"], json!("pm10>=0"));
     assert_eq!(grant["constraints"]["scopeQ"], json!("/geo/SK/BB"));
     assert!(grant["resource"]["idPatterns"][0].as_str().is_some());
+    // This Endpoint sets no rate, so the document claims none (EP-56).
+    assert_eq!(document.get("limits"), None);
+}
+
+/// EP-56: the Endpoint's own rate belongs in the document. A caller that learns its limit
+/// only by being refused has to probe for it, which is the shape of request this surface
+/// exists to remove.
+#[tokio::test]
+async fn the_document_names_the_rate_the_endpoint_holds_the_caller_to() {
+    let mut limited = endpoint();
+    limited.rate_limit = Some(jc_core::kinds::RateLimits {
+        requests_per_minute: 600,
+        burst: Some(50),
+    });
+    let document = context_gateway::handlers::access::permissions(
+        &context_gateway::pdp::evaluator::Subject::default(),
+        &limited,
+        chrono::Utc::now(),
+    );
+    assert_eq!(document["limits"]["requestsPerMinute"], json!(600));
+    assert_eq!(document["limits"]["burst"], json!(50));
 }
 
 /// EP-59, R20: a type only somebody else may touch is absent, not listed as denied. The
