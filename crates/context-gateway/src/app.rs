@@ -1782,15 +1782,21 @@ fn admit_space(
     representation: Option<Representation>,
     headers: &HeaderMap,
 ) -> Result<(Arc<Space>, Subject), Box<Response<Body>>> {
-    let space = gateway
-        .resolver
-        .resolve_space(name)
-        .ok_or_else(|| Box::new(ProblemDetails::not_found().into_response()))?;
+    // One answer for every way in which this caller may not have this space: it does not exist,
+    // it does not serve this representation, the token does not verify, or no grant of the
+    // caller's reaches it. Space names are guessable words — `helsinki`, `air-quality` — so a
+    // 403 or a 401 where another space gives 404 is an enumeration oracle for what a deployment
+    // runs (R20, SP-06, SP-11). A client that has to discover where to authenticate still can:
+    // `/.well-known/oauth-protected-resource/…` answers for every name, resolvable or not.
+    let missing = || Box::new(ProblemDetails::not_found().into_response());
+    let space = gateway.resolver.resolve_space(name).ok_or_else(missing)?;
     if representation.is_some_and(|wanted| !space.endpoint.serves(wanted)) {
-        return Err(Box::new(ProblemDetails::not_found().into_response()));
+        return Err(missing());
     }
-    let subject = authenticate(gateway, &space.endpoint, headers)
-        .map_err(|problem| Box::new(problem.into_response()))?;
+    let subject = authenticate(gateway, &space.endpoint, headers).map_err(|_| missing())?;
+    if !discoverable(gateway, &space, &subject) {
+        return Err(missing());
+    }
     Ok((space, subject))
 }
 
@@ -1841,13 +1847,12 @@ async fn space_record(
     Path(name): Path<String>,
     request: Request,
 ) -> Response<Body> {
-    let (space, subject) = match admit_space(&gateway, &name, None, request.headers()) {
+    // `admit_space` has already answered 404 for a space this caller cannot discover, which is
+    // the same answer a name that was never created gets (SP-06, SP-11).
+    let (space, _subject) = match admit_space(&gateway, &name, None, request.headers()) {
         Ok(admitted) => admitted,
         Err(problem) => return *problem,
     };
-    if !discoverable(&gateway, &space, &subject) {
-        return ProblemDetails::not_found().into_response();
-    }
 
     let accept = request
         .headers()

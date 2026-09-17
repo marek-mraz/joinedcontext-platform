@@ -212,6 +212,44 @@ async fn an_ungranted_space_and_an_unknown_one_are_indistinguishable() {
     assert_eq!(ungranted_body, unknown_body);
 }
 
+/// The record was the only surface that answered the same for both; the data surfaces told a
+/// closed space from a missing one, and space names are guessable words (T-0814, R20, SP-06).
+#[tokio::test]
+async fn the_data_surface_of_an_ungranted_space_answers_what_an_unknown_one_answers() {
+    for path in [
+        "/ngsi-ld/v1/entities?type=AirQualityObserved",
+        "/ngsi-ld/v1/entities/urn:ngsi-ld:AirQualityObserved:x",
+    ] {
+        let (closed_status, closed_media, closed_body) =
+            call(get_with(&format!("/cs/{CLOSED}{path}"), None)).await;
+        let (unknown_status, unknown_media, unknown_body) =
+            call(get_with(&format!("/cs/nothing-here{path}"), None)).await;
+
+        assert_eq!(closed_status, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(closed_status, unknown_status, "{path}");
+        assert_eq!(closed_media, unknown_media, "{path}");
+        assert_eq!(closed_body, unknown_body, "{path}");
+    }
+}
+
+/// A bearer that does not verify is the same oracle by another door: 401 for a space that
+/// exists and 404 for one that does not tells the caller which names are real (T-0814).
+#[tokio::test]
+async fn a_token_that_does_not_verify_says_no_more_than_an_unknown_space_does() {
+    let garbage = Some("Bearer not-a-token");
+    for path in ["", "/ngsi-ld/v1/entities?type=AirQualityObserved"] {
+        let (closed_status, closed_media, closed_body) =
+            call(get_with(&format!("/cs/{CLOSED}{path}"), garbage)).await;
+        let (unknown_status, unknown_media, unknown_body) =
+            call(get_with(&format!("/cs/nothing-here{path}"), garbage)).await;
+
+        assert_eq!(closed_status, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(closed_status, unknown_status, "{path}");
+        assert_eq!(closed_media, unknown_media, "{path}");
+        assert_eq!(closed_body, unknown_body, "{path}");
+    }
+}
+
 /// SP-11: the catalog is narrowed by the same policy layer that enforces requests.
 #[tokio::test]
 async fn the_catalog_lists_only_what_the_caller_may_discover() {
