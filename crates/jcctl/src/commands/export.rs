@@ -357,6 +357,12 @@ pub fn write_bundle(
     Ok(written + 1)
 }
 
+/// The lowercase hexadecimal SHA-256 of some bytes, as the bundle index carries it (MF-42).
+pub fn sha256_of(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 /// The `kind: Bundle` index of a bundle, as the Portal's download writes it (MF-17, T-0823).
 ///
 /// The platform's own kind, built from its own types: an index the registry refuses is a bundle
@@ -383,6 +389,29 @@ fn index_of(project: &str, revision: &str, exported_by: &str, bundle: &Bundle) -
             }
         })
         .collect();
+    // The checksum of every file as this bundle writes it, so an import can verify the transfer
+    // before anyone deletes the source (MF-42).
+    let mut files: Vec<jc_core::kinds::BundleFile> = bundle
+        .resources
+        .iter()
+        .filter_map(|resource| {
+            let yaml = serde_norway::to_string(&resource.manifest).ok()?;
+            Some(jc_core::kinds::BundleFile {
+                path: resource.path.to_string_lossy().into_owned(),
+                sha256: sha256_of(yaml.as_bytes()),
+            })
+        })
+        .chain(
+            bundle
+                .natives
+                .iter()
+                .map(|(path, body)| jc_core::kinds::BundleFile {
+                    path: path.to_string_lossy().into_owned(),
+                    sha256: sha256_of(body),
+                }),
+        )
+        .collect();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
     let spec = jc_core::kinds::BundleSpec {
         exported_at: chrono::Utc::now(),
         exported_by: exported_by.to_owned(),
@@ -395,6 +424,7 @@ fn index_of(project: &str, revision: &str, exported_by: &str, bundle: &Bundle) -
             .map(|(path, _)| path.to_string_lossy().into_owned())
             .collect(),
         omitted: 0,
+        files,
         readme: None,
         schemas: None,
     };

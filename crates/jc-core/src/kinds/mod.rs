@@ -79,7 +79,7 @@ pub use service_account::{
 };
 pub use space::{ContextSpaceSpec, ProjectSpec, Quotas};
 pub use sync::{
-    BundleItem, BundleOrigin, BundleSchemas, BundleSpec, ConflictPolicy, GitOrigin,
+    BundleFile, BundleItem, BundleOrigin, BundleSchemas, BundleSpec, ConflictPolicy, GitOrigin,
     PlatformApiOrigin, Schedule, SyncMode, SyncOrigin, SyncSourceSpec,
 };
 pub use ui_schema::{UiSchemaField, UiSchemaGroup, UiSchemaSpec};

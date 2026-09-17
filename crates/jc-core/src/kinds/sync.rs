@@ -367,6 +367,12 @@ pub struct BundleSpec {
     /// Native files carried next to their envelopes (`bento.yaml`, `*.linkml.yaml`) (MF-17).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_files: Vec<String>,
+    /// The SHA-256 of every file the bundle holds, over the bytes as exported (MF-42). An import
+    /// compares what it wrote against these, so a transfer between instances is verified before
+    /// the source is deleted. A bundle from an older exporter carries none, and an import then
+    /// reports nothing verified rather than reporting everything equal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<BundleFile>,
     /// How many resources the caller was not allowed to read; names are never disclosed (MF-18).
     #[serde(default)]
     pub omitted: u32,
@@ -377,6 +383,16 @@ pub struct BundleSpec {
     /// The schemas a complete export carries beside its manifests (MF-41).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schemas: Option<BundleSchemas>,
+}
+
+/// One file of a bundle and the checksum a transfer is verified against (MF-42).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BundleFile {
+    /// Path inside the bundle, as the archive carries it.
+    pub path: String,
+    /// Lowercase hexadecimal SHA-256 of the file's bytes as exported.
+    pub sha256: String,
 }
 
 /// The schemas of a complete export: one per kind in the bundle, and the LinkML source and

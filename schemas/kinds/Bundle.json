@@ -2,6 +2,25 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "BundleFile": {
+      "additionalProperties": false,
+      "description": "One file of a bundle and the checksum a transfer is verified against (MF-42).",
+      "properties": {
+        "path": {
+          "description": "Path inside the bundle, as the archive carries it.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "Lowercase hexadecimal SHA-256 of the file's bytes as exported.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "type": "object"
+    },
     "BundleItem": {
       "additionalProperties": false,
       "description": "One resource listed in a [`BundleSpec`] index.",
@@ -62,6 +81,13 @@
         "exportedBy": {
           "description": "Who produced it (a user or ServiceAccount name).",
           "type": "string"
+        },
+        "files": {
+          "description": "The SHA-256 of every file the bundle holds, over the bytes as exported (MF-42). An import compares what it wrote against these, so a transfer between instances is verified before the source is deleted. A bundle from an older exporter carries none, and an import then reports nothing verified rather than reporting everything equal.",
+          "items": {
+            "$ref": "#/definitions/BundleFile"
+          },
+          "type": "array"
         },
         "items": {
           "description": "The exported resources.",

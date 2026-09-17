@@ -129,6 +129,25 @@ fn a_project_of_the_repository_is_written_out_as_a_bundle_that_validates() {
     );
     assert!(index.contains("sourceRevision: 3f9c2e1"), "{index}");
 
+    // MF-42: one checksum per file, over the bytes the bundle carries, so a transfer between
+    // instances is verified before anyone deletes the source.
+    let parsed: serde_json::Value = serde_norway::from_str(&index).expect("the index parses");
+    let files = parsed["spec"]["files"].as_array().expect("files");
+    assert_eq!(
+        files.len(),
+        bundle.resources.len() + bundle.natives.len(),
+        "{index}"
+    );
+    let bento = files
+        .iter()
+        .find(|file| file["path"] == "projects/ovzdusie/pipelines/aq/bento.yaml")
+        .expect("the native file is listed");
+    assert_eq!(
+        bento["sha256"].as_str().unwrap_or_default(),
+        export::sha256_of(BENTO.as_bytes()),
+        "the checksum is of the bytes as written"
+    );
+
     let _ = std::fs::remove_dir_all(&repo);
     let _ = std::fs::remove_dir_all(&out);
 }
