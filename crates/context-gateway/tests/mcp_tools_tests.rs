@@ -993,3 +993,47 @@ async fn an_answer_does_not_carry_over_to_other_arguments() {
     assert_eq!(swapped["result"]["isError"], json!(true), "{swapped}");
     assert!(broker.hops().is_empty(), "the swapped call was carried out");
 }
+
+/// T-1039, R20: `describe_schema` narrowed to one entity type answers for a type the caller's
+/// grant covers, and refuses one it does not without saying whether that type exists here — the
+/// refusal reads "not an entity type this endpoint describes for you", the same answer an
+/// ungranted type and an invented one both get.
+#[tokio::test]
+async fn describe_schema_narrows_to_a_type_the_grant_covers_and_tells_no_tales_about_the_rest() {
+    let realm = common::Realm::new();
+
+    let (_, described, _) = send(
+        app("http://127.0.0.1:1", &realm),
+        message(
+            &format!("/api/endpoint/{PUBLIC}/mcp"),
+            None,
+            call(
+                "describe_schema",
+                json!({ "entityType": "AirQualityObserved" }),
+            ),
+        ),
+    )
+    .await;
+    assert_ne!(
+        described["result"]["isError"],
+        json!(true),
+        "a type the grant covers is described: {described}"
+    );
+
+    for unknown in ["Secret", "NoSuchTypeAnywhere"] {
+        let (_, refused, _) = send(
+            app("http://127.0.0.1:1", &realm),
+            message(
+                &format!("/api/endpoint/{PUBLIC}/mcp"),
+                None,
+                call("describe_schema", json!({ "entityType": unknown })),
+            ),
+        )
+        .await;
+        let said = format!("{refused}");
+        assert!(
+            said.contains("describes for you"),
+            "{unknown} is refused without saying whether it exists: {refused}"
+        );
+    }
+}
