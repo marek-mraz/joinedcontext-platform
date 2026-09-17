@@ -6,4 +6,5 @@ pub mod fetch;
 pub mod forge;
 pub mod inbox;
 pub mod llm;
+pub mod mcp;
 pub mod packages;
