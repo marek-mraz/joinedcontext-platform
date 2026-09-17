@@ -63,7 +63,7 @@ fn hub_endpoint() -> Endpoint {
         project: PROJECT.to_owned(),
         audience: Audience::Public,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd],
+        representations: vec![Representation::NgsiLd, Representation::Mcp],
         rate_limit: None,
         file_limits: None,
         hidden_attributes: [HIDDEN.to_owned()].into_iter().collect(),
@@ -234,6 +234,135 @@ async fn query(broker: &str, federations: Federations) -> (StatusCode, HeaderMap
         headers,
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
+}
+
+/// One JSON-RPC message to the hub endpoint's MCP instance.
+async fn mcp(broker: &str, federations: Federations, body: Value) -> Value {
+    let response = router(gateway(broker, federations))
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/endpoint/{HUB_SLUG}/mcp"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("a body");
+    serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+}
+
+/// T-0346, AG-30, EP-71: the MCP surface of a hub is the same surface, and what it adds is
+/// what a model cannot work out for itself — that the answer is a union, over which sources,
+/// and that it can be partial.
+#[tokio::test]
+async fn the_hub_s_mcp_server_says_what_it_federates() {
+    let (broker, _) = partial_broker().await;
+    let members = table(vec![
+        member("transport", FederationIdentity::ServiceAccount),
+        member("air-quality", FederationIdentity::ServiceAccount),
+    ]);
+
+    let answer = mcp(
+        &broker,
+        members.clone(),
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+    )
+    .await;
+    let instructions = answer["result"]["instructions"]
+        .as_str()
+        .expect("instructions");
+    assert!(instructions.contains("transport"), "{instructions}");
+    assert!(instructions.contains("air-quality"), "{instructions}");
+    assert!(instructions.contains("partial"), "{instructions}");
+    assert!(
+        !instructions.contains("http://") && !instructions.contains("https://"),
+        "a member's address never leaves the platform: {instructions}"
+    );
+
+    let answer = mcp(
+        &broker,
+        members,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+    )
+    .await;
+    let tools = answer["result"]["tools"].as_array().expect("tools");
+    let query = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("query_entities"))
+        .expect("the endpoint is public and grants queryEntity");
+    let described = query["description"].as_str().unwrap_or_default();
+    assert!(described.contains("transport"), "{described}");
+    assert!(described.contains("union"), "{described}");
+    assert!(
+        query["outputSchema"]["properties"]
+            .get("jc:source")
+            .is_some(),
+        "a client can validate the half it parses: {query}"
+    );
+}
+
+/// EP-71: the answer names the registrations it is a union over, so a model attributing it
+/// has something to attribute it to. Names only, as everywhere else.
+#[tokio::test]
+async fn a_tool_result_carries_the_sources_it_is_a_union_over() {
+    let (broker, _) = partial_broker().await;
+    let answer = mcp(
+        &broker,
+        table(vec![member(
+            "transport",
+            FederationIdentity::ServiceAccount,
+        )]),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": { "name": "query_entities", "arguments": { "type": "Vehicle" } },
+        }),
+    )
+    .await;
+
+    let structured = &answer["result"]["structuredContent"];
+    assert_eq!(structured["jc:source"], json!(["transport"]), "{answer}");
+    assert!(structured["entities"].is_array(), "{answer}");
+}
+
+/// A space that federates nothing says nothing about federation: an ordinary endpoint's MCP
+/// surface is what it always was.
+#[tokio::test]
+async fn an_ordinary_endpoint_s_mcp_surface_is_unchanged() {
+    let (broker, _) = partial_broker().await;
+    let answer = mcp(
+        &broker,
+        Federations::new(),
+        json!({ "jsonrpc": "2.0", "id": 4, "method": "initialize", "params": {} }),
+    )
+    .await;
+    let instructions = answer["result"]["instructions"]
+        .as_str()
+        .expect("instructions");
+    assert!(!instructions.contains("federates"), "{instructions}");
+
+    let answer = mcp(
+        &broker,
+        Federations::new(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": { "name": "query_entities", "arguments": { "type": "Vehicle" } },
+        }),
+    )
+    .await;
+    assert!(
+        answer["result"]["structuredContent"]
+            .get("jc:source")
+            .is_none(),
+        "nothing to attribute: {answer}"
+    );
 }
 
 /// EP-70: a source that failed does not fail the request. The status and the warning are the

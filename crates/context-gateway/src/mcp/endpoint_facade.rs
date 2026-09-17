@@ -491,13 +491,14 @@ fn broken_rule(error: &jsonschema::ValidationError<'_>) -> String {
 
 /// The tools this caller may see: the ones whose operation their grants cover (EP-25, SP-15).
 pub fn tools_for(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> Vec<Value> {
+    let federates = member_names(gateway, endpoint);
     TOOLS
         .iter()
         .filter(|tool| granted(gateway, endpoint, subject, tool.operations))
         .map(|tool| {
             json!({
                 "name": tool.name,
-                "description": tool.description,
+                "description": described(tool, &federates),
                 "inputSchema": (tool.schema)(),
                 "outputSchema": output_schema(tool),
                 "annotations": {
@@ -506,6 +507,53 @@ pub fn tools_for(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> V
                 },
             })
         })
+        .collect()
+}
+
+/// One tool's description, with what a federated space adds to a read (EP-71, AG-30).
+///
+/// Only a read: a write goes to the space this URL names and to no member, so saying "over
+/// the union" on `create_entity` would describe something the platform does not do.
+fn described(tool: &Tool, federates: &[String]) -> String {
+    match (tool.read_only, federates) {
+        (true, [_, ..]) => format!(
+            "{} This space federates {}: the answer is the union of their data and can be \
+             partial.",
+            tool.description,
+            federates.join(", ")
+        ),
+        _ => tool.description.to_owned(),
+    }
+}
+
+/// What the server tells a client about itself before the first call.
+///
+/// A federated space gets one more sentence, because everything that follows from it — a union
+/// instead of one store, an answer that can be partial — changes how a model should read a
+/// result (EP-70, EP-71, AG-30). Members are named and never addressed.
+fn instructions(gateway: &Gateway, endpoint: &Endpoint) -> String {
+    let base = format!(
+        "Every tool of this server reads and writes the one context space behind this URL. \
+         Entity identifiers are URNs of the form urn:ngsi-ld:{{Type}}:{{domain}}:{}:{{localId}}.",
+        endpoint.space
+    );
+    match member_names(gateway, endpoint).as_slice() {
+        [] => base,
+        names => format!(
+            "{base} This space federates {}: every read answers over their union, a result \
+             carries the names it came from as `jc:source`, and an answer can be partial when \
+             one of them does not respond.",
+            names.join(", ")
+        ),
+    }
+}
+
+/// The registrations of the endpoint's space, by name (EP-71).
+fn member_names(gateway: &Gateway, endpoint: &Endpoint) -> Vec<String> {
+    gateway
+        .members_of(&endpoint.project, &endpoint.space)
+        .into_iter()
+        .map(|member| member.name)
         .collect()
 }
 
@@ -572,11 +620,7 @@ pub async fn handle(
                     "name": format!("joinedcontext-endpoint-{}", endpoint.slug),
                     "version": env!("CARGO_PKG_VERSION"),
                 },
-                "instructions": format!(
-                    "Every tool of this server reads and writes the one context space behind this URL. \
-                     Entity identifiers are URNs of the form urn:ngsi-ld:{{Type}}:{{domain}}:{}:{{localId}}.",
-                    endpoint.space
-                ),
+                "instructions": instructions(&gateway, &endpoint),
             }),
         )),
         "ping" => Some(result(id, json!({}))),
@@ -658,11 +702,11 @@ async fn call_tool(
                 .and_then(Value::as_str)
                 .unwrap_or("permissions");
             let document = access_document(&gateway, &subject, &endpoint, format);
-            return result(id, answered(&document, tool.result_key, false));
+            return result(id, answered(&document, tool.result_key, false, &[]));
         }
         "describe_schema" => {
             return match describe_schema(&endpoint, &subject, &arguments) {
-                Ok(document) => result(id, answered(&document, tool.result_key, false)),
+                Ok(document) => result(id, answered(&document, tool.result_key, false, &[])),
                 Err(message) => result(id, refused(&message, &Value::Null)),
             };
         }
@@ -746,6 +790,13 @@ async fn call_tool(
     .await;
 
     let status = answer.status();
+    // What this endpoint federates, by registration name: the answer is a union over these,
+    // and a model reading it has no other way to know that (EP-71, AG-30).
+    let members: Vec<String> = gateway
+        .members_of(&endpoint.project, &endpoint.space)
+        .into_iter()
+        .map(|member| member.name)
+        .collect();
     // The handler sets this whenever it narrowed, and it is read here rather than from the
     // wire: the response layer removes it again from the answer a caller who did not ask
     // sees, and a tool result has no request header to ask with (AG-13, R22).
@@ -761,7 +812,10 @@ async fn call_tool(
     // A refusal is a tool error the agent can read, never an empty result it would mistake
     // for "there is nothing there" (SP-17, MIM0-R8).
     match status.is_success() {
-        true => result(id, answered(&payload, tool.result_key, restricted)),
+        true => result(
+            id,
+            answered(&payload, tool.result_key, restricted, &members),
+        ),
         false => result(id, refused(&refusal_text(status, &payload), &payload)),
     }
 }
@@ -982,11 +1036,18 @@ fn contents(uri: &str, payload: &Value) -> Value {
 /// MCP defines the field as an object (T-0946). `restricted` says that the policy removed
 /// something, never what (AG-13, R20); unlike the REST header it is not asked for, because a
 /// tool result is read by a model, which has no request header to ask with.
-fn answered(payload: &Value, result_key: &str, restricted: bool) -> Value {
+fn answered(payload: &Value, result_key: &str, restricted: bool, sources: &[String]) -> Value {
     let mut structured = Map::new();
     structured.insert(result_key.to_owned(), payload.clone());
     if restricted {
         structured.insert("restricted".to_owned(), Value::Bool(true));
+    }
+    // EP-71: a tool answer is read by a model, which has no other way to attribute it. What
+    // the platform can say truthfully is which registrations this answer is a union over,
+    // by name and never by address; the broker merges without marking each entity, so this
+    // is the answer's provenance and not one entity's.
+    if !sources.is_empty() {
+        structured.insert("jc:source".to_owned(), json!(sources));
     }
     let structured = Value::Object(structured);
     json!({
@@ -1028,6 +1089,11 @@ fn output_schema(tool: &Tool) -> Value {
             "restricted": {
                 "type": "boolean",
                 "description": "Present when the policy narrowed this answer (AG-13, R22)",
+            },
+            "jc:source": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "The registrations this answer is a union over, by name (EP-71)",
             },
         },
         "required": [tool.result_key],
