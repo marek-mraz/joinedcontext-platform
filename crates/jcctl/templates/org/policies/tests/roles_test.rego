@@ -93,3 +93,54 @@ test_a_project_role_grants_nothing_in_another_project if {
 		with data.projectRoles as project_roles
 		with data.bindings as project_role_bindings
 }
+
+# Letting data out to the public is a right of its own (PF-71, PF-72): the seeded steward
+# approves every endpoint but a public one, the publisher approves only a public one, and
+# org-admin, unconstrained, approves both.
+
+publishing_roles := {
+	"steward": {"rules": [
+		{"kinds": ["Pipeline", "DataSource"], "verbs": ["propose", "approve"]},
+		{"kinds": ["Endpoint"], "verbs": ["propose", "approve"], "constraints": [{"field": "spec.audience", "notIn": ["public"]}]},
+	]},
+	"publisher": {"rules": [
+		{"kinds": ["Endpoint", "Pipeline"], "verbs": ["read"]},
+		{"kinds": ["Endpoint"], "verbs": ["approve"], "constraints": [{"field": "spec.audience", "in": ["public"]}]},
+	]},
+	"org-admin": {"rules": [{"kinds": ["Endpoint", "Pipeline", "Role", "RoleBinding"], "verbs": ["propose", "approve", "delete"]}]},
+}
+
+publishing_bindings := [
+	{"name": "ovzdusie-steward", "subjects": [{"user": "lead"}], "role": "steward", "scope": {"project": "ovzdusie"}},
+	{"name": "ovzdusie-publisher", "subjects": [{"user": "mayor"}], "role": "publisher", "scope": {"project": "ovzdusie"}},
+	{"name": "admins", "subjects": [{"user": "admin"}], "role": "org-admin", "scope": {"organization": "banskabystrica"}},
+]
+
+approve_endpoint(audience) := object.union(endpoint_change(audience), {"action": "approve"})
+
+test_a_steward_cannot_approve_a_public_endpoint if {
+	count(deny) == 1 with input as {"author": "lead", "groups": [], "changes": [approve_endpoint("public")]}
+		with data.roles as publishing_roles
+		with data.bindings as publishing_bindings
+	count(deny) == 0 with input as {"author": "lead", "groups": [], "changes": [approve_endpoint("organization")]}
+		with data.roles as publishing_roles
+		with data.bindings as publishing_bindings
+}
+
+test_a_publisher_approves_only_the_public_one if {
+	count(deny) == 0 with input as {"author": "mayor", "groups": [], "changes": [approve_endpoint("public")]}
+		with data.roles as publishing_roles
+		with data.bindings as publishing_bindings
+	count(deny) == 1 with input as {"author": "mayor", "groups": [], "changes": [approve_endpoint("organization")]}
+		with data.roles as publishing_roles
+		with data.bindings as publishing_bindings
+}
+
+test_org_admin_approves_both if {
+	count(deny) == 0 with input as {"author": "admin", "groups": [], "changes": [approve_endpoint("public")]}
+		with data.roles as publishing_roles
+		with data.bindings as publishing_bindings
+	count(deny) == 0 with input as {"author": "admin", "groups": [], "changes": [approve_endpoint("organization")]}
+		with data.roles as publishing_roles
+		with data.bindings as publishing_bindings
+}

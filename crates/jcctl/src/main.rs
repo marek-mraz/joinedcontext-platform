@@ -12,7 +12,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -70,6 +70,22 @@ fn main() -> ExitCode {
         ["publish", "ckan", rest @ ..] => match publish_ckan_options(rest) {
             Some(options) => publish_ckan(&options),
             None => usage(),
+        },
+        ["roles", "seed", "--repo-dir", dir] => match jcctl::taxonomy::seed(Path::new(dir)) {
+            Ok(written) if written.is_empty() => {
+                println!("every seeded role is already there; nothing written");
+                ExitCode::SUCCESS
+            }
+            Ok(written) => {
+                for path in written {
+                    println!("wrote {}", path.display());
+                }
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("error: {err}");
+                ExitCode::FAILURE
+            }
         },
         ["roles", "render", "--repo-dir", dir] => match jcctl::roles::render(Path::new(dir)) {
             Ok(written) => {

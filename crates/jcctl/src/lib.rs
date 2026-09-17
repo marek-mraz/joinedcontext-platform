@@ -22,6 +22,7 @@ pub mod roles;
 pub mod secrets;
 pub mod service_accounts;
 pub mod sync;
+pub mod taxonomy;
 pub mod waves;
 
 pub use blueprints::{expand, ExpandError, Expanded};
