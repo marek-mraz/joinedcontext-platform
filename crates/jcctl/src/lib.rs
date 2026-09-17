@@ -11,6 +11,7 @@ pub mod csr;
 pub mod diff;
 pub mod entities;
 pub mod foreign_models;
+pub mod gateway;
 pub mod lanes;
 pub mod loader;
 pub mod model;

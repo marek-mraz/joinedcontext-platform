@@ -1,9 +1,10 @@
 //! `jcctl`, the reconciler and repository CLI (API/03).
 //!
-//! `validate`, `plan`, `apply` and `schema export` are implemented. `plan` and `apply`
-//! need a live platform; until the Context Gateway serves the configuration API, only the
-//! in-process implementation of [`jcctl::platform::Platform`] exists, so the CLI runs them
-//! against an empty platform, which is what a fresh installation looks like.
+//! `validate`, `plan`, `apply` and `schema export` are implemented. Configuration kinds are
+//! read from the repository by the component that serves them, so there is no configuration
+//! API to write them to (CC-72): the manifest half of `plan` and `apply` reports what the
+//! repository declares, and the live half is the seed entities, replayed into the broker
+//! through the Context Gateway `--gateway-url` names (T-0421, CC-50).
 
 use jcctl::commands;
 use jcctl::loader::Repository;
@@ -12,7 +13,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--json]\n       jcctl apply --repo-dir <path> [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -20,13 +21,12 @@ fn main() -> ExitCode {
 
     match words.as_slice() {
         ["validate", "--repo-dir", dir] => validate(Path::new(dir)),
-        ["plan", "--repo-dir", dir, rest @ ..] => match rest {
-            [] => plan(Path::new(dir), false),
-            ["--json"] => plan(Path::new(dir), true),
-            _ => usage(),
+        ["plan", "--repo-dir", dir, rest @ ..] => match plan_options(rest) {
+            Some((live, as_json)) => plan(Path::new(dir), live, as_json),
+            None => usage(),
         },
         ["apply", "--repo-dir", dir, rest @ ..] => match apply_options(rest) {
-            Some(options) => apply(Path::new(dir), options),
+            Some((options, live)) => apply(Path::new(dir), options, live),
             None => usage(),
         },
         ["drift", "--repo-dir", dir, rest @ ..] => match drift_options(rest) {
@@ -280,7 +280,7 @@ fn validate(dir: &Path) -> ExitCode {
 }
 
 /// Reports what `apply` would do (API/03 section 2 and 3: exit 2 means pending changes).
-fn plan(dir: &Path, as_json: bool) -> ExitCode {
+fn plan(dir: &Path, live: Connection, as_json: bool) -> ExitCode {
     let repo = match Repository::load(dir) {
         Ok(repo) => repo,
         Err(err) => return fail(&err.to_string()),
@@ -299,7 +299,32 @@ fn plan(dir: &Path, as_json: bool) -> ExitCode {
         print!("{}", changes.render());
     }
 
-    if changes.is_clean() {
+    // The live half: the seed entities, which are the only state a component does not read
+    // from the repository by itself (CC-72).
+    let gateway = match live.open() {
+        Ok(gateway) => gateway,
+        Err(err) => return fail(&err),
+    };
+    let Some(gateway) = gateway else {
+        eprintln!(
+            "jcctl: no --gateway-url, so this is the repository alone; seed entities were not              compared against any platform"
+        );
+        return exit_of(changes.is_clean());
+    };
+    let seeds = match commands::seed::plan(dir, &gateway) {
+        Ok(report) => report,
+        Err(err) => return fail(&err.to_string()),
+    };
+    if !as_json {
+        print!("{}", seeds.render());
+    }
+
+    exit_of(changes.is_clean() && seeds.is_clean())
+}
+
+/// Success, or 2 for "there is something to do", the code `plan` and `drift` share.
+fn exit_of(clean: bool) -> ExitCode {
+    if clean {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(2)
@@ -377,10 +402,16 @@ fn drift_options(args: &[&str]) -> Option<(bool, Option<PathBuf>)> {
 }
 
 /// Converges the platform and prints the per-resource result (CC-18, CC-20).
-fn apply(dir: &Path, options: commands::apply::Options) -> ExitCode {
+fn apply(dir: &Path, options: commands::apply::Options, live: Connection) -> ExitCode {
     let repo = match Repository::load(dir) {
         Ok(repo) => repo,
         Err(err) => return fail(&err.to_string()),
+    };
+    // Opened before anything is converged: an unreachable gateway or an unreadable token is a
+    // run that cannot finish, and finding that out after half a replay helps nobody.
+    let gateway = match live.open() {
+        Ok(gateway) => gateway,
+        Err(err) => return fail(&err),
     };
     let mut platform = InMemory::new();
     let report = match commands::apply::run(&repo, &mut platform, options) {
@@ -403,6 +434,22 @@ fn apply(dir: &Path, options: commands::apply::Options) -> ExitCode {
     }
     if let Some(revision) = &report.revision {
         println!("applied revision {revision}");
+    }
+
+    let seeds = match &gateway {
+        None => {
+            eprintln!(
+                "jcctl: no --gateway-url, so nothing was replayed into a platform; the                  repository is what every component reads (CC-72)"
+            );
+            None
+        }
+        Some(gateway) => match commands::seed::apply(dir, gateway) {
+            Ok(seeds) => Some(seeds),
+            Err(err) => return fail(&err.to_string()),
+        },
+    };
+    if let Some(seeds) = &seeds {
+        print!("{}", seeds.render());
     }
 
     if report.is_successful() {
@@ -724,16 +771,96 @@ fn json(value: &serde_json::Value) -> String {
 }
 
 /// Parses the two deletion flags, in either order; `None` on anything else (CC-19).
-fn apply_options(args: &[&str]) -> Option<commands::apply::Options> {
+fn apply_options(args: &[&str]) -> Option<(commands::apply::Options, Connection)> {
     let mut options = commands::apply::Options::default();
-    for arg in args {
+    let mut live = Connection::default();
+    let mut rest = args;
+    while let Some((arg, tail)) = rest.split_first() {
+        rest = tail;
         match *arg {
             "--prune" => options.prune = true,
             "--confirm-deletions" => options.confirm_deletions = true,
-            _ => return None,
+            _ => rest = live.take(arg, rest)?,
         }
     }
-    Some(options)
+    Some((options, live))
+}
+
+fn plan_options(args: &[&str]) -> Option<(Connection, bool)> {
+    let mut live = Connection::default();
+    let mut as_json = false;
+    let mut rest = args;
+    while let Some((arg, tail)) = rest.split_first() {
+        rest = tail;
+        match *arg {
+            "--json" => as_json = true,
+            _ => rest = live.take(arg, rest)?,
+        }
+    }
+    Some((live, as_json))
+}
+
+/// The address and the identity `plan` and `apply` reach a live platform with (API/03 §2).
+///
+/// Both come from the command line or the environment and never from a manifest. Neither is
+/// resolved here: a run that names no gateway works on the repository alone and says so,
+/// rather than comparing against an empty world.
+#[derive(Debug, Default)]
+struct Connection {
+    gateway_url: Option<String>,
+    token_file: Option<String>,
+}
+
+impl Connection {
+    /// Reads one flag and its value, returning what is left of the arguments.
+    ///
+    /// `None` is an unknown flag, which the caller turns into the usage text rather than
+    /// ignoring: a mistyped `--gateway-url` must not silently plan against nothing.
+    fn take<'a>(&mut self, arg: &str, rest: &'a [&'a str]) -> Option<&'a [&'a str]> {
+        let (value, tail) = rest.split_first()?;
+        match arg {
+            "--gateway-url" => self.gateway_url = Some((*value).to_owned()),
+            "--token-file" => self.token_file = Some((*value).to_owned()),
+            _ => return None,
+        }
+        Some(tail)
+    }
+
+    /// The gateway to work against, or `None` when this run is repository-only.
+    ///
+    /// The flags win over the environment, which is what a Job's `JC_GATEWAY_URL` and the
+    /// projected `JC_TOKEN_FILE` carry; a gateway named without a token is an error rather
+    /// than an anonymous call, because an anonymous call to a space surface is a refusal with
+    /// a confusing message (CC-04).
+    fn open(&self) -> Result<Option<jcctl::gateway::Gateway>, String> {
+        let url = self
+            .gateway_url
+            .clone()
+            .or_else(|| non_empty("JC_GATEWAY_URL"));
+        let Some(url) = url else {
+            return Ok(None);
+        };
+        let token_file = self
+            .token_file
+            .clone()
+            .or_else(|| non_empty("JC_TOKEN_FILE"))
+            .ok_or_else(|| {
+                "--gateway-url needs an identity: --token-file <path>, or JC_TOKEN_FILE, holding                  the reconciler's ServiceAccount token"
+                    .to_owned()
+            })?;
+        let token = jcctl::gateway::Gateway::token_from(Path::new(&token_file))
+            .map_err(|e| e.to_string())?;
+        jcctl::gateway::Gateway::new(&url, token)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// An environment variable that is set and not blank.
+fn non_empty(variable: &str) -> Option<String> {
+    std::env::var(variable)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// Imports a bundle into the repository, rewritten for this project (MF-20…MF-24, PF-22).
@@ -1196,5 +1323,47 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// T-0421: `plan` and `apply` take one address and one identity, and a flag this binary
+    /// does not know is the usage text rather than a run against nothing (API/03 section 2).
+    #[test]
+    fn the_connection_flags_parse_and_an_unknown_one_does_not() {
+        let (live, as_json) =
+            plan_options(&["--gateway-url", "http://gw:9090", "--json"]).expect("the flags parse");
+        assert_eq!(live.gateway_url.as_deref(), Some("http://gw:9090"));
+        assert!(as_json);
+
+        let (options, live) = apply_options(&[
+            "--prune",
+            "--gateway-url",
+            "http://gw:9090",
+            "--token-file",
+            "/var/run/secrets/token",
+        ])
+        .expect("the flags parse");
+        assert!(options.prune);
+        assert_eq!(live.token_file.as_deref(), Some("/var/run/secrets/token"));
+
+        // A flag nobody declared, and a flag whose value is missing: both are the usage text.
+        assert!(plan_options(&["--gateway"]).is_none());
+        assert!(plan_options(&["--gateway-url"]).is_none());
+        assert!(apply_options(&["--token-file"]).is_none());
+        assert!(apply_options(&["--broker-url", "http://broker:1026"]).is_none());
+    }
+
+    /// A run that names no gateway is repository-only rather than a run against an empty
+    /// world, and a gateway named without a token is an error rather than an anonymous call.
+    #[test]
+    fn a_gateway_without_a_token_is_refused_and_no_gateway_is_no_platform() {
+        let none = Connection::default();
+        assert!(none.open().expect("no gateway is not an error").is_none());
+
+        let named = Connection {
+            gateway_url: Some("http://gw:9090".to_owned()),
+            token_file: None,
+        };
+        let refused = named.open().expect_err("a gateway needs an identity");
+        assert!(refused.contains("--token-file"), "{refused}");
     }
 }

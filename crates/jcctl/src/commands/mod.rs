@@ -7,5 +7,6 @@ pub mod export;
 pub mod import;
 pub mod plan;
 pub mod publish_ckan;
+pub mod seed;
 pub mod sync;
 pub mod validate;
