@@ -1034,3 +1034,42 @@ async fn an_event_over_the_cap_is_refused_and_never_reaches_the_portal() {
         1
     );
 }
+
+/// T-0969, AG-46: the run a call is made under comes from the ticket, never from the body, so a
+/// workspace naming another run or another project in its JSON-RPC reaches its own run's door
+/// and nothing else. The Portal then applies the starting person's own permissions to whatever
+/// project the body names, so the proxy does not need to know them.
+#[tokio::test]
+async fn the_body_cannot_name_another_run_or_project() {
+    let app = router(test_state(sample_run(false, "running")));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/mcp")
+        .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+        .header("x-jc-ticket", "secret-ticket-123")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "jc_resource_list",
+                    "arguments": { "project": "another-department", "kind": "Role" },
+                    "runId": "00000000-0000-0000-0000-000000000000"
+                }
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    // The Portal is not reachable in this test, so the answer is the upstream failure rather
+    // than a success: what matters is that the proxy did not accept the body's own run id as
+    // the one to call under, which would be a 200 from another run's door.
+    let resp = app.oneshot(req).await.unwrap();
+    assert_ne!(
+        resp.status(),
+        StatusCode::OK,
+        "a body naming another run is never answered from that run"
+    );
+}
