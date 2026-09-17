@@ -58,6 +58,13 @@ const SAFE: &[Method] = &[Method::GET, Method::HEAD, Method::OPTIONS];
 /// page fits comfortably inside `MAX_BODY` whatever the entities look like.
 const PAGE: usize = 1_000;
 
+/// The deepest offset a paging parameter may name (T-0809).
+///
+/// A hundred pages is further than any client of this surface pages, and it is the ceiling on
+/// what one request can make the shared broker read: the temporal path turns the offset into
+/// `lastN`, and nothing in an endpoint's configuration bounds that.
+const MAX_SKIP: usize = 100 * PAGE;
+
 /// Everything the surface needs, built once at start-up.
 pub struct Gateway {
     /// The endpoint table, replaced whole when the reconciler changes an endpoint.
@@ -2665,7 +2672,10 @@ async fn sensorthings(
 
     let base = format!("{}{}", gateway.base_url(), endpoint.base_path);
     let caller = query::parse(request.uri().query().unwrap_or_default());
-    let (top, skip, counted) = sta_paging(&caller);
+    let (top, skip, counted) = match sta_paging(&caller) {
+        Ok(paging) => paging,
+        Err(problem) => return bad_parameter(&problem),
+    };
     let expand: Vec<&str> = query::first(&caller, "$expand")
         .map(|raw| raw.split(',').map(str::trim).collect())
         .unwrap_or_default();
@@ -2830,7 +2840,10 @@ async fn sta_series(
     let Some((urn, attribute)) = sta::split_stream_id(key) else {
         return ProblemDetails::not_found().into_response();
     };
-    let (top, skip, counted) = sta_paging(caller);
+    let (top, skip, counted) = match sta_paging(caller) {
+        Ok(paging) => paging,
+        Err(problem) => return bad_parameter(&problem),
+    };
 
     // One more instance than the page needs, so a full page can tell that there is another
     // one without a second query. Without the peek a `$top` request could never offer
@@ -2899,16 +2912,30 @@ async fn sta_series(
 
 /// `$top`, `$skip` and `$count`: the page an STA request asked for, bounded by the gateway's
 /// own ceiling. One place, because the entity page and the temporal series have to agree on it.
-fn sta_paging(caller: &[(String, String)]) -> (usize, usize, bool) {
+fn sta_paging(caller: &[(String, String)]) -> Result<(usize, usize, bool), ogc::ParamError> {
     let top = query::first(caller, "$top")
         .and_then(|top| top.parse::<usize>().ok())
         .unwrap_or(sta::DEFAULT_TOP)
         .clamp(1, PAGE);
-    let skip = query::first(caller, "$skip")
-        .and_then(|skip| skip.parse::<usize>().ok())
-        .unwrap_or_default();
+    let skip = match query::first(caller, "$skip") {
+        None => 0,
+        // An offset is what the caller has already read, so it bounds what the gateway asks
+        // the broker for: on a Datastream's Observations it becomes `lastN`, one history
+        // instance per skipped item (T-0809). Past the ceiling it is a refusal rather than a
+        // clamp, because a silently clamped offset would answer a page the caller did not ask
+        // for and page through the same rows forever.
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(skip) if skip <= MAX_SKIP => skip,
+            _ => {
+                return Err(ogc::ParamError {
+                    parameter: "$skip",
+                    detail: format!("$skip must be a whole number of items, at most {MAX_SKIP}"),
+                })
+            }
+        },
+    };
     let counted = query::first(caller, "$count").is_some_and(|value| value == "true");
-    (top, skip, counted)
+    Ok((top, skip, counted))
 }
 
 /// The items of one entity for one derived set.

@@ -812,3 +812,63 @@ async fn observations_of_a_key_that_is_no_datastream_answer_404() {
         assert_eq!(status, StatusCode::NOT_FOUND, "for {key}");
     }
 }
+
+/// T-0809: `$skip` is what the caller has already read, and on a Datastream's `Observations`
+/// it becomes `lastN` — one history instance per skipped item. A parameter nothing bounds is
+/// a query one anonymous request can make the shared broker run.
+#[tokio::test]
+async fn a_skip_past_the_ceiling_is_refused_before_the_broker_is_asked() {
+    for path in [
+        format!("/Datastreams('{URN}/pm10')/Observations?$skip=100000000000"),
+        format!("/Datastreams('{URN}/pm10')/Observations?$skip=-1"),
+        "/Datastreams?$skip=100000000000".to_owned(),
+        "/Datastreams?$skip=lots".to_owned(),
+    ] {
+        let broker = BrokerStub::start(vec![history()]).await;
+        let (status, problem, _) = call(
+            gateway(&broker.url, endpoint(&[])),
+            Method::GET,
+            &sta(&path),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        assert!(
+            problem["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("$skip")),
+            "the refusal names the parameter: {problem}"
+        );
+        assert!(
+            broker.hops().is_empty(),
+            "nothing was asked upstream: {path}"
+        );
+    }
+}
+
+/// The offsets a client actually pages with still work, and what they ask the broker for is
+/// bounded by them: `lastN` is the page plus what was skipped plus the one peeked at.
+#[tokio::test]
+async fn an_offset_inside_the_ceiling_pages_and_bounds_what_the_broker_is_asked_for() {
+    let broker = BrokerStub::start(vec![history()]).await;
+    let (status, _, _) = call(
+        gateway(&broker.url, endpoint(&[])),
+        Method::GET,
+        &sta(&format!(
+            "/Datastreams('{URN}/pm10')/Observations?$top=10&$skip=100000"
+        )),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let hop = broker
+        .hops()
+        .into_iter()
+        .find(|hop| hop.path.starts_with("/ngsi-ld/v1/temporal/entities/"))
+        .expect("the temporal tree");
+    assert!(
+        hop.query.contains("lastN=100011"),
+        "the deepest page the surface allows, and nothing beyond it: {}",
+        hop.query
+    );
+}
