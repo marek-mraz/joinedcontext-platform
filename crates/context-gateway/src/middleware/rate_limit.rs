@@ -263,3 +263,68 @@ fn set_headers(headers: &mut axum::http::HeaderMap, decision: &Decision) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::caller_key;
+    use axum::body::Body;
+    use axum::extract::Request;
+
+    fn asking(headers: &[(&str, &str)]) -> Request {
+        let mut builder = Request::builder().uri("/ngsi-ld/v1/entities?type=Device");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Body::empty()).expect("a request")
+    }
+
+    /// T-0965: a caller who presents a credential is keyed by it, so no `X-Forwarded-For` a
+    /// client writes can spend or evade another caller's quota. Two spoofed chains under one
+    /// credential are the same bucket; the same chain under two credentials is two.
+    #[test]
+    fn a_credential_decides_the_bucket_and_no_header_moves_it() {
+        let one = caller_key(&asking(&[
+            ("authorization", "Bearer token-aaa"),
+            ("x-forwarded-for", "10.42.0.9"),
+        ]));
+        let spoofed = caller_key(&asking(&[
+            ("authorization", "Bearer token-aaa"),
+            ("x-forwarded-for", "203.0.113.7, 10.42.0.1"),
+        ]));
+        assert_eq!(
+            one, spoofed,
+            "the header does not move a credential's bucket"
+        );
+        assert!(one.starts_with("credential:"), "{one}");
+
+        let other = caller_key(&asking(&[
+            ("authorization", "Bearer token-bbb"),
+            ("x-forwarded-for", "10.42.0.9"),
+        ]));
+        assert_ne!(one, other, "two credentials are two buckets");
+    }
+
+    /// Without a credential the address decides, and it is the LAST entry of the chain: the peer
+    /// the gateway's own proxy saw. A client prepends to its own value, so what it writes is
+    /// never the entry read. Reaching the gateway without that proxy is refused by the
+    /// NetworkPolicy, which admits only APISIX and the pipeline runner on 8080.
+    #[test]
+    fn an_anonymous_caller_is_keyed_by_the_peer_the_proxy_saw() {
+        assert_eq!(
+            caller_key(&asking(&[("x-forwarded-for", "203.0.113.7, 10.42.0.1")])),
+            "address:10.42.0.1",
+            "the last entry is the proxy's own observation"
+        );
+        assert_eq!(
+            caller_key(&asking(&[("x-forwarded-for", "  10.42.0.1  ")])),
+            "address:10.42.0.1",
+            "a single entry is trimmed"
+        );
+        assert_eq!(caller_key(&asking(&[])), "address:unknown");
+        assert_eq!(
+            caller_key(&asking(&[("x-forwarded-for", "")])),
+            "address:unknown",
+            "an empty header names no peer"
+        );
+    }
+}
