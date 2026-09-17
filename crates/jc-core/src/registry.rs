@@ -78,6 +78,7 @@ catalogue!(
     crate::kinds::ModelProjectionSpec,
     crate::kinds::SharedSpaceReferenceSpec,
     crate::kinds::ContextSourceRegistrationSpec,
+    crate::kinds::SubscriptionSpec,
     crate::kinds::ServiceAccountSpec,
     crate::kinds::PipelineSpec,
     crate::kinds::DataSourceSpec,

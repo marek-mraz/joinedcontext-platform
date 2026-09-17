@@ -32,14 +32,23 @@
     },
     "AgentEgress": {
       "additionalProperties": false,
-      "description": "Network egress allow-listing for package registries and documentation (AG-50).",
+      "description": "What one run may read from the internet, and how much of it (AG-50, AG-65).\n\nThe default is nothing: a profile that names no host reaches no host, and the workspace has no route of its own to fall back on (AG-34).",
       "properties": {
         "allowedHosts": {
-          "description": "Bare hostnames the package route may reach; everything else is refused (AG-50).",
+          "description": "Bare hostnames the package and fetch routes may reach; everything else is refused (AG-50).",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "maxBytesPerRun": {
+          "description": "Bytes one run may read from those hosts in total, across every fetch (AG-65).\n\nAbsent means [`DEFAULT_EGRESS_BYTES_PER_RUN`]: reading documentation is what the allow-list is for, and a profile that had to name a number to get it would have every author guessing one. The cap is what stops a run from mirroring a site, not what stops it from reading a page.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "type": "object"

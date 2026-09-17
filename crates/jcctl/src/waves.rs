@@ -47,6 +47,9 @@ const ORDER: &[(u8, &str)] = &[
     // `spec.publish.ckan` block can be acted on (EP-62, EP-67).
     (WAVE_EXPOSURE, "CkanInstance"),
     (WAVE_EXPOSURE, "Endpoint"),
+    // A subscription watches a space through its endpoints, so both stand before it
+    // converges (Architecture/06, Wave 4).
+    (WAVE_FEDERATION, "Subscription"),
     (WAVE_FEDERATION, "SharedSpaceReference"),
     (WAVE_FEDERATION, "ContextSourceRegistration"),
     (WAVE_FEDERATION, "DataOffer"),

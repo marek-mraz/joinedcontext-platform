@@ -21,6 +21,7 @@ pub mod policy;
 pub mod role;
 pub mod service_account;
 pub mod space;
+pub mod subscription;
 pub mod sync;
 pub mod ui_schema;
 
@@ -78,6 +79,9 @@ pub use service_account::{
     ServiceAccountLimits, ServiceAccountSpec, Workload,
 };
 pub use space::{ContextSpaceSpec, ProjectSpec, Quotas};
+pub use subscription::{
+    KeyValue, Notification, NotificationEndpoint, SubscriptionSpec, WatchedEntity,
+};
 pub use sync::{
     BundleFile, BundleItem, BundleOrigin, BundleSchemas, BundleSpec, ConflictPolicy, GitOrigin,
     PlatformApiOrigin, Schedule, SyncMode, SyncOrigin, SyncSourceSpec,
