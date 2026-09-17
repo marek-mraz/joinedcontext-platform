@@ -105,6 +105,53 @@ fn provenance_does_not_overwrite_the_templates_own_annotations() {
     );
 }
 
+/// A parameter may name a picker the Portal renders instead of a fixed enum (CC-24,
+/// Development/05 section 2.1). The hint is a keyword draft-07 does not know, so expansion has
+/// to ignore it: a blueprint whose form is friendlier must not become a blueprint that refuses
+/// to expand.
+#[test]
+fn a_picker_hint_is_ignored_by_the_expansion_that_validates_the_value() {
+    const HINTED: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Blueprint
+metadata:
+  name: new-dashboard
+  namespace: org
+spec:
+  version: 0.4.0
+  riskClass: green
+  allowedRoles: [domain-editor]
+  parameterSchema:
+    type: object
+    required: [space]
+    additionalProperties: false
+    properties:
+      space:
+        type: string
+        x-jc-widget: resourcePicker
+        x-jc-options: { plural: spaces }
+  templates:
+    - name: dashboard
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: Dashboard
+        metadata:
+          name: "over-{{ space }}"
+        spec:
+          space: "{{ space }}"
+"#;
+    let hinted = Blueprint::from_yaml(HINTED).expect("the hinted blueprint parses");
+    let expanded = expand(&hinted, &json!({ "space": "ovzdusie" })).expect("expands");
+    assert_eq!(expanded.len(), 1);
+    assert!(expanded[0].manifest.contains("over-ovzdusie"));
+
+    // The hint decides nothing: the value is still judged by the schema around it.
+    let refused = expand(&hinted, &json!({ "space": 7 })).expect_err("a number is not a name");
+    assert!(
+        matches!(refused, ExpandError::Parameters(_)),
+        "expected the parameters to be refused, got {refused:?}"
+    );
+}
+
 #[test]
 fn a_value_outside_the_schema_is_refused_with_every_violation_at_once() {
     let err = expand(
