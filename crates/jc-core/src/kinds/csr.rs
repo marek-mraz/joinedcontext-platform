@@ -108,7 +108,8 @@ impl Kind for ContextSourceRegistrationSpec {
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
-        self.validate()
+        self.validate()?;
+        self.validate_scope(meta.namespace.as_deref())
     }
 }
 
@@ -187,6 +188,40 @@ impl ContextSourceRegistrationSpec {
         }
         crate::kinds::validate_mirror_schedule(self.schedule.as_ref())?;
         self.federation.validate()
+    }
+
+    /// Refuses a member outside the hub's own project (PF-48).
+    ///
+    /// A hub space's broker tenant reads its members' tenants directly (CIM 009 clause 4.3.6.5),
+    /// and the hub Endpoint's policy set is the only gate on what comes back. Registering a
+    /// member is therefore the act that exposes it to the hub's audience, and that act has to
+    /// stay inside one steward's domain: a project is where a steward's authority ends, so a
+    /// reference across one is refused here rather than at the broker, where it would already
+    /// have been a grant.
+    ///
+    /// `project` is the registration's own namespace; a reference that names no namespace is
+    /// the project's own by definition.
+    pub fn validate_scope(&self, project: Option<&str>) -> Result<()> {
+        for (field, reference) in [
+            (
+                "spec.contextSpaceRef.namespace",
+                Some(&self.context_space_ref),
+            ),
+            ("spec.endpointRef.namespace", self.endpoint_ref.as_ref()),
+        ] {
+            let Some(namespace) = reference.and_then(Ref::namespace) else {
+                continue;
+            };
+            if Some(namespace) != project {
+                return Err(Error::Name {
+                    field,
+                    value: namespace.to_owned(),
+                    reason: "a hub federates spaces of its own project: registering a member is \
+                             what exposes it to the hub's audience (PF-48)",
+                });
+            }
+        }
+        Ok(())
     }
 }
 

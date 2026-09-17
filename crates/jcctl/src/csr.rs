@@ -80,20 +80,33 @@ pub trait BrokerApi {
     fn delete(&mut self, tenant: &str, id: &str) -> Result<(), BrokerError>;
 }
 
+/// A member of this platform, as the broker is told to read it (CIM 009 clause 5.2.9).
+///
+/// The hub's tenant reads the member's tenant directly (PF-48): the registration carries the
+/// address of the broker that holds the member and the tenant its space is, and the broker
+/// does the rest. Neither is decided here — the reconciler knows both and passes them in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberSource {
+    /// The NGSI-LD base URL of the broker holding the member.
+    pub endpoint: String,
+    /// The tenant the member's Context Space is, sent by the broker on every forward.
+    pub tenant: String,
+}
+
 /// Where a registration's target lives, resolved by the caller.
 ///
-/// A manifest names an `Endpoint` by name; only the reconciler holds the slug table that turns
-/// that into an address, so it is passed in rather than looked up here.
+/// A manifest names an `Endpoint` by name; only the reconciler holds the table that turns that
+/// into a broker and a tenant, so it is passed in rather than looked up here.
 pub trait Endpoints {
-    /// The NGSI-LD base URL of the Endpoint with this name, or `None` when it is unknown.
-    fn address_of(&self, name: &str) -> Option<String>;
+    /// The member behind the Endpoint with this name, or `None` when it is unknown.
+    fn member_of(&self, name: &str) -> Option<MemberSource>;
 }
 
 impl<F> Endpoints for F
 where
-    F: Fn(&str) -> Option<String>,
+    F: Fn(&str) -> Option<MemberSource>,
 {
-    fn address_of(&self, name: &str) -> Option<String> {
+    fn member_of(&self, name: &str) -> Option<MemberSource> {
         self(name)
     }
 }
@@ -115,11 +128,16 @@ pub fn registration(manifest: &RawManifest, endpoints: &impl Endpoints) -> Resul
         serde_json::from_value(manifest.spec.clone()).map_err(|e| CsrError::Spec(e.to_string()))?;
     spec.validate().map_err(|e| CsrError::Spec(e.to_string()))?;
 
-    let endpoint = match (&spec.endpoint_ref, &spec.endpoint) {
+    // A member of this platform is read as a tenant of a broker we run; a source elsewhere is
+    // an address and nothing else, because its tenants are not ours to name (PF-48).
+    let member = match (&spec.endpoint_ref, &spec.endpoint) {
         (Some(reference), _) => endpoints
-            .address_of(reference.name())
+            .member_of(reference.name())
             .ok_or_else(|| CsrError::UnresolvedEndpoint(reference.name().to_owned()))?,
-        (None, Some(url)) => url.clone(),
+        (None, Some(url)) => MemberSource {
+            endpoint: url.clone(),
+            tenant: String::new(),
+        },
         // validate() has already refused this, so reaching it means the spec changed without
         // this match changing with it.
         (None, None) => return Err(CsrError::Spec("no target".into())),
@@ -128,7 +146,10 @@ pub fn registration(manifest: &RawManifest, endpoints: &impl Endpoints) -> Resul
     let mut body = Map::new();
     body.insert("id".into(), json!(registration_id(&manifest.metadata.name)));
     body.insert("type".into(), json!("ContextSourceRegistration"));
-    body.insert("endpoint".into(), json!(endpoint));
+    body.insert("endpoint".into(), json!(member.endpoint));
+    if !member.tenant.is_empty() {
+        body.insert("tenant".into(), json!(member.tenant));
+    }
     body.insert("information".into(), information(&spec));
     body.insert("mode".into(), json!(mode(spec.mode)));
     if !spec.operations.is_empty() {

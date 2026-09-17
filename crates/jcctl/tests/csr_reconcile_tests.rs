@@ -7,7 +7,7 @@
 
 use jcctl::csr::{
     apply, forwards_caller_identity, registration, registration_id, remove, CsrError, Endpoints,
-    InMemoryBroker, Outcome,
+    InMemoryBroker, MemberSource, Outcome,
 };
 use jcctl::loader::RawManifest;
 use serde_json::json;
@@ -56,10 +56,14 @@ fn manifest(yaml: &str) -> RawManifest {
     serde_norway::from_str(yaml).expect("the manifest parses")
 }
 
-/// The address table the reconciler holds: an Endpoint name to its NGSI-LD base URL.
+/// The table the reconciler holds: an Endpoint name to the broker that holds its space and the
+/// tenant that space is (PF-48 direct read).
 fn endpoints() -> impl Endpoints {
     |name: &str| match name {
-        "ovzdusie-read" => Some("http://gateway.bb-ovzdusie.svc.cluster.local/ngsi-ld/v1".into()),
+        "ovzdusie-read" => Some(MemberSource {
+            endpoint: "http://antares.brokers.svc.cluster.local/ngsi-ld/v1".into(),
+            tenant: "bb-ovzdusie".into(),
+        }),
         _ => None,
     }
 }
@@ -80,8 +84,11 @@ fn a_local_endpoint_becomes_a_registration_at_that_endpoints_address() {
     assert_eq!(body["type"], json!("ContextSourceRegistration"));
     assert_eq!(
         body["endpoint"],
-        json!("http://gateway.bb-ovzdusie.svc.cluster.local/ngsi-ld/v1")
+        json!("http://antares.brokers.svc.cluster.local/ngsi-ld/v1")
     );
+    // The member is read as its own tenant of that broker, which is the whole of the direct
+    // read: no credential travels, and the hub Endpoint's policy set is the only gate (PF-48).
+    assert_eq!(body["tenant"], json!("bb-ovzdusie"));
     assert_eq!(body["mode"], json!("exclusive"));
     assert_eq!(
         body["information"],
@@ -243,7 +250,10 @@ fn the_registration_is_written_into_the_spaces_tenant_and_no_other() {
 
     let body = registration(&manifest(LOCAL), &endpoints()).expect("builds");
     let text = serde_json::to_string(&body).expect("serialises");
-    for member in ["tenant", "NGSILD-Tenant", "Authorization"] {
+    // `tenant` is the member's own, a CIM 009 member of the registration (clause 5.2.9), and
+    // the only thing the direct read needs. What must never appear is a header of the internal
+    // hop or a credential.
+    for member in ["NGSILD-Tenant", "Authorization"] {
         assert!(
             !text.contains(member),
             "the payload carries {member}:\n{text}"
@@ -259,7 +269,12 @@ fn no_identity_and_no_credential_reaches_the_broker() {
         let manifest = manifest(yaml);
         let body = registration(
             &manifest,
-            &(|name: &str| Some(format!("https://elsewhere.example/{name}"))),
+            &(|name: &str| {
+                Some(MemberSource {
+                    endpoint: format!("https://elsewhere.example/{name}"),
+                    tenant: "a-member-space".into(),
+                })
+            }),
         )
         .expect("builds");
         // By member, not by substring: `operations: [federationOps]` is a legitimate CIM 009

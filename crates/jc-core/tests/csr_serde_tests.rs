@@ -159,6 +159,44 @@ fn an_identity_has_to_be_one_the_forward_can_actually_use() {
         .is_err());
 }
 
+/// PF-48: a hub reads its members' tenants directly, so registering one is what exposes it to
+/// the hub's audience. That act stays inside the steward's own project.
+#[test]
+fn a_member_of_another_project_is_refused() {
+    for (field, yaml) in [
+        (
+            "spec.endpointRef.namespace",
+            LOCAL.replace(
+                "endpointRef: { kind: Endpoint, name: transport-internal }",
+                "endpointRef: { kind: Endpoint, name: transport-internal, namespace: espoo }",
+            ),
+        ),
+        (
+            "spec.contextSpaceRef.namespace",
+            LOCAL.replace(
+                "contextSpaceRef: hub",
+                "contextSpaceRef: { kind: ContextSpace, name: hub, namespace: espoo }",
+            ),
+        ),
+    ] {
+        let parsed = Registration::from_yaml(&yaml).expect("parses");
+        let refused = parsed.validate().expect_err("another project is refused");
+        let said = refused.to_string();
+        assert!(said.contains(field), "{field}: {said}");
+        assert!(said.contains("espoo"), "{field}: {said}");
+    }
+
+    // The project's own namespace, spelled out, is the same project and stays valid.
+    let same = LOCAL.replace(
+        "endpointRef: { kind: Endpoint, name: transport-internal }",
+        "endpointRef: { kind: Endpoint, name: transport-internal, namespace: helsinki }",
+    );
+    Registration::from_yaml(&same)
+        .expect("parses")
+        .validate()
+        .expect("the hub's own project is not a crossing");
+}
+
 #[test]
 fn an_external_source_is_a_url() {
     let not_a_url = EXTERNAL.replace("https://regional.example/ngsi-ld/v1", "regional.example");
