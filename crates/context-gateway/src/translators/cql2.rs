@@ -48,7 +48,11 @@ pub struct Compiled {
 /// than a no-op, because a client that sends one believes it narrowed something.
 pub fn compile(text: &str) -> Result<Compiled, ParamError> {
     let tokens = scan(text)?;
-    let mut parser = Parser { tokens, at: 0 };
+    let mut parser = Parser {
+        tokens,
+        at: 0,
+        depth: 0,
+    };
     let expr = parser.expression()?;
     parser.end()?;
     let expr = push_not(expr, false)?;
@@ -333,12 +337,40 @@ impl Temporal {
     }
 }
 
+/// How deep a filter may nest. Every parenthesis and every `NOT` is one frame of the parser and
+/// one level of the tree that `push_not`, `spine`, `render` and `Drop` walk recursively
+/// afterwards, so one number bounds all of them. A filter a person writes is two or three deep;
+/// thirty-two is far past anything a client generates and far short of a stack.
+const MAX_DEPTH: usize = 32;
+
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
+    /// Open parentheses and `NOT`s the parser is currently inside (EP-35, R5).
+    depth: usize,
 }
 
 impl Parser {
+    /// One level deeper, or the refusal a filter gets for nesting past the ceiling.
+    ///
+    /// Without it the parser recurses once per opening parenthesis, and a query string of a few
+    /// thousand `(` overflows the request thread's stack — which aborts the whole process, not
+    /// the request, because a stack overflow is not a panic anything can catch (R5).
+    fn deeper(&mut self) -> Result<(), ParamError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(refuse(format!(
+                "the filter nests more than {MAX_DEPTH} levels deep"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Back out of one level. Only the success path unwinds: a refusal ends the whole parse.
+    fn shallower(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.at)
     }
@@ -396,7 +428,10 @@ impl Parser {
 
     fn negation(&mut self) -> Result<Expr, ParamError> {
         if self.take_keyword("not") {
-            return Ok(Expr::Not(Box::new(self.negation()?)));
+            self.deeper()?;
+            let inner = self.negation()?;
+            self.shallower();
+            return Ok(Expr::Not(Box::new(inner)));
         }
         self.predicate()
     }
@@ -404,8 +439,10 @@ impl Parser {
     fn predicate(&mut self) -> Result<Expr, ParamError> {
         if self.peek() == Some(&Token::Open) {
             self.at += 1;
+            self.deeper()?;
             let inner = self.expression()?;
             self.expect(&Token::Close, "a closing parenthesis")?;
+            self.shallower();
             return Ok(inner);
         }
         let Some(Token::Word(word)) = self.peek().cloned() else {
@@ -945,4 +982,55 @@ fn envelope(text: &str) -> Result<Vec<Value>, ParamError> {
         json!([minx, maxy]),
         json!([minx, miny]),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_filter_nested_past_the_ceiling_is_refused_and_the_process_survives() {
+        // Without the depth guard this recurses once per parenthesis and overflows the request
+        // thread's stack, which aborts the process rather than the request: a stack overflow is
+        // not a panic anything catches (R5). The refusal is the whole point of the test — if it
+        // ever regresses, this test takes the test binary down with it, loudly.
+        let deep = format!("{}pm10>50{}", "(".repeat(10_000), ")".repeat(10_000));
+        let refused = compile(&deep).expect_err("a filter that deep is refused");
+        assert_eq!(refused.parameter, FILTER);
+        assert!(refused.detail.contains("nests more than"), "{refused:?}");
+    }
+
+    #[test]
+    fn a_chain_of_negations_is_bounded_the_same_way() {
+        // `NOT` recurses through `negation` rather than `predicate`, so it needs the same
+        // counter; a thousand of them is the same overflow by another door.
+        let deep = format!("{}pm10>50", "NOT ".repeat(1_000));
+        assert!(compile(&deep).is_err(), "a thousand NOTs were accepted");
+    }
+
+    #[test]
+    fn a_filter_at_the_ceiling_still_compiles() {
+        // The ceiling has to be a ceiling and not a trap: anything a client actually generates
+        // is two or three deep, and the depth that is allowed must work.
+        let deep = format!("{}pm10>50{}", "(".repeat(MAX_DEPTH), ")".repeat(MAX_DEPTH));
+        compile(&deep).expect("a filter at the ceiling compiles");
+
+        let over = format!(
+            "{}pm10>50{}",
+            "(".repeat(MAX_DEPTH + 1),
+            ")".repeat(MAX_DEPTH + 1)
+        );
+        assert!(compile(&over).is_err(), "one level past the ceiling passed");
+    }
+
+    #[test]
+    fn nesting_is_counted_per_branch_and_not_across_the_whole_filter() {
+        // A wide filter is not a deep one: ten predicates side by side each go one level down
+        // and come back up, and refusing that would refuse ordinary queries.
+        let wide = (0..64)
+            .map(|n| format!("(pm10>{n})"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        compile(&wide).expect("a wide filter is not a deep one");
+    }
 }
