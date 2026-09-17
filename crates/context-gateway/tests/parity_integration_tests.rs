@@ -320,7 +320,9 @@ async fn every_representation_of_one_endpoint_shows_the_same_attributes() {
             }),
         )
         .await;
-        let structured = &answer["result"]["structuredContent"][0];
+        // The structured half of a result is an object naming what it holds (AG-08, T-0848),
+        // so the entities are under the key the tool's output schema declares.
+        let structured = &answer["result"]["structuredContent"]["entities"][0];
         assert_eq!(
             attributes_of(structured),
             expected,
@@ -423,7 +425,7 @@ async fn a_type_no_grant_names_answers_the_same_nothing_everywhere() {
     )
     .await;
     assert_eq!(
-        answer["result"]["structuredContent"],
+        answer["result"]["structuredContent"]["entities"],
         json!([]),
         "an agent sees the same nothing, from the same decision"
     );
