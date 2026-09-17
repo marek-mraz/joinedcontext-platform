@@ -27,7 +27,8 @@ fn is_name(id: &str) -> bool {
 }
 
 /// What a body must not carry to the workspace (AG-40, AG-56): a bearer, a token-shaped
-/// header value, a named secret's value, the credentials of a connection URI, and a JWT.
+/// header value, a named secret's value, the credentials of a connection URI, a JWT, and a
+/// credential no field name labelled but whose issuer's prefix names it anyway (T-0957).
 static SECRETS: LazyLock<Vec<(regex::Regex, &'static str)>> = LazyLock::new(|| {
     vec![
         (
@@ -52,6 +53,29 @@ static SECRETS: LazyLock<Vec<(regex::Regex, &'static str)>> = LazyLock::new(|| {
         ),
         (
             regex::Regex::new(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+                .expect("a literal pattern"),
+            "[REDACTED]",
+        ),
+        // A credential nothing labelled, recognised by the prefix its issuer gives it
+        // (T-0957, AG-40). Only prefixes that mean one thing: a rule for "anything long and
+        // alphanumeric" would take the commit shas, branch names and entity URNs a change's
+        // own diagnostics are made of, and hand the workspace back a document with the answer
+        // removed. What is not prefixed is still covered where it is named.
+        (
+            // AWS: the four-letter type prefix and sixteen upper-case characters.
+            regex::Regex::new(r"\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b").expect("a literal pattern"),
+            "[REDACTED]",
+        ),
+        (
+            // GitHub, both shapes: the classic `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` token and
+            // the fine-grained `github_pat_`.
+            regex::Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")
+                .expect("a literal pattern"),
+            "[REDACTED]",
+        ),
+        (
+            // `sk-` keys, the shape OpenAI, OpenRouter and Anthropic-compatible clients use.
+            regex::Regex::new(r"\bsk-(?:or-|ant-|proj-|live-)?[A-Za-z0-9_-]{20,}")
                 .expect("a literal pattern"),
             "[REDACTED]",
         ),
@@ -201,6 +225,43 @@ mod tests {
             out.contains(r#""received": 42"#),
             "the shape of the document stays: {out}"
         );
+    }
+
+    /// T-0957, AG-40: a secret does not stop being one because nothing labelled it. A vendor
+    /// prefix is the label — `AKIA`, `ghp_`, `sk-` mean one thing and never occur in prose —
+    /// so a key pasted into a stack trace is redacted as a labelled one is.
+    #[test]
+    fn a_secret_with_no_field_name_is_redacted_by_its_own_prefix() {
+        // Assembled, so this source holds no string a secret scanner would take for a real one.
+        let aws = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+        let github = format!("ghp_{}", "abc123def456ghi789jkl012");
+        let fine_grained = format!(
+            "github_pat_{}",
+            "11ABCDEFG0aBcDeFgHiJkL_mNoPqRsTuVwXyZ0123456789"
+        );
+        let openai = format!("sk-{}", "proj0123456789abcdefghij");
+        let body = format!(
+            "traceback: the deploy step used {aws} and {github}; the mirror used \
+             {fine_grained}; the model call used {openai} and was refused"
+        );
+
+        let out = redact(&body);
+        for secret in [&aws, &github, &fine_grained, &openai] {
+            assert!(!out.contains(secret.as_str()), "{secret} survived: {out}");
+        }
+        assert!(out.contains("the deploy step used"), "{out}");
+        assert!(out.contains("and was refused"), "{out}");
+    }
+
+    /// The other half: the change component's own diagnostics are full of commit shas and
+    /// branch names, and a rule that redacted "anything long and alphanumeric" would hand back
+    /// a document with the answer removed.
+    #[test]
+    fn what_a_change_is_made_of_is_not_a_secret() {
+        let body = "merge of 9f1c2b7d4e6a8c0b2d4f6a8c0e2b4d6f8a0c2e4b into main failed: \
+                    /commits/abc123def4567890abcdef1234567890abcdef12 is not an ancestor, \
+                    branch agent/app-bikes/e3b0c442-98fc-1c14-9afb-4c7b2756a120 is behind";
+        assert_eq!(redact(body), body);
     }
 
     #[test]

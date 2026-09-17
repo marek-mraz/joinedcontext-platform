@@ -16,6 +16,20 @@ use std::time::Instant;
 /// AG-46). Counted on the bytes that arrived, before anything is parsed from them.
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 
+/// One event payload with every secret-shaped run replaced.
+///
+/// The redaction is textual, so it runs over the serialized payload and the result is parsed
+/// back. A scrubbed payload that no longer parses is sent as the one string it is, never as
+/// the original: the shape of an event is worth less than the credential in it.
+fn redacted(payload: &serde_json::Value) -> serde_json::Value {
+    let text = payload.to_string();
+    let scrubbed = crate::routes::diagnostics::redact(&text);
+    if scrubbed == text {
+        return payload.clone();
+    }
+    serde_json::from_str(&scrubbed).unwrap_or(serde_json::Value::String(scrubbed))
+}
+
 #[derive(serde::Deserialize)]
 pub struct EventPayload {
     pub kind: String,
@@ -74,10 +88,17 @@ pub async fn handler(
     let mut url = state.config.portal_base.clone();
     url.set_path("internal/agent-runs/events");
 
+    // AG-40, AG-56: the payload is the model's own words, and a credential that slipped into
+    // them would be stored, streamed to every reader of the run and read back by the model on
+    // the next turn. It is redacted here, before the Portal sees it, by the same rules the
+    // diagnostics door uses (T-0957). The document's shape is kept: only the values change,
+    // and text that redacts to itself is forwarded as it arrived.
+    let payload = redacted(&body.payload);
+
     let post_body = serde_json::json!({
         "runId": run.id,
         "kind": body.kind,
-        "payload": body.payload,
+        "payload": payload,
     });
 
     let resp = state

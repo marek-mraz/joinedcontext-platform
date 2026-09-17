@@ -966,6 +966,71 @@ mod request_bodies {
     }
 }
 
+/// T-0957, AG-40/AG-56: an event is the model's own words, and a credential that slips into
+/// them is stored, streamed to every reader of the run and put back in front of the model.
+/// The proxy redacts before the Portal ever sees it, as it does on the diagnostics door.
+#[tokio::test]
+async fn a_credential_in_an_event_is_redacted_before_the_portal_stores_it() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Assembled, so this source holds no string a secret scanner would take for a real one.
+    let github = format!("ghp_{}", "abc123def456ghi789jkl012");
+    let portal = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/internal/agent-runs/events"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({ "seq": 1 })))
+        .mount(&portal)
+        .await;
+
+    let app = router(test_state_with_portal(
+        sample_run(false, "building"),
+        &portal.uri(),
+    ));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/runs/events")
+                .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+                .header("x-jc-ticket", "secret-ticket-123")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "kind": "tool",
+                        "payload": {
+                            "name": "fetch",
+                            "output": format!("git push failed: {github} is not authorized"),
+                            "status": "failed",
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let seen = portal.received_requests().await.unwrap_or_default();
+    assert_eq!(seen.len(), 1);
+    let sent = String::from_utf8_lossy(&seen[0].body);
+    assert!(
+        !sent.contains(&github),
+        "the token reached the Portal: {sent}"
+    );
+    assert!(sent.contains("[REDACTED]"), "{sent}");
+    // The event is still an event: the shape the Portal stores is the one the run sent.
+    let sent: serde_json::Value = serde_json::from_str(&sent).expect("the body is still JSON");
+    assert_eq!(sent["kind"], serde_json::json!("tool"));
+    assert_eq!(sent["payload"]["name"], serde_json::json!("fetch"));
+    assert_eq!(sent["payload"]["status"], serde_json::json!("failed"));
+    assert_eq!(
+        sent["runId"],
+        serde_json::json!("e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+    );
+}
+
 /// T-0981, AG-46/AG-52: the inbox a workspace reads is its own run's, because the run comes off
 /// the ticket. Nothing in the request names a run, and a request that tries to name one is
 /// answered with the caller's own inbox all the same.
