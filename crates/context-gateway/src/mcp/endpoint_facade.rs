@@ -29,10 +29,11 @@
 //! * **The temporal grammar is forwarded as written** (`timerel`, `timeAt`, `endTimeAt`,
 //!   `lastN`, `aggrMethods`, `aggrPeriodDuration`), so history is neither a second query
 //!   language nor a second authorization path (AG-30).
-//! * **`create_subscription` needs the operator's answer.** A stateless façade has no
-//!   elicitation channel, so the confirmation is an argument: the first call comes back
-//!   describing what would be created, and only a call carrying `confirmed: true` reaches
-//!   the broker (AG-08).
+//! * **`create_subscription` needs the operator's answer.** The first call answers an
+//!   elicitation and creates nothing; the client shows it to the person and repeats the same
+//!   call with `params.elicitation = {elicitationId, action}`. The id is the server's, one
+//!   shot, bound to the caller, the space and the arguments, so the answer cannot be the
+//!   model's own (AG-08, Architecture/07 §3).
 //!
 //! `resources/list` serves the entity types, the access document and the schema artifacts
 //! the gateway can render; `describe_schema` renders the two formalisms the gateway
@@ -40,6 +41,7 @@
 
 use crate::app::{ngsi_ld_request, sha256_hex, Gateway};
 use crate::handlers::{access, schema};
+use crate::mcp::elicitation;
 use crate::pdp::evaluator::{Request as PolicyRequest, Subject, Verdict};
 use crate::resolver::{Endpoint, Model};
 use axum::body::Body;
@@ -301,17 +303,13 @@ const TOOLS: &[Tool] = &[
     Tool {
         name: "create_subscription",
         operations: &[Operation::CreateSubscription],
-        description: "Create a context subscription. Needs the operator's confirmation first.",
+        description: "Create a context subscription",
         read_only: false,
         schema: || {
             json!({
                 "type": "object",
                 "properties": {
                     "subscription": { "type": "object", "description": "The NGSI-LD Subscription, entities and notification included" },
-                    "confirmed": {
-                        "type": "boolean",
-                        "description": "Set once the human operator has agreed to the subscription being created",
-                    },
                 },
                 "required": ["subscription"],
                 "additionalProperties": false,
@@ -320,6 +318,36 @@ const TOOLS: &[Tool] = &[
         result_key: "subscription",
     },
 ];
+
+/// Who is asking, as an elicitation binds it: the account, the person, or the participant the
+/// token names, and `anonymous` when it names nobody.
+///
+/// An anonymous caller never reaches this — a destructive tool needs a write grant, which the
+/// `public` role does not hold — but the binding is written for whoever does reach it.
+fn caller_of(subject: &Subject) -> String {
+    subject
+        .service_account
+        .as_deref()
+        .or(subject.user.as_deref())
+        .or(subject.did.as_deref())
+        .unwrap_or("anonymous")
+        .to_owned()
+}
+
+/// The form the person fills to allow one destructive call (AG-08).
+fn confirmation_schema(tool: &str) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["accept", "decline"],
+                "description": format!("Whether `{tool}` may run"),
+            },
+        },
+        "required": ["action"],
+    })
+}
 
 /// The `type` argument, which every tool that takes one spells the same way (AG-21).
 fn type_schema() -> Value {
@@ -409,15 +437,52 @@ fn validate(index: usize, arguments: &Map<String, Value>) -> Result<(), String> 
         .iter_errors(&instance)
         .map(|error| {
             let at = error.instance_path().to_string();
+            let rule = broken_rule(&error);
             match at.is_empty() {
-                true => error.to_string(),
-                false => format!("{at}: {error}"),
+                true => rule,
+                false => format!("{at}: {rule}"),
             }
         })
         .collect();
     match problems.is_empty() {
         true => Ok(()),
         false => Err(problems.join("; ")),
+    }
+}
+
+/// Names the rule an argument broke, without repeating what the caller sent (SP-15, AG-21).
+///
+/// A validator writes the offending value into its own message, and a tool error is read by a
+/// model: a refusal that quotes the argument carries whatever was typed into the next prompt.
+/// The place and the rule are what a caller needs to correct the call; the value it already has.
+fn broken_rule(error: &jsonschema::ValidationError<'_>) -> String {
+    use jsonschema::error::ValidationErrorKind as Rule;
+    match error.kind() {
+        Rule::AdditionalProperties { unexpected } => {
+            format!(
+                "no argument of this tool is called {}",
+                unexpected.join(", ")
+            )
+        }
+        Rule::Required { property } => format!("{property} is required"),
+        Rule::Type { .. } => "is not of the type the schema declares".to_owned(),
+        Rule::Pattern { pattern } => format!("does not match {pattern}"),
+        Rule::MaxLength { limit } => format!("is longer than {limit} characters"),
+        Rule::MinLength { limit } => format!("is shorter than {limit} characters"),
+        Rule::MaxItems { limit } => format!("has more than {limit} items"),
+        Rule::MinItems { limit } => format!("has fewer than {limit} items"),
+        Rule::Maximum { limit } => format!("is above {limit}"),
+        Rule::Minimum { limit } => format!("is below {limit}"),
+        Rule::Enum { options } => format!("is not one of {options}"),
+        Rule::Format { format } => format!("is not a {format}"),
+        _ => {
+            let keyword = error.schema_path().to_string();
+            let keyword = keyword.rsplit('/').next().unwrap_or_default().to_owned();
+            match keyword.is_empty() {
+                true => "is not what the schema allows".to_owned(),
+                false => format!("breaks the schema's {keyword}"),
+            }
+        }
     }
 }
 
@@ -601,19 +666,62 @@ async fn call_tool(
         _ => {}
     }
 
-    // AG-08: a subscription outlives the conversation that made it, so the agent has to
-    // come back with the operator's answer. A stateless façade has no elicitation channel
-    // of its own, so the confirmation is an argument the client can only set after asking.
-    if tool.name == "create_subscription" && arguments.get("confirmed") != Some(&Value::Bool(true))
-    {
-        return result(
-            id,
-            refused(
-                "creating a subscription needs the operator's confirmation: show them what \
-                 would be created and call again with confirmed=true",
-                arguments.get("subscription").unwrap_or(&Value::Null),
-            ),
-        );
+    // AG-08: a subscription outlives the conversation that made it, so the person decides,
+    // not the model. The first call answers an elicitation and creates nothing; the client
+    // shows it and repeats the same call carrying the answer. The id is the server's, which
+    // is what makes the second call the person's — a boolean the model writes into its own
+    // call proves nothing, because the model writes both calls (T-0849, Architecture/07 §3).
+    if !tool.read_only {
+        let owner = caller_of(&subject);
+        let surface = endpoint.base_path.clone();
+        let digest = elicitation::digest_of(&arguments);
+        match params.get("elicitation") {
+            None => {
+                let elicitation_id = gateway
+                    .elicitations
+                    .ask(&owner, &surface, tool.name, &digest);
+                return result(
+                    id,
+                    elicitation::document(
+                        &elicitation_id,
+                        &format!(
+                            "{} on the context space `{}`. Nothing has been created: show the \
+                             person what this would do and send this call again with their \
+                             answer.",
+                            tool.description, endpoint.space
+                        ),
+                        confirmation_schema(tool.name),
+                    ),
+                );
+            }
+            Some(sent) => match gateway
+                .elicitations
+                .answer(&owner, &surface, tool.name, &digest, sent)
+            {
+                elicitation::Answer::Accepted => {}
+                elicitation::Answer::Declined => {
+                    return result(
+                        id,
+                        refused(
+                            "the person declined this call; nothing was created (AG-08)",
+                            &Value::Null,
+                        ),
+                    );
+                }
+                elicitation::Answer::Unknown => {
+                    return result(
+                        id,
+                        refused(
+                            "that answer belongs to no open question of this call: an answer is \
+                             spent once, expires in ten minutes and is bound to this caller, \
+                             this space and these arguments. Call again without `elicitation` \
+                             to ask anew (AG-08)",
+                            &Value::Null,
+                        ),
+                    );
+                }
+            },
+        }
     }
 
     let (method, path, query, body) = match request_for(tool.name, &arguments) {

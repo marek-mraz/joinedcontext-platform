@@ -101,6 +101,8 @@ pub struct Gateway {
     pub egress_url: Option<String>,
     /// One token bucket per endpoint and caller (EP-20).
     pub rate_limiter: RateLimiter,
+    /// The questions a destructive MCP tool is waiting on an answer to (AG-08, T-0849).
+    pub elicitations: crate::mcp::elicitation::Elicitations,
 }
 
 impl Gateway {
@@ -118,6 +120,7 @@ impl Gateway {
             public_url: None,
             egress_url: None,
             rate_limiter: RateLimiter::new(),
+            elicitations: crate::mcp::elicitation::Elicitations::new(),
         }
     }
 

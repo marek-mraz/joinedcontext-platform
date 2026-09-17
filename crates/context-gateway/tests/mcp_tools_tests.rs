@@ -647,8 +647,11 @@ async fn describe_schema_renders_every_formalism_the_rest_surface_serves() {
         .await;
         let result = &answer["result"];
         assert_eq!(result["isError"], json!(false), "{format}: {answer}");
-        assert_eq!(result["structuredContent"]["format"], json!(format));
-        let document = result["structuredContent"]["document"]
+        assert_eq!(
+            result["structuredContent"]["schema"]["format"],
+            json!(format)
+        );
+        let document = result["structuredContent"]["schema"]["document"]
             .as_str()
             .unwrap_or_default();
         assert!(
@@ -674,7 +677,9 @@ async fn describe_schema_still_answers_the_summary_and_the_json_formalisms() {
         .await;
         assert_eq!(answer["result"]["isError"], json!(false), "{answer}");
         assert!(
-            answer["result"]["structuredContent"].get(key).is_some(),
+            answer["result"]["structuredContent"]["schema"]
+                .get(key)
+                .is_some(),
             "{format} answers the document itself: {answer}"
         );
     }
@@ -698,7 +703,7 @@ async fn describe_schema_narrows_to_one_entity_type_and_refuses_the_rest() {
     )
     .await;
     assert_eq!(answer["result"]["isError"], json!(false), "{answer}");
-    let defs = answer["result"]["structuredContent"]["$defs"]
+    let defs = answer["result"]["structuredContent"]["schema"]["$defs"]
         .as_object()
         .expect("the definitions");
     assert!(defs.contains_key("AirQualityObserved"), "{answer}");
@@ -734,12 +739,257 @@ async fn describe_schema_refuses_a_formalism_nobody_renders() {
     )
     .await;
     let said = serde_json::to_string(&answer).unwrap_or_default();
+    assert_eq!(answer["result"]["isError"], json!(true), "{said}");
     assert!(
-        said.contains("protobuf") && said.contains("json-schema"),
-        "{said}"
+        said.contains("format") && said.contains("json-schema"),
+        "the refusal names the parameter and the formalisms it does render: {said}"
+    );
+    assert!(
+        !said.contains("protobuf"),
+        "the refusal repeats what the caller sent: {said}"
     );
     assert_eq!(
-        answer["result"]["structuredContent"]["document"],
+        answer["result"]["structuredContent"]["schema"]["document"],
         Value::Null
     );
+}
+
+/// A grant that may create a subscription, held by a role no anonymous caller has.
+fn steward_grant() -> PolicySpec {
+    policy(
+        r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: steward }
+operations:
+  - queryEntity
+  - createSubscription
+information:
+  - entities:
+      - type: AirQualityObserved
+"#,
+    )
+}
+
+/// A steward's token for the private endpoint.
+fn steward(realm: &common::Realm) -> String {
+    realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "0f5a",
+        "aud": PRIVATE,
+        "preferred_username": "jana",
+        "realm_access": { "roles": ["steward"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }))
+}
+
+/// The same gateway across several calls, which is what a two-step confirmation needs: the
+/// server minted the question and the same server reads the answer.
+fn app_with_steward(broker: &str, realm: &common::Realm) -> Router {
+    let mut private = endpoint(PRIVATE, Audience::Organization);
+    private.policies = vec![public_grant(), steward_grant()];
+    router(Arc::new(
+        Gateway::new(
+            Broker::new(broker),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve([endpoint(PUBLIC, Audience::Public), private])
+        .serve_spaces([space()])
+        .authenticate(
+            Arc::new(realm.verifier()),
+            ServiceAccounts::new(),
+            Some(HOST.to_owned()),
+        ),
+    ))
+}
+
+/// AG-08, T-0849: a subscription outlives the conversation that made it, so the person
+/// decides. The first call answers an elicitation and creates nothing; only the same call
+/// carrying the server's own id reaches the broker.
+#[tokio::test]
+async fn a_subscription_is_created_only_after_the_person_answered_the_servers_question() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!({})]).await;
+    let app = app_with_steward(&broker.url, &realm);
+    let token = steward(&realm);
+    let arguments = json!({ "subscription": {
+        "type": "Subscription",
+        "entities": [{ "type": "AirQualityObserved" }],
+        "notification": { "endpoint": { "uri": "https://example.org/hook" } }
+    }});
+    let path = format!("/api/endpoint/{PRIVATE}/mcp");
+
+    // 1. The call the model makes alone: a question, and nothing created.
+    let (_, asked, _) = send(
+        app.clone(),
+        message(
+            &path,
+            Some(&token),
+            call("create_subscription", arguments.clone()),
+        ),
+    )
+    .await;
+    assert_eq!(
+        asked["result"]["status"],
+        json!("input_required"),
+        "{asked}"
+    );
+    let elicitation = &asked["result"]["structuredContent"]["elicitation"];
+    let elicitation_id = elicitation["elicitationId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the server minted no question: {asked}"))
+        .to_owned();
+    assert_eq!(elicitation["mode"], json!("form"), "{asked}");
+    assert!(
+        elicitation["schema"]["properties"]["action"].is_object(),
+        "{asked}"
+    );
+    assert!(
+        broker.hops().is_empty(),
+        "the subscription was created before anybody answered"
+    );
+
+    // 2. An id the server never minted is not an answer, and still nothing is created.
+    let (_, forged, _) = send(
+        app.clone(),
+        message(
+            &path,
+            Some(&token),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "create_subscription", "arguments": arguments.clone(),
+                "elicitation": { "elicitationId": "eli-0000000000000000", "action": "accept" }
+            }}),
+        ),
+    )
+    .await;
+    assert_eq!(forged["result"]["isError"], json!(true), "{forged}");
+    assert!(broker.hops().is_empty(), "a forged answer created it");
+
+    // 3. The person's answer, carried by the client: the broker is asked exactly once.
+    let (_, created, _) = send(
+        app.clone(),
+        message(
+            &path,
+            Some(&token),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "create_subscription", "arguments": arguments.clone(),
+                "elicitation": { "elicitationId": elicitation_id, "action": "accept" }
+            }}),
+        ),
+    )
+    .await;
+    assert_eq!(created["result"]["isError"], json!(false), "{created}");
+    assert_eq!(broker.hops().len(), 1, "one answer, one subscription");
+
+    // 4. The same id is spent: it cannot create a second subscription.
+    let (_, again, _) = send(
+        app.clone(),
+        message(
+            &path,
+            Some(&token),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "create_subscription", "arguments": arguments,
+                "elicitation": { "elicitationId": elicitation_id, "action": "accept" }
+            }}),
+        ),
+    )
+    .await;
+    assert_eq!(again["result"]["isError"], json!(true), "{again}");
+    assert_eq!(
+        broker.hops().len(),
+        1,
+        "a spent answer created a second one"
+    );
+}
+
+/// The person may say no, and a declined call creates nothing and says why.
+#[tokio::test]
+async fn a_declined_subscription_creates_nothing() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!({})]).await;
+    let app = app_with_steward(&broker.url, &realm);
+    let token = steward(&realm);
+    let arguments = json!({ "subscription": { "type": "Subscription" } });
+    let path = format!("/api/endpoint/{PRIVATE}/mcp");
+
+    let (_, asked, _) = send(
+        app.clone(),
+        message(
+            &path,
+            Some(&token),
+            call("create_subscription", arguments.clone()),
+        ),
+    )
+    .await;
+    let elicitation_id = asked["result"]["structuredContent"]["elicitation"]["elicitationId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{asked}"))
+        .to_owned();
+
+    let (_, declined, _) = send(
+        app.clone(),
+        message(
+            &path,
+            Some(&token),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "create_subscription", "arguments": arguments,
+                "elicitation": { "elicitationId": elicitation_id, "action": "decline" }
+            }}),
+        ),
+    )
+    .await;
+    assert_eq!(declined["result"]["isError"], json!(true), "{declined}");
+    assert!(
+        declined["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("declined"),
+        "{declined}"
+    );
+    assert!(broker.hops().is_empty());
+}
+
+/// An answer to a question asked about other arguments is not an answer to this call: the
+/// person saw a different subscription.
+#[tokio::test]
+async fn an_answer_does_not_carry_over_to_other_arguments() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!({})]).await;
+    let app = app_with_steward(&broker.url, &realm);
+    let token = steward(&realm);
+    let path = format!("/api/endpoint/{PRIVATE}/mcp");
+
+    let (_, asked, _) = send(
+        app.clone(),
+        message(
+            &path,
+            Some(&token),
+            call(
+                "create_subscription",
+                json!({ "subscription": { "entities": [{ "type": "AirQualityObserved" }] } }),
+            ),
+        ),
+    )
+    .await;
+    let elicitation_id = asked["result"]["structuredContent"]["elicitation"]["elicitationId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{asked}"))
+        .to_owned();
+
+    let (_, swapped, _) = send(
+        app.clone(),
+        message(
+            &path,
+            Some(&token),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "create_subscription",
+                "arguments": { "subscription": { "entities": [{ "type": "Vehicle" }] } },
+                "elicitation": { "elicitationId": elicitation_id, "action": "accept" }
+            }}),
+        ),
+    )
+    .await;
+    assert_eq!(swapped["result"]["isError"], json!(true), "{swapped}");
+    assert!(broker.hops().is_empty(), "the swapped call was carried out");
 }
