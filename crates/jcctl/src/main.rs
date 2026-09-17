@@ -306,9 +306,7 @@ fn plan(dir: &Path, live: Connection, as_json: bool) -> ExitCode {
         Err(err) => return fail(&err),
     };
     let Some(gateway) = gateway else {
-        eprintln!(
-            "jcctl: no --gateway-url, so this is the repository alone; seed entities were not              compared against any platform"
-        );
+        eprintln!("jcctl: no --gateway-url, so no seed entity was compared against a platform");
         return exit_of(changes.is_clean());
     };
     let seeds = match commands::seed::plan(dir, &gateway) {
@@ -439,7 +437,8 @@ fn apply(dir: &Path, options: commands::apply::Options, live: Connection) -> Exi
     let seeds = match &gateway {
         None => {
             eprintln!(
-                "jcctl: no --gateway-url, so nothing was replayed into a platform; the                  repository is what every component reads (CC-72)"
+                "jcctl: no --gateway-url, so no seed entity was replayed (CC-72: the \
+                 repository is what every component reads)"
             );
             None
         }
