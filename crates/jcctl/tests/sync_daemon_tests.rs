@@ -127,6 +127,7 @@ fn source(overrides: Value) -> RawManifest {
         metadata: serde_json::from_value(json!({ "name": "regional", "namespace": "bb-doprava" }))
             .expect("metadata"),
         spec,
+        status: None,
     }
 }
 

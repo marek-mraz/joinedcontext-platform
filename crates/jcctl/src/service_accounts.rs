@@ -46,6 +46,7 @@ pub fn owner_policies(manifest: &RawManifest, org_domain: &str) -> Vec<RawManife
                     rest: annotations(),
                 },
                 spec: policy,
+                status: None,
             })
         })
         .collect()

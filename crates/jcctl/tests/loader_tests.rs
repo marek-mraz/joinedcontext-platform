@@ -983,3 +983,74 @@ spec:
     // A warning is not a refusal while the repository is being migrated.
     assert!(report.findings.is_empty(), "{:?}", report.findings);
 }
+
+/// AP-13a: the build lane writes `status.build` into the manifest, so the loader carries it —
+/// every other part of `status` is computed and never stored (MF-04).
+#[test]
+fn the_build_status_of_an_app_survives_the_load() {
+    let dir = unique_temp_dir("app-build-status");
+    std::fs::write(
+        dir.join("org.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata: { name: my-city, namespace: org }
+spec:
+  domain: banskabystrica.sk
+  locales: ["sk"]
+  defaultLocale: sk
+"#,
+    )
+    .unwrap();
+    let app = dir.join("projects/doprava/apps/tabule");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        dir.join("projects/doprava/project.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Project
+metadata: { name: doprava, namespace: org }
+spec:
+  organizationRef: my-city
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("app.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: App
+metadata: { name: tabule, namespace: doprava }
+spec:
+  kind: static
+  source: { path: ./src }
+  visibility: public
+  dataNeeds:
+    - contextSpaceRef: { kind: ContextSpace, name: mhd }
+      types: [Stop]
+      operations: [queryEntity]
+status:
+  build:
+    digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    commit: 8c56954a1f0e
+    sdkVersion: "0.4.1"
+    builtAt: "2026-09-17T06:00:00Z"
+"#,
+    )
+    .unwrap();
+
+    let repo = Repository::load(&dir).expect("loads");
+    let manifest = &repo
+        .get(&ResourceId::new(
+            "joinedcontext.com",
+            "App",
+            Some("doprava".into()),
+            "tabule",
+        ))
+        .expect("the app")
+        .manifest;
+    let build = manifest
+        .status
+        .as_ref()
+        .and_then(|status| status.get("build"))
+        .expect("the build the lane wrote");
+    assert_eq!(build["commit"], "8c56954a1f0e");
+    assert_eq!(build["sdkVersion"], "0.4.1");
+}

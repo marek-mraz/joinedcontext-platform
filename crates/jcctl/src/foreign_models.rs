@@ -455,6 +455,7 @@ fn one(
             rest: serde_json::Map::new(),
         },
         spec,
+        status: None,
     };
     let path = PathBuf::from(
         registry::by_kind("DataModel")

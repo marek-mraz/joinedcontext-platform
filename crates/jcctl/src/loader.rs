@@ -33,6 +33,12 @@ pub struct RawManifest {
     /// Manifest specification payload, unparsed for untyped handling (MF-03).
     #[serde(default)]
     pub spec: serde_json::Value,
+    /// The one part of `status` a repository holds: `status.build` of an `App`, written back by
+    /// the build lane in the commit that publishes the artifact (AP-13a). Everything else about
+    /// status is computed and never stored (MF-04), so this stays untyped like `spec` and the
+    /// reader takes the member it knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<serde_json::Value>,
 }
 
 /// The metadata members the loader needs to build an identity (MF-02, MF-06).
