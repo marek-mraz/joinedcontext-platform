@@ -1,7 +1,7 @@
 //! The tabular representations of an NGSI-LD answer (T-0157, EP-08, EP-44, EP-45).
 
 use context_gateway::translators::tabular::{
-    csv, flatten, humanize, table, xlsx, Limits, Table, TooLarge,
+    csv, flatten, humanize, table, xlsx, Limits, Table, TooLarge, XlsxError,
 };
 use serde_json::{json, Value};
 use std::io::Read;
@@ -244,7 +244,12 @@ fn an_empty_answer_is_an_empty_table() {
 #[test]
 fn the_workbook_is_a_readable_ooxml_package() {
     let table = table(&json!([station()]), &Limits::default()).expect("within the limits");
-    let bytes = xlsx(&table, &[("space".to_owned(), "ovzdusie".to_owned())]).expect("a workbook");
+    let bytes = xlsx(
+        &table,
+        &[("space".to_owned(), "ovzdusie".to_owned())],
+        &Limits::DEFAULT,
+    )
+    .expect("a workbook");
 
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("a zip");
     let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
@@ -304,7 +309,7 @@ fn a_hostile_value_cannot_break_out_of_the_worksheet() {
         "note": { "type": "Property", "value": "</t></is></c><c r=\"Z9\"><v>0</v></c>" }
     }]);
     let table = table(&answer, &Limits::default()).expect("within the limits");
-    let bytes = xlsx(&table, &[]).expect("a workbook");
+    let bytes = xlsx(&table, &[], &Limits::DEFAULT).expect("a workbook");
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("a zip");
     let mut sheet = String::new();
     archive
@@ -331,6 +336,23 @@ fn the_same_answer_produces_the_same_bytes() {
 }
 
 // --- The representation as the gateway serves it -----------------------------------
+
+/// T-0810: the workbook writer takes the same ceiling the CSV writer takes, and refuses
+/// rather than truncating — a short file is indistinguishable from a complete one (EP-44).
+#[test]
+fn a_workbook_past_the_byte_ceiling_is_refused() {
+    let many: Vec<Value> = (0..500).map(|_| station()).collect();
+    let table = table(&json!(many), &Limits::DEFAULT).expect("a table");
+    let tight = Limits {
+        max_bytes: 1024,
+        ..Limits::DEFAULT
+    };
+    assert!(
+        matches!(xlsx(&table, &[], &tight), Err(XlsxError::TooLarge)),
+        "a sheet larger than the ceiling is not a workbook"
+    );
+    xlsx(&table, &[], &Limits::DEFAULT).expect("the same table inside the default ceiling");
+}
 
 mod common;
 
@@ -545,4 +567,30 @@ async fn the_workbook_is_served_as_an_attachment() {
         .expect("a readable body");
     // A workbook is a zip, and it starts with one.
     assert_eq!(&body[..2], b"PK");
+}
+
+/// T-0810, EP-44: the workbook was the one file representation no byte ceiling reached, so a
+/// download that csv refuses was built whole in memory and answered 200.
+#[tokio::test]
+async fn the_endpoints_byte_ceiling_refuses_a_workbook_too() {
+    let full: Vec<Value> = (0..1000).map(reading).collect();
+    let limits = FileLimits {
+        max_file_rows: None,
+        max_file_bytes: Some(1024),
+    };
+    for (representation, file) in [
+        (Representation::Xlsx, "file.xlsx"),
+        (Representation::Csv, "file.csv"),
+    ] {
+        let broker = BrokerStub::start(vec![json!(full)]).await;
+        let (status, _, _) = download(
+            gateway(
+                &broker.url,
+                endpoint(vec![representation], Some(limits.clone())),
+            ),
+            &format!("/api/endpoint/{SLUG}/{file}?type=AirQualityObserved"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{file}");
+    }
 }

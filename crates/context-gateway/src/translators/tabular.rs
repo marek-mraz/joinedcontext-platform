@@ -315,7 +315,11 @@ fn cell(value: &Value) -> String {
 /// is needed here is a grid of inline strings and numbers, and SpreadsheetML says how to
 /// write one in a page. A JSON number becomes a numeric cell so a reader can sum a
 /// measurement without retyping it; everything else is an inline string.
-pub fn xlsx(table: &Table, metadata: &[(String, String)]) -> Result<Vec<u8>, std::io::Error> {
+pub fn xlsx(
+    table: &Table,
+    metadata: &[(String, String)],
+    limits: &Limits,
+) -> Result<Vec<u8>, XlsxError> {
     use zip::write::SimpleFileOptions;
     use zip::CompressionMethod;
 
@@ -327,17 +331,41 @@ pub fn xlsx(table: &Table, metadata: &[(String, String)]) -> Result<Vec<u8>, std
         ("_rels/.rels", ROOT_RELS.to_owned()),
         ("xl/workbook.xml", WORKBOOK.to_owned()),
         ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS.to_owned()),
-        ("xl/worksheets/sheet1.xml", data_sheet(table)),
+        ("xl/worksheets/sheet1.xml", data_sheet(table, limits)?),
         ("xl/worksheets/sheet2.xml", metadata_sheet(metadata)),
     ] {
         archive.start_file(name, options)?;
         archive.write_all(body.as_bytes())?;
     }
-    Ok(archive.finish()?.into_inner())
+    let workbook = archive.finish()?.into_inner();
+    // The sheet is checked while it is written and the file itself when it is finished: the
+    // one bounds what the gateway holds, the other what it would send (EP-44).
+    match workbook.len() as u64 > limits.max_bytes {
+        true => Err(XlsxError::TooLarge),
+        false => Ok(workbook),
+    }
+}
+
+/// Why no workbook was produced (T-0810).
+#[derive(Debug, thiserror::Error)]
+pub enum XlsxError {
+    /// The workbook is past the endpoint's `maxFileBytes`. A download is refused, never
+    /// truncated: a short file is indistinguishable from a complete one (EP-44).
+    #[error("the workbook is larger than the endpoint allows")]
+    TooLarge,
+    /// The zip writer failed, which for an in-memory cursor means the machine did.
+    #[error("the workbook does not serialize: {0}")]
+    Io(#[from] std::io::Error),
+    /// The archive itself could not be written.
+    #[error("the workbook archive does not close: {0}")]
+    Zip(#[from] zip::result::ZipError),
 }
 
 /// The `data` sheet: the header row, then one row per entity.
-fn data_sheet(table: &Table) -> String {
+///
+/// Checked per row like the CSV writer's, so a sheet past the ceiling is refused rather than
+/// built whole and measured afterwards — the XML is the largest thing a workbook holds.
+fn data_sheet(table: &Table, limits: &Limits) -> Result<String, XlsxError> {
     let mut rows = String::new();
     let header: Vec<Value> = table
         .columns
@@ -347,8 +375,11 @@ fn data_sheet(table: &Table) -> String {
     sheet_row(&mut rows, 1, &header);
     for (index, row) in table.rows.iter().enumerate() {
         sheet_row(&mut rows, index as u32 + 2, row);
+        if rows.len() as u64 > limits.max_bytes {
+            return Err(XlsxError::TooLarge);
+        }
     }
-    sheet(&rows)
+    Ok(sheet(&rows))
 }
 
 /// The `metadata` sheet: one `key,value` pair per row, so the file says what produced it.

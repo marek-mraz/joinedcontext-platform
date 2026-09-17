@@ -58,6 +58,14 @@ const SAFE: &[Method] = &[Method::GET, Method::HEAD, Method::OPTIONS];
 /// page fits comfortably inside `MAX_BODY` whatever the entities look like.
 const PAGE: usize = 1_000;
 
+/// The most broker JSON one `file.*` download may read before it is refused (T-0810).
+///
+/// The row ceiling bounds how many entities a download holds, not how large they are, and the
+/// gateway holds the JSON, the flattened table and the file at once. This is the memory the
+/// shared enforcement point will spend on one caller; an endpoint's own `maxFileBytes` bounds
+/// the file, which is a different and usually smaller number.
+const MAX_COLLECTED: u64 = 64 * 1024 * 1024;
+
 /// The deepest offset a paging parameter may name (T-0809).
 ///
 /// A hundred pages is further than any client of this surface pages, and it is the ceiling on
@@ -1951,8 +1959,9 @@ async fn tabular_download(
     let (body, media, extension) = match representation {
         Representation::Xlsx => {
             let metadata = workbook_metadata(&endpoint, &params, table.len());
-            match tabular::xlsx(&table, &metadata) {
+            match tabular::xlsx(&table, &metadata, &limits) {
                 Ok(bytes) => (Body::from(bytes), tabular::XLSX_MEDIA_TYPE, "xlsx"),
+                Err(tabular::XlsxError::TooLarge) => return too_large(),
                 Err(error) => {
                     tracing::error!(%error, "the workbook does not serialize");
                     return ProblemDetails::internal().into_response();
@@ -2193,6 +2202,7 @@ async fn paged_entities(
     let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
 
     let mut collected: Vec<Value> = Vec::new();
+    let mut held = 0u64;
     let mut offset = 0usize;
     loop {
         let target = format!("/ngsi-ld/v1/entities?{narrowed}&limit={PAGE}&offset={offset}");
@@ -2223,11 +2233,16 @@ async fn paged_entities(
         };
 
         let fetched = page.len();
+        // What the broker sent, whether or not the entity survives the grants: it was read,
+        // parsed and held either way, and this is a ceiling on the gateway's memory rather
+        // than a statement about the file (T-0810). A download past it is refused, because a
+        // 413 is a better answer than the 500 an out-of-memory gateway gives everyone.
+        held += bytes.len() as u64;
         collected.extend(page.into_iter().filter(|entity| {
             projection::permitted(entity, &constraints.id_patterns)
                 && areas.as_ref().is_none_or(|areas| areas.admits(entity))
         }));
-        if collected.len() as u64 > wanted {
+        if collected.len() as u64 > wanted || held > MAX_COLLECTED {
             return Err(Box::new(too_large()));
         }
         // A short page is the last page; a full one may not be.
