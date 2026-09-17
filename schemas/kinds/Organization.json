@@ -336,6 +336,15 @@
           "default": "org-admin",
           "description": "Who may open a project: `anyone`, `group:<name>` or `org-admin` (PF-65)."
         },
+        "nameCooldownDays": {
+          "description": "How long a deleted project's name stays reserved, in days (PF-78). Absent is [`DEFAULT_NAME_COOLDOWN_DAYS`]; `0` frees the name the moment the project is gone.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "quota": {
           "anyOf": [
             {

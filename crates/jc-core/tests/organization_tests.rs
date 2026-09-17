@@ -229,6 +229,27 @@ fn the_projects_policy_defaults_and_parses() {
     assert_eq!(again.spec.projects, org.spec.projects);
 }
 
+/// PF-78: how long a deleted project's name stays reserved is the organization's, and an
+/// organization that says nothing gets the 30 days the platform ships.
+#[test]
+fn the_name_cooling_period_defaults_to_thirty_days_and_is_read_from_the_manifest() {
+    use jc_core::kinds::DEFAULT_NAME_COOLDOWN_DAYS;
+
+    let org = Organization::from_yaml(GOLDEN).expect("parse");
+    assert_eq!(org.spec.projects.name_cooldown_days, None);
+    assert_eq!(org.spec.projects.name_cooldown_days(), 30);
+    assert_eq!(DEFAULT_NAME_COOLDOWN_DAYS, 30);
+
+    let written = GOLDEN.replace(
+        "  contacts:",
+        "  projects:\n    nameCooldownDays: 0\n  contacts:",
+    );
+    let org = Organization::from_yaml(&written).expect("parse with a cooling period");
+    org.validate().expect("valid");
+    // Zero is a choice, not an absence: the name is free the moment the project is gone.
+    assert_eq!(org.spec.projects.name_cooldown_days(), 0);
+}
+
 /// An unknown value is refused rather than read as a default, so a typo in the one setting
 /// that decides who may open a project cannot open it to everyone.
 #[test]

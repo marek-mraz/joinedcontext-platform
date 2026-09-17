@@ -83,7 +83,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Where a `secretRef` is resolved in this environment; a backend, never a value (CC-75)."
         }
       },
       "type": "object"

@@ -61,7 +61,9 @@ pub use mapping::{
     VocabularyAlignment,
 };
 pub use model_projection::{ModelProjectionSpec, ProjectedClass, ProjectionFilter};
-pub use organization::{Contact, ContactRole, OrganizationSpec};
+pub use organization::{
+    Contact, ContactRole, OrganizationSpec, ProjectsPolicy, DEFAULT_NAME_COOLDOWN_DAYS,
+};
 pub use pipeline::{
     is_scheduled, Compute, ComputeKind, Output, OutputMode, PipelineClass, PipelineQuotas,
     PipelineSource, PipelineSpec, SourceQuery, SubscriptionTrigger, TemporalWindow, Trigger,

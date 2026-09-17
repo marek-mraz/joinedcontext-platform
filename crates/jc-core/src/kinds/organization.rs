@@ -44,6 +44,21 @@ pub struct ProjectsPolicy {
     /// value in the yellow lane; raising one above this is the red lane and an `org-admin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota: Option<crate::kinds::Quotas>,
+    /// How long a deleted project's name stays reserved, in days (PF-78). Absent is
+    /// [`DEFAULT_NAME_COOLDOWN_DAYS`]; `0` frees the name the moment the project is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_cooldown_days: Option<u32>,
+}
+
+/// How long a deleted project's name stays reserved when the organization sets no period (PF-78).
+pub const DEFAULT_NAME_COOLDOWN_DAYS: u32 = 30;
+
+impl ProjectsPolicy {
+    /// The cooling period in force: what the organization set, else the default (PF-78).
+    pub fn name_cooldown_days(&self) -> u32 {
+        self.name_cooldown_days
+            .unwrap_or(DEFAULT_NAME_COOLDOWN_DAYS)
+    }
 }
 
 /// Who may open a project (PF-65). `group:<name>` names a `Group` of the organization.
