@@ -103,7 +103,43 @@ def as_path(source: str | Path) -> Iterator[str]:
 def load(source: str | Path) -> SchemaView:
     """Read a LinkML schema from a file path or from the YAML text itself."""
     with as_path(source) as path:
-        return _view(path)
+        view = _view(path)
+    check_unit_prefixes(view)
+    return view
+
+
+def check_unit_prefixes(view: SchemaView) -> None:
+    """Refuse a unit mapping whose prefix the model never declared (DM-59).
+
+    A unit says two things: the UN/CEFACT code NGSI-LD puts on the wire, and the QUDT IRI a
+    federated reader resolves to align two organisations' measurements. Both travel as CURIEs
+    in `exact_mappings` and `has_quantity_kind`, and a CURIE whose prefix is not in the model
+    is a dangling string in every artifact that carries it — the JSON Schema's `x-unit`, the
+    documentation table, the RDF. It is caught here rather than by whoever dereferences it.
+    """
+    declared = set(view.schema.prefixes or {})
+    dangling: list[str] = []
+    for slot in view.all_slots().values():
+        unit = getattr(slot, "unit", None)
+        if unit is None:
+            continue
+        curies = list(getattr(unit, "exact_mappings", None) or [])
+        kind = getattr(unit, "has_quantity_kind", None)
+        if kind:
+            curies.append(str(kind))
+        for curie in curies:
+            # An absolute IRI needs no prefix; a CURIE is `prefix:reference`.
+            if "://" in curie or ":" not in curie:
+                continue
+            prefix = curie.split(":", 1)[0]
+            if prefix not in declared:
+                dangling.append(f"'{slot.name}' → {curie}")
+    if dangling:
+        raise ModelError(
+            "these unit mappings use a prefix the model does not declare, so the CURIE "
+            "resolves to nothing wherever the artifacts carry it; add it to `prefixes`: "
+            + "; ".join(sorted(dangling))
+        )
 
 
 def _view(path: str) -> SchemaView:
@@ -176,11 +212,22 @@ def unit_of(slot: SlotDefinition) -> dict[str, Any] | None:
         "ucumCode": getattr(unit, "ucum_code", None),
         "symbol": getattr(unit, "symbol", None),
         "descriptiveName": getattr(unit, "descriptive_name", None),
-        # The CEFACT common code travels in exact_mappings, per DM-06.
+        # The CEFACT common code and the QUDT unit IRI travel side by side in exact_mappings:
+        # the first is what NGSI-LD puts on the wire as `unitCode`, the second is what a
+        # federated reader dereferences to align two organisations' measurements (DM-06,
+        # DM-59).
         "exactMappings": list(getattr(unit, "exact_mappings", None) or []),
+        # The dimension, which is what makes two units comparable at all: degrees Celsius and
+        # degrees Fahrenheit are the same quantity kind, and micrograms per cubic metre are not.
+        "hasQuantityKind": _text(getattr(unit, "has_quantity_kind", None)),
     }
     present = {k: v for k, v in fields.items() if v}
     return present or None
+
+
+def _text(value: Any) -> str | None:
+    """A LinkML `uriorcurie` as plain text, which is what an artifact carries."""
+    return str(value) if value else None
 
 
 def slots_of(view: SchemaView, cls: ClassDefinition) -> list[SlotDefinition]:

@@ -67,7 +67,45 @@ UNITS = {
 UNIT_UCUM = {
     "GQ": "ug/m3", "M1": "mg/L", "CEL": "Cel", "P1": "%", "MTR": "m", "KMT": "km", "MTS": "m/s",
     "KMH": "km/h", "SEC": "s", "HUR": "h", "KGM": "kg", "TNE": "t", "LTR": "L", "MTQ": "m3",
-    "KWH": "kW.h", "WTT": "W", "A24": "cd/m2", "2N": "dB", "HPA": "hPa",
+    "KWH": "kW.h", "WTT": "W", "A24": "cd/m2", "2N": "dB", "HPA": "hPa", "C62": "1",
+}
+
+#: The QUDT anchor of each unit (DM-59): the unit IRI a federated reader dereferences, and the
+#: quantity kind that says what dimension is being measured, so two organisations' measurements
+#: can be aligned instead of two opaque codes compared. Read out of QUDT's own vocabulary by
+#: `qudt:ucumCode`, never written from memory — `ug/m3` is `MassDensity` to QUDT and not the
+#: `MassConcentration` a person would guess. The editor's `UNIT_CODES` carries the same table for
+#: the picker (`ui/src/pages/models/linkml.ts`, in the other repository); nothing can compare the
+#: two from inside one checkout, so a code added here belongs there in the same change.
+UNIT_QUDT = {
+    "GQ": ("MicroGM-PER-M3", "MassDensity"),
+    "M1": ("MilliGM-PER-L", "MassConcentration"),
+    "CEL": ("DEG_C", "Temperature"),
+    "P1": ("PERCENT", "DimensionlessRatio"),
+    "MTR": ("M", "Length"),
+    "KMT": ("KiloM", "Length"),
+    "MTS": ("M-PER-SEC", "Speed"),
+    "KMH": ("KiloM-PER-HR", "LinearVelocity"),
+    "SEC": ("SEC", "Time"),
+    "HUR": ("HR", "Time"),
+    "KGM": ("KiloGM", "Mass"),
+    "TNE": ("TONNE", "Mass"),
+    "LTR": ("L", "Volume"),
+    "MTQ": ("M3", "Volume"),
+    "KWH": ("KiloW-HR", "Energy"),
+    "WTT": ("W", "Power"),
+    "A24": ("CD-PER-M2", "Luminance"),
+    "2N": ("DeciB", "SoundPressureLevel"),
+    "HPA": ("HectoPA", "ForcePerArea"),
+    "C62": ("NUM", "Dimensionless"),
+}
+
+#: The namespaces the unit mappings cite. Declared on every inferred model that carries a unit,
+#: because a CURIE under an undeclared prefix dangles in every artifact (DM-59).
+UNIT_PREFIXES = {
+    "ucefact": "https://vocabulary.uncefact.org/UnitMeasureCode#",
+    "qudt-unit": "http://qudt.org/vocab/unit/",
+    "qudt-quantkind": "http://qudt.org/vocab/quantitykind/",
 }
 LATITUDES = {"lat", "latitude", "y"}
 LONGITUDES = {"lon", "lng", "long", "longitude", "x"}
@@ -439,7 +477,12 @@ def infer(
             if column.get("kind"):
                 definition["annotations"] = {"ngsi_ld_kind": column["kind"]}
             if unit:
-                definition["unit"] = {"ucum_code": UNIT_UCUM[unit], "exact_mappings": [f"ucefact:{unit}"]}
+                qudt_unit, quantity_kind = UNIT_QUDT[unit]
+                definition["unit"] = {
+                    "ucum_code": UNIT_UCUM[unit],
+                    "exact_mappings": [f"ucefact:{unit}", f"qudt-unit:{qudt_unit}"],
+                    "has_quantity_kind": f"qudt-quantkind:{quantity_kind}",
+                }
             models = index.get(slot) or []
             if models:
                 subject = models[0].split("/")[0]
@@ -472,6 +515,8 @@ def infer(
     prefixes = {"linkml": "https://w3id.org/linkml/"}
     if matches:
         prefixes["sdm"] = SDM_NAMESPACE
+    if any("unit" in definition for definition in slots.values()):
+        prefixes.update(UNIT_PREFIXES)
     stem = _class_name(PurePosixPath(name).stem)
     document = {
         "id": f"https://example.org/models/{stem}",

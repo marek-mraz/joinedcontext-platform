@@ -76,7 +76,7 @@ def test_a_header_becomes_a_name_and_keeps_its_text_as_the_title():
     slots = slots_of(answer)
     assert list(slots) == ["b_Temp_b", "_2nd_reading", "temperature"]
     assert slots["b_Temp_b"]["title"] == {"en": "<b>Temp</b> (°C)"}
-    assert slots["b_Temp_b"]["unit"]["exact_mappings"] == ["ucefact:CEL"]
+    assert slots["b_Temp_b"]["unit"]["exact_mappings"] == ["ucefact:CEL", "qudt-unit:DEG_C"]
     titles = [op for op in answer["operations"] if op["op"] == "setTitle"]
     assert titles[0] == {"op": "setTitle", "target": "slot", "name": "b_Temp_b", "locale": "en", "value": "<b>Temp</b> (°C)"}
     assert all(infer_schema.NAME.match(name) for name in slots)
@@ -87,10 +87,17 @@ def test_units_come_from_the_header_as_cefact_codes():
     answer = infer("u.csv", b"pm10_ugm3,temperature (\xc2\xb0C),speed [km/h],height (m),speed m\n1,2,3,4,5\n")
 
     slots = slots_of(answer)
-    assert slots["pm10"]["unit"] == {"ucum_code": "ug/m3", "exact_mappings": ["ucefact:GQ"]}
-    assert slots["temperature"]["unit"]["exact_mappings"] == ["ucefact:CEL"]
-    assert slots["speed"]["unit"]["exact_mappings"] == ["ucefact:KMH"]
-    assert slots["height"]["unit"]["exact_mappings"] == ["ucefact:MTR"]
+    # The UN/CEFACT code NGSI-LD puts on the wire and the QUDT anchor a federated reader
+    # dereferences, side by side (DM-06, DM-59). `ug/m3` is `MassDensity` to QUDT, which is why
+    # the table is read out of QUDT's own vocabulary rather than written from memory.
+    assert slots["pm10"]["unit"] == {
+        "ucum_code": "ug/m3",
+        "exact_mappings": ["ucefact:GQ", "qudt-unit:MicroGM-PER-M3"],
+        "has_quantity_kind": "qudt-quantkind:MassDensity",
+    }
+    assert slots["temperature"]["unit"]["exact_mappings"] == ["ucefact:CEL", "qudt-unit:DEG_C"]
+    assert slots["speed"]["unit"]["exact_mappings"] == ["ucefact:KMH", "qudt-unit:KiloM-PER-HR"]
+    assert slots["height"]["unit"]["exact_mappings"] == ["ucefact:MTR", "qudt-unit:M"]
     assert "unit" not in slots["speed_m"]
     units = [op for op in answer["operations"] if op["op"] == "setSlot" and op["field"] == "unit"]
     assert [op["value"] for op in units] == ["GQ", "CEL", "KMH", "MTR"]
@@ -321,3 +328,22 @@ def test_the_route_refuses_a_body_past_the_sample_cap_before_reading_it():
 class _Explosive:
     def read(self, *args):  # pragma: no cover - the point is that it never runs
         raise AssertionError("the body was read")
+
+
+def test_the_unit_crosswalk_anchors_every_code_it_offers():
+    """DM-59: a UN/CEFACT code alone resolves to nothing, so every unit the inference can emit
+    carries its QUDT unit and its quantity kind. The editor keeps the same table for the picker
+    (`ui/src/pages/models/linkml.ts`, in the other repository); nothing can compare the two from
+    inside one checkout, so each side guards its own shape and a code added here belongs there
+    in the same change."""
+    from infer_schema import UNIT_PREFIXES, UNIT_QUDT, UNIT_UCUM
+
+    assert set(UNIT_QUDT) == set(UNIT_UCUM), set(UNIT_QUDT) ^ set(UNIT_UCUM)
+    for code, (unit, kind) in UNIT_QUDT.items():
+        assert unit and kind, code
+        # Local names, never IRIs: the prefix is declared once in the model, and a full IRI
+        # here would write it twice and let the two drift.
+        assert ":" not in unit and "://" not in unit, code
+        assert ":" not in kind and "://" not in kind, code
+    # Every prefix the emitted CURIEs use, so `check_unit_prefixes` has something to find.
+    assert {"ucefact", "qudt-unit", "qudt-quantkind"} <= set(UNIT_PREFIXES)

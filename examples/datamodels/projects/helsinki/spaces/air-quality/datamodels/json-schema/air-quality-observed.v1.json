@@ -61,8 +61,10 @@
           "x-ngsi-ld-kind": "Property",
           "x-unit": {
             "exactMappings": [
-              "unece:GQ"
+              "unece:GQ",
+              "qudt-unit:MicroGM-PER-M3"
             ],
+            "hasQuantityKind": "qudt-quantkind:MassDensity",
             "symbol": "µg/m³",
             "ucumCode": "ug/m3"
           }
@@ -95,8 +97,10 @@
           "x-ngsi-ld-kind": "Property",
           "x-unit": {
             "exactMappings": [
-              "unece:CEL"
+              "unece:CEL",
+              "qudt-unit:DEG_C"
             ],
+            "hasQuantityKind": "qudt-quantkind:Temperature",
             "symbol": "°C",
             "ucumCode": "Cel"
           }

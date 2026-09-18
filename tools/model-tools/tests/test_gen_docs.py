@@ -29,7 +29,9 @@ def test_every_attribute_carries_its_ngsi_ld_kind_and_its_unit(senzor):
 
     # The two columns `gen-doc` does not render, and the reason this generator exists.
     assert "| Property |" in temperature
-    assert "°C (unece:CEL)" in temperature
+    # Both mappings: the UN/CEFACT code a reader puts on the wire, and the QUDT unit a reader
+    # dereferences to align it with somebody else's (DM-06, DM-59).
+    assert "°C (unece:CEL, qudt-unit:DEG_C)" in temperature
     assert "| yes |" in temperature
 
     kinds = {row.split("|")[1].strip().strip("`"): row.split("|")[2].strip() for row in rows}

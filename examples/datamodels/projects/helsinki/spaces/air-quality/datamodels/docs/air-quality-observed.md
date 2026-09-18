@@ -22,8 +22,8 @@ Specialises `Entity`.
 | Attribute | NGSI-LD kind | Range | Required | Unit | IRI | Description |
 |---|---|---|---|---|---|---|
 | `dateObserved` | Property | `datetime` | yes |  | `hel:dateObserved` | When the reading was taken. |
-| `pm25` | Property | `float` | yes | µg/m³ (unece:GQ) | `hel:pm25` | Mass concentration of particles smaller than 2.5 micrometres. |
-| `temperature` | Property | `float` |  | °C (unece:CEL) | `hel:temperature` | Air temperature at the station. |
+| `pm25` | Property | `float` | yes | µg/m³ (unece:GQ, qudt-unit:MicroGM-PER-M3) | `hel:pm25` | Mass concentration of particles smaller than 2.5 micrometres. |
+| `temperature` | Property | `float` |  | °C (unece:CEL, qudt-unit:DEG_C) | `hel:temperature` | Air temperature at the station. |
 | `stationName` | LanguageProperty | `string` |  |  | `hel:stationName` | What the station is called, per locale. |
 | `refStation` | Relationship | `string` |  |  | `hel:refStation` | The station that produced the reading. |
 | `id` | Property | `string` | yes |  | `ngsi-ld:hasId` | The entity id, urn:ngsi-ld:{Type}:{orgDomain}:{space}:{localId}. |
