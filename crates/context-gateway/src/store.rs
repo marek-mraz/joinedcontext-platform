@@ -47,6 +47,51 @@ pub fn load(
     ))
 }
 
+/// [`load`], plus every preview under `previews` rendered with its prefix (CC-78). A preview
+/// that does not render is left out with the reason in the log; a slug or a space `main`
+/// already serves is never taken over by one.
+#[allow(clippy::type_complexity)]
+pub fn load_with_previews(
+    dir: &Path,
+    previews: Option<&Path>,
+) -> Result<
+    (
+        Vec<Endpoint>,
+        Vec<Space>,
+        ServiceAccounts,
+        Federations,
+        Agreements,
+    ),
+    jcctl::LoadError,
+> {
+    let (mut endpoints, mut spaces, accounts, federations, agreements) = load(dir)?;
+    let environment = std::env::var("JC_ENVIRONMENT")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    for (prefix, root) in previews.map(crate::previews::listed).unwrap_or_default() {
+        let repo = match Repository::load_preview(&root, environment.as_deref(), &prefix) {
+            Ok(repo) => repo,
+            Err(error) => {
+                tracing::warn!(%prefix, %error, "the preview does not render and is not served");
+                continue;
+            }
+        };
+        let slugs: BTreeSet<String> = endpoints.iter().map(|e| e.slug.clone()).collect();
+        let segments: BTreeSet<String> = spaces.iter().map(|s| s.endpoint.space.clone()).collect();
+        endpoints.extend(
+            endpoints_with_models(&repo, Some(&root))
+                .into_iter()
+                .filter(|endpoint| !slugs.contains(&endpoint.slug)),
+        );
+        spaces.extend(
+            spaces_of(&repo, Some(&root))
+                .into_iter()
+                .filter(|space| !segments.contains(&space.endpoint.space)),
+        );
+    }
+    Ok((endpoints, spaces, accounts, federations, agreements))
+}
+
 /// The endpoint table a loaded repository describes.
 ///
 /// Deterministic: the repository is indexed by resource identity, so two runs on the same

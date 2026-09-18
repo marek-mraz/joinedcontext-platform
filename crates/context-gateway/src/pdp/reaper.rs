@@ -31,6 +31,7 @@ pub const INTERVAL: Duration = Duration::from_secs(1);
 pub struct Reaper {
     gateway: Arc<Gateway>,
     dir: PathBuf,
+    previews: Option<PathBuf>,
     seen: Option<Fingerprint>,
 }
 
@@ -51,7 +52,16 @@ impl Reaper {
             seen: fingerprint(&dir),
             gateway,
             dir,
+            previews: None,
         }
+    }
+
+    /// Follows the workspace previews under `dir` too (Architecture/06 §7.2).
+    pub fn with_previews(mut self, dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        self.seen = combined(&self.dir, Some(&dir));
+        self.previews = Some(dir);
+        self
     }
 
     /// Re-reads the repository if it changed, and swaps both tables if it loaded.
@@ -59,7 +69,7 @@ impl Reaper {
     /// Returns whether anything was swapped, which is what the tests assert on and what
     /// the log line reports.
     pub fn tick(&mut self) -> bool {
-        let current = fingerprint(&self.dir);
+        let current = combined(&self.dir, self.previews.as_deref());
         if current.is_none() {
             // The directory went away: keep serving, say so once per tick.
             tracing::warn!(dir = %self.dir.display(), "the manifest repository is unreadable");
@@ -68,7 +78,7 @@ impl Reaper {
         if current == self.seen {
             return false;
         }
-        match store::load(&self.dir) {
+        match store::load_with_previews(&self.dir, self.previews.as_deref()) {
             Ok((endpoints, spaces, accounts, federations, agreements)) => {
                 let counts = (endpoints.len(), spaces.len(), accounts.len());
                 // The endpoint table carries the policies, so replacing it purges every
@@ -120,6 +130,16 @@ impl Reaper {
 
 /// The manifest files under `dir` with their sizes and modification times, or `None` when
 /// the directory cannot be read at all.
+/// The repository's fingerprint with the previews' after it; previews that cannot be read
+/// count as none, so the repository alone still reloads.
+fn combined(dir: &Path, previews: Option<&Path>) -> Option<Fingerprint> {
+    let mut all = fingerprint(dir)?;
+    if let Some(more) = previews.and_then(fingerprint) {
+        all.extend(more);
+    }
+    Some(all)
+}
+
 fn fingerprint(dir: &Path) -> Option<Fingerprint> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];

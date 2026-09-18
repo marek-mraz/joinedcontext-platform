@@ -18,6 +18,12 @@ pub struct Config {
     /// The manifest repository the endpoint table is built from
     /// (`JC_GATEWAY_REPO_DIR`); absent means an empty table until one is loaded.
     pub repo_dir: Option<PathBuf>,
+    /// The Portal's list of running workspace previews (`JC_GATEWAY_PREVIEWS_URL`, its
+    /// internal listener's `/internal/previews`); absent serves `main` alone (CC-78).
+    pub previews_url: Option<String>,
+    /// Where the previews are written (`JC_GATEWAY_PREVIEWS_DIR`, default
+    /// `/tmp/jc-previews`), a scratch directory the pod owns.
+    pub previews_dir: PathBuf,
     /// The organization's verified domain, the middle segment of every entity URN
     /// (`JC_GATEWAY_ORG_DOMAIN`).
     pub org_domain: String,
@@ -93,6 +99,13 @@ impl Config {
             bind,
             broker_url,
             repo_dir: std::env::var("JC_GATEWAY_REPO_DIR").ok().map(PathBuf::from),
+            previews_url: std::env::var("JC_GATEWAY_PREVIEWS_URL")
+                .ok()
+                .filter(|url| !url.trim().is_empty()),
+            previews_dir: std::env::var("JC_GATEWAY_PREVIEWS_DIR")
+                .ok()
+                .filter(|dir| !dir.trim().is_empty())
+                .map_or_else(|| PathBuf::from("/tmp/jc-previews"), PathBuf::from),
             org_domain,
             oidc_issuer,
             oidc_jwks_url,

@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod middleware;
 pub mod operations;
 pub mod pdp;
+pub mod previews;
 pub mod proxy;
 pub mod query;
 pub mod resolver;

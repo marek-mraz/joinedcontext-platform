@@ -108,7 +108,18 @@ async fn main() -> ExitCode {
     // rather than read once: a revoked Policy or ServiceAccount stops granting within a
     // second, without a restart (R48, EP-19, OPS-45).
     if let Some(dir) = config.repo_dir.clone() {
-        tokio::spawn(context_gateway::pdp::reaper::Reaper::new(Arc::clone(&gateway), dir).run());
+        let reaper = context_gateway::pdp::reaper::Reaper::new(Arc::clone(&gateway), dir);
+        // Workspace previews ride the same reload: the poller writes, the reaper loads
+        // (Architecture/06 §7.2).
+        let reaper = match config.previews_url.clone() {
+            Some(url) => {
+                let mirror = context_gateway::previews::Mirror::new(config.previews_dir.clone());
+                tokio::spawn(mirror.follow(url));
+                reaper.with_previews(config.previews_dir.clone())
+            }
+            None => reaper,
+        };
+        tokio::spawn(reaper.run());
     }
 
     let app = router(gateway).layer(tower_http::trace::TraceLayer::new_for_http());

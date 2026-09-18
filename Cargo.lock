@@ -557,6 +557,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "rcgen",
  "regex",
+ "reqwest",
  "ring",
  "rustls",
  "rustls-pki-types",

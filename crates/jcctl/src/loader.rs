@@ -545,6 +545,27 @@ pub(crate) fn walk_files(root: &Path) -> Result<Vec<walkdir::DirEntry>, LoadErro
     Ok(entries)
 }
 
+/// The slug a preview Endpoint answers on: the first 160 bits of SHA-256 over the prefix and
+/// the origin's slug, in lowercase base32, so it is opaque like every slug (EP-02), the same on
+/// every render and never the origin's (Architecture/06 §7.2).
+pub fn preview_slug(prefix: &str, slug: &str) -> String {
+    use sha2::{Digest, Sha256};
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let digest = Sha256::digest(format!("{prefix}{slug}").as_bytes());
+    let mut bits = 0u32;
+    let mut held = 0u32;
+    let mut out = String::with_capacity(32);
+    for byte in &digest[..20] {
+        bits = (bits << 8) | u32::from(*byte);
+        held += 8;
+        while held >= 5 {
+            held -= 5;
+            out.push(char::from(ALPHABET[((bits >> held) & 31) as usize]));
+        }
+    }
+    out
+}
+
 impl Repository {
     /// Loads and indexes an organization repository from a directory path (CC-08, MF-06),
     /// rendered with the environment `JC_ENVIRONMENT` names (CC-73).
@@ -592,6 +613,15 @@ impl Repository {
             if id.kind == "Project" {
                 id.name = prefixed(&id.name);
                 loaded.manifest.metadata.name = id.name.clone();
+            }
+            // A slug is unique in the organization too: the preview's Endpoint answers beside
+            // the origin's, never in its place.
+            if id.kind == "Endpoint" {
+                if let Some(slug) = loaded.manifest.spec.get_mut("slug") {
+                    if let Some(text) = slug.as_str() {
+                        *slug = serde_json::Value::String(preview_slug(prefix, text));
+                    }
+                }
             }
             if id.kind == "ContextSpace" {
                 if let Some(pin) = loaded.manifest.spec.get_mut("urnSegment") {

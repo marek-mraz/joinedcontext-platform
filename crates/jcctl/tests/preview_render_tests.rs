@@ -121,3 +121,39 @@ fn preview_render_refuses_unprefixed_name() {
     assert!(err.to_string().contains("helsinki-hub"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_preview_endpoint_answers_on_a_minted_slug_of_its_own() {
+    let dir = repo("slug");
+    let origin = "scsd2eehkx42n53z2zyd6vshfh7s7irf";
+    let preview = Repository::load_preview(&dir, None, "ws-demo-").expect("the preview renders");
+    let slug = preview
+        .get(&id("Endpoint", "ws-demo-helsinki", "all"))
+        .unwrap()
+        .manifest
+        .spec["slug"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(slug, origin);
+    assert_eq!(
+        slug,
+        jcctl::loader::preview_slug("ws-demo-", origin),
+        "the same on every render"
+    );
+    assert_ne!(
+        slug,
+        jcctl::loader::preview_slug("ws-other-", origin),
+        "one per workspace"
+    );
+    jc_core::kinds::EndpointSlug::new(&slug).expect("opaque base32 like every slug (EP-02)");
+    // The ordinary load keeps the origin's slug.
+    let main = Repository::load_preview(&dir, None, "").unwrap();
+    assert_eq!(
+        main.get(&id("Endpoint", "helsinki", "all"))
+            .unwrap()
+            .manifest
+            .spec["slug"],
+        origin
+    );
+}
