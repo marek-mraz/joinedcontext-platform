@@ -966,6 +966,126 @@ mod request_bodies {
     }
 }
 
+/// T-1074, AG-40/AG-52: a header the workspace sets does not reach the gateway. The run's own
+/// ticket is the only identity on that hop, so a workspace that writes `authorization`,
+/// `ngsild-tenant` or the edge's own `x-userinfo` must have them dropped, not forwarded.
+#[tokio::test]
+async fn a_header_the_workspace_wrote_never_reaches_the_gateway() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let gateway = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/api/endpoint/scsd2eehkx42n53z2zyd6vshfh7s7irf/ngsi-ld/v1/entities",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&gateway)
+        .await;
+
+    let app = router(test_state_with_gateway(
+        sample_run(false, "building"),
+        &gateway.uri(),
+    ));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/data/ngsi-ld/v1/entities?type=Vehicle")
+                .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+                .header("x-jc-ticket", "secret-ticket-123")
+                // What a workspace might try: somebody else's session, another tenant, the
+                // edge's own identity headers, and a scope it was never granted.
+                .header("authorization", "Bearer somebody-elses-token")
+                .header("cookie", "jc_session=someone")
+                .header("ngsild-tenant", "another-space")
+                .header("x-userinfo", "eyJzdWIiOiJtYWxsb3J5In0=")
+                .header("x-access-token", "another-token")
+                .header("x-allowed-scope-ids", "*")
+                .header("x-endpoint-slug", "some-other-endpoint")
+                .header("x-consumer-identity", "mallory")
+                .header("accept", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let seen = gateway.received_requests().await.unwrap_or_default();
+    assert_eq!(seen.len(), 1);
+    let sent = &seen[0].headers;
+    // The proxy's own bearer is there, and it is the only authorization.
+    assert_eq!(
+        sent.get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer mock-token-for-scsd2eehkx42n53z2zyd6vshfh7s7irf")
+    );
+    for dropped in [
+        "cookie",
+        "ngsild-tenant",
+        "x-userinfo",
+        "x-access-token",
+        "x-allowed-scope-ids",
+        "x-endpoint-slug",
+        "x-consumer-identity",
+    ] {
+        assert!(
+            sent.get(dropped).is_none(),
+            "the workspace's `{dropped}` reached the gateway"
+        );
+    }
+    // A header that is nobody's identity travels, so this is a list and not a wall.
+    assert!(sent.get("accept").is_some());
+}
+
+/// The forge hop carries no client header at all: the request is built from the method, the URL
+/// and the proxy's own forge token, so there is nothing of the workspace's on it to strip.
+#[tokio::test]
+async fn the_forge_request_is_the_proxys_own_and_carries_nothing_of_the_workspaces() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let forge = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "content": "" })),
+        )
+        .expect(1)
+        .mount(&forge)
+        .await;
+
+    let app = router(test_state_with_forge(
+        sample_run(false, "building"),
+        &forge.uri(),
+    ));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/forge/contents/projects/helsinki/apps/bikes/README.md")
+                .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+                .header("x-jc-ticket", "secret-ticket-123")
+                .header("authorization", "Bearer somebody-elses-token")
+                .header("cookie", "jc_session=someone")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let seen = forge.received_requests().await.unwrap_or_default();
+    assert_eq!(seen.len(), 1);
+    let sent = &seen[0].headers;
+    assert!(
+        sent.get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("token ")),
+        "the forge sees the proxy's own token and not a bearer somebody wrote"
+    );
+    assert!(sent.get("cookie").is_none());
+}
+
 /// T-0957, AG-40/AG-56: an event is the model's own words, and a credential that slips into
 /// them is stored, streamed to every reader of the run and put back in front of the model.
 /// The proxy redacts before the Portal ever sees it, as it does on the diagnostics door.
