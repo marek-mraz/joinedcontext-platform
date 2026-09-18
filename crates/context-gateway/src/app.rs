@@ -602,13 +602,18 @@ async fn serve_ngsi_ld(
             return ProblemDetails::from(refusal).into_response();
         }
         // A write to an id outside the grant's types and patterns is refused here, before a
-        // body is read (T-0806, GW11, R24); a read is narrowed by the PDP and answered by
-        // the broker, so a miss stays a miss (R20).
+        // body is read (T-0806, GW11, R24).
         if operation.is_write() {
             if let Err(refusal) = write_guard::check_granted_id(&id, &constraints) {
                 tracing::info!(slug = %endpoint.slug, %refusal, "write refused");
                 return ProblemDetails::from(refusal).into_response();
             }
+        } else if write_guard::check_granted_id(&id, &constraints).is_err() {
+            // A read of an id the grant does not select is the same miss an unknown id is, and
+            // the broker is not asked at all: a retrieve carries no type, so asking would mean
+            // trusting the answer, and asking alone would tell the caller the type exists
+            // (EP-26, R20, T-2130).
+            return ProblemDetails::not_found().into_response();
         }
     }
 
@@ -946,7 +951,16 @@ async fn project_answer(
             .headers
             .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
     }
-    if operation.is_write() || !parts.status.is_success() {
+    if operation.is_write() {
+        return Response::from_parts(parts, body);
+    }
+    if !parts.status.is_success() {
+        // A read the grants do not reach is answered with the gateway's own miss, so the
+        // broker's wording — which names the id it could not find — cannot be told apart from
+        // a refusal (R20, T-2130). Every other status is the broker's to explain.
+        if parts.status == StatusCode::NOT_FOUND {
+            return ProblemDetails::not_found().into_response();
+        }
         return Response::from_parts(parts, body);
     }
 
@@ -964,13 +978,13 @@ async fn project_answer(
     match &mut payload {
         Value::Array(entities) => {
             entities.retain(|entity| {
-                projection::permitted(entity, &constraints.id_patterns)
+                projection::permitted(entity, constraints)
                     && areas.as_ref().is_none_or(|areas| areas.admits(entity))
             });
             projection::project(&mut payload, &constraints.attrs, &constraints.hidden);
         }
         entity if entity.is_object() && entity.get("id").is_some() => {
-            if !projection::permitted(entity, &constraints.id_patterns)
+            if !projection::permitted(entity, constraints)
                 || !areas.as_ref().is_none_or(|areas| areas.admits(entity))
             {
                 return ProblemDetails::not_found().into_response();
@@ -1775,7 +1789,7 @@ async fn query_entities(
     let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
     if let Value::Array(list) = &mut entities {
         list.retain(|entity| {
-            projection::permitted(entity, &constraints.id_patterns)
+            projection::permitted(entity, &constraints)
                 && areas.as_ref().is_none_or(|areas| areas.admits(entity))
         });
     }
@@ -1855,7 +1869,7 @@ async fn query_temporal(
     }
 
     let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
-    if !projection::permitted(&entity, &constraints.id_patterns)
+    if !projection::permitted(&entity, &constraints)
         || !areas.as_ref().is_none_or(|areas| areas.admits(&entity))
     {
         return Ok((Value::Null, constraints.restricted));
@@ -2306,7 +2320,7 @@ async fn paged_entities(
         // 413 is a better answer than the 500 an out-of-memory gateway gives everyone.
         held += bytes.len() as u64;
         collected.extend(page.into_iter().filter(|entity| {
-            projection::permitted(entity, &constraints.id_patterns)
+            projection::permitted(entity, &constraints)
                 && areas.as_ref().is_none_or(|areas| areas.admits(entity))
         }));
         if collected.len() as u64 > wanted || held > MAX_COLLECTED {

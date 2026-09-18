@@ -102,7 +102,7 @@ pub fn check_granted_id(raw: &str, constraints: &Constraints) -> Result<(), Refu
     if !constraints.types.is_empty() && !constraints.types.contains(urn.entity_type()) {
         return Err(Refusal::TypeOutsideGrant(urn.entity_type().to_owned()));
     }
-    if !crate::pdp::projection::permitted(
+    if !crate::pdp::projection::id_permitted(
         &serde_json::json!({ "id": raw }),
         &constraints.id_patterns,
     ) {

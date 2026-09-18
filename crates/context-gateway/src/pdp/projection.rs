@@ -8,6 +8,7 @@
 //! an entity without them is not an entity; every other member survives only if the
 //! constraint set names it.
 
+use super::evaluator::Constraints;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
@@ -84,14 +85,54 @@ pub fn was_projected(before: &Map<String, Value>, after: &Map<String, Value>) ->
     before.len() != after.len()
 }
 
-/// Whether an entity may be returned at all, given the anchored id patterns of the
-/// matching grants (R24, GW11).
+/// Whether an entity may be returned at all, given the types and the anchored id patterns of
+/// the matching grants (EP-26, R24, GW11).
+///
+/// The one door every read goes through, which is why both halves live here: a query is
+/// narrowed upstream with `?type=`, but a retrieve by id carries no type at all, and a broker
+/// is free to answer an entity of any type it likes. The broker is not the authority on what a
+/// caller may read, so the type of what came back is judged here (T-2130).
+pub fn permitted(entity: &Value, constraints: &Constraints) -> bool {
+    type_granted(entity, &constraints.types) && id_permitted(entity, &constraints.id_patterns)
+}
+
+/// Whether the type the answer declares is one the grants name (EP-26).
+///
+/// An empty set is a grant over every type the endpoint serves. An entity carrying several
+/// types is granted when any one of them is, which is how NGSI-LD multi-typing works: the
+/// grant is a statement about a type, not about a type being the only one. An answer with no
+/// type at all cannot be judged, so under a type grant it is not served.
+fn type_granted(entity: &Value, types: &BTreeSet<String>) -> bool {
+    if types.is_empty() {
+        return true;
+    }
+    let declared = entity.get("type").or_else(|| entity.get("@type"));
+    match declared {
+        Some(Value::String(one)) => types.contains(term(one)),
+        Some(Value::Array(several)) => several
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|one| types.contains(term(one))),
+        _ => false,
+    }
+}
+
+/// The term of a type, whether the answer compacted it or left the IRI expanded.
+///
+/// A broker may answer `https://hel.fi/schema/Depot` where the grant says `Depot`; comparing
+/// the strings as they come would let the expanded form through. Both JSON-LD delimiters are
+/// cut, and a plain term is returned unchanged.
+fn term(iri: &str) -> &str {
+    iri.rsplit(['#', '/']).next().unwrap_or(iri)
+}
+
+/// Whether the entity's id falls inside the anchored id patterns of the matching grants (R24).
 ///
 /// No pattern is no restriction. A pattern that does not compile matches nothing: a
 /// grant the gateway cannot evaluate must not become a grant that lets everything
 /// through. `jcctl validate` and the Portal reject an uncompilable pattern before it is
 /// committed, so this is the second line, not the first.
-pub fn permitted(entity: &Value, id_patterns: &BTreeSet<String>) -> bool {
+pub fn id_permitted(entity: &Value, id_patterns: &BTreeSet<String>) -> bool {
     if id_patterns.is_empty() {
         return true;
     }

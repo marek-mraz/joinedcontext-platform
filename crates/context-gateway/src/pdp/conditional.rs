@@ -165,7 +165,7 @@ pub async fn evaluate(
     // Every granted area, not only the ones a read filters here: this read is a retrieve by
     // id, which carries no `geoQ` at all, so nothing narrowed it upstream (T-0807).
     let areas = geo::Areas::of(&constraints.geo_areas, constraints.geo_caller.as_deref());
-    if !projection::permitted(&read.body, &constraints.id_patterns)
+    if !projection::permitted(&read.body, constraints)
         || !areas.as_ref().is_none_or(|areas| areas.admits(&read.body))
     {
         return Precondition::Refuse(ProblemDetails::not_found());
