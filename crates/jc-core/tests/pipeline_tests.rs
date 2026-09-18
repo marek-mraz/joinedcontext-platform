@@ -47,7 +47,7 @@ fn test_pipeline_smart_meter_mqtt_golden() {
 
     assert_eq!(p1.spec.class, PipelineClass::Resident);
     assert_eq!(
-        p1.spec.target_endpoint.to_string(),
+        p1.spec.target().expect("a target").to_string(),
         "urn:ngsi-ld:Endpoint:banskabystrica.sk:energie:ep-smart-meters"
     );
     assert_eq!(p1.spec.secret_refs.len(), 1);
@@ -101,7 +101,7 @@ fn test_pipeline_district_air_index_daily_golden() {
     assert_eq!(compute.function.as_deref(), Some("process"));
 
     assert_eq!(
-        p2.spec.target_endpoint.to_string(),
+        p2.spec.target().expect("a target").to_string(),
         "urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:ep-derived"
     );
 
@@ -262,9 +262,11 @@ fn test_compute_wasm_and_mapping_rules() {
 #[test]
 fn test_target_endpoint_must_have_endpoint_type() {
     let mut p = Pipeline::from_yaml(GOLDEN_MQTT).expect("golden");
-    p.spec.target_endpoint = "urn:ngsi-ld:Policy:banskabystrica.sk:energie:public-air-quality"
-        .parse::<Urn>()
-        .expect("valid urn");
+    p.spec.target_endpoint = Some(
+        "urn:ngsi-ld:Policy:banskabystrica.sk:energie:public-air-quality"
+            .parse::<Urn>()
+            .expect("valid urn"),
+    );
     assert!(
         p.validate().is_err(),
         "targetEndpoint with non-Endpoint entity type must fail"

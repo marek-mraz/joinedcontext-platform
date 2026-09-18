@@ -454,7 +454,7 @@ impl Repository {
                     }
                 };
 
-                if manifest.api_version != jc_core::API_VERSION {
+                if !jc_core::serves(&manifest.kind, &manifest.api_version) {
                     return Err(LoadError::ApiVersion {
                         path: rel_path,
                         document: chunk.document_index,

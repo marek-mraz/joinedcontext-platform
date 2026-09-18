@@ -367,7 +367,10 @@ fn every_published_example_carries_the_endpoint_its_pipeline_writes_into() {
             .unwrap_or_else(|e| panic!("{example}/endpoint.yaml: {e}"));
 
         let pipeline = pipeline(example);
-        let target = &pipeline.spec.target_endpoint;
+        let target = &pipeline
+            .spec
+            .target()
+            .unwrap_or_else(|| panic!("{example}: the pipeline names no target"));
         assert_eq!(
             target.local_id(),
             endpoint.metadata.name,

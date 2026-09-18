@@ -18,8 +18,9 @@ pub mod registry;
 pub mod urn;
 
 pub use envelope::{
-    annotations, de_api_version, de_kind, validate_locales, Build, Condition, Kind, ObjectMeta,
-    Phase, Ref, ResourceEnvelope, Scope, SecretRef, Status, TypedRef, API_VERSION,
+    annotations, de_api_version, de_api_version_of, de_kind, serves, validate_locales, Build,
+    Condition, Kind, ObjectMeta, Phase, Ref, ResourceEnvelope, Scope, SecretRef, Status, TypedRef,
+    API_VERSION, API_VERSION_V1ALPHA2,
 };
 pub use error::{Error, ProblemDetails, Result, UrnError, PROBLEM_JSON, PROBLEM_TYPE_BASE};
 pub use i18n::{MultiLanguageMap, Text};

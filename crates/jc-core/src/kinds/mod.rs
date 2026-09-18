@@ -3,6 +3,7 @@
 pub mod agent_profile;
 pub mod app;
 pub mod bento_inputs;
+pub mod bento_processors;
 pub mod blueprint;
 pub mod ckan;
 pub mod csr;
@@ -66,8 +67,9 @@ pub use organization::{
     Contact, ContactRole, OrganizationSpec, ProjectsPolicy, DEFAULT_NAME_COOLDOWN_DAYS,
 };
 pub use pipeline::{
-    Compute, ComputeKind, Output, OutputMode, PipelineClass, PipelineQuotas, PipelineSource,
-    PipelineSpec, SourceQuery, SubscriptionTrigger, TemporalWindow, Trigger,
+    Compute, ComputeKind, Output, OutputMode, PipelineClass, PipelineOutput, PipelineQuotas,
+    PipelineSource, PipelineSpec, ProcessorStep, SourceQuery, Step, SubscriptionTrigger,
+    TemporalWindow, Trigger,
 };
 pub use policy::{
     EntitySelector, Operation, OperationGroup, OperationRef, PolicyEffect, PolicySpec, Principal,

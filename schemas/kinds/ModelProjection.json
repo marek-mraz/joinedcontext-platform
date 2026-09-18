@@ -377,7 +377,7 @@
   "description": "Kubernetes-style resource envelope (MF-01..MF-04).",
   "properties": {
     "apiVersion": {
-      "description": "API version (must match [`API_VERSION`]).",
+      "description": "API version: [`API_VERSION`], or a version [`serves`] accepts for this kind.",
       "type": "string"
     },
     "kind": {

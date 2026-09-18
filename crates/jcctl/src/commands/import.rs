@@ -365,7 +365,7 @@ fn documents(source: &Path) -> Result<Vec<(String, String)>, ImportError> {
 
 /// Why a manifest may not be imported at all (MF-24), or `None` when it may.
 fn unacceptable(manifest: &RawManifest) -> Option<String> {
-    if manifest.api_version != API_VERSION {
+    if !jc_core::serves(&manifest.kind, &manifest.api_version) {
         return Some(format!(
             "apiVersion `{}` is not served by this platform (expected `{API_VERSION}`)",
             manifest.api_version

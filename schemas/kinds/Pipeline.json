@@ -339,6 +339,42 @@
         }
       ]
     },
+    "PipelineOutput": {
+      "additionalProperties": false,
+      "description": "One output of a `v1alpha2` pipeline (PL-52): the Endpoint written through and how.",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OutputMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Write mode; absent is `upsert`."
+        },
+        "targetEndpoint": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Urn"
+            }
+          ],
+          "description": "The Endpoint the writes go through (PF-39, PL-18)."
+        },
+        "type": {
+          "description": "The entity type written, when the pipeline names one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "targetEndpoint"
+      ],
+      "type": "object"
+    },
     "PipelineQuotas": {
       "additionalProperties": false,
       "description": "Resource quotas for a pipeline runner (PL-11).",
@@ -417,7 +453,7 @@
     },
     "PipelineSpec": {
       "additionalProperties": false,
-      "description": "Desired specification of a [`Pipeline`][crate::kinds::Pipeline] resource (PL-01..PL-28).",
+      "description": "Desired specification of a [`Pipeline`][crate::kinds::Pipeline] resource (PL-01..PL-28).\n\nTwo shapes (PL-54, ADR-N-023): `v1alpha1` holds one `source`, one `compute`, one `output` and `targetEndpoint`; `v1alpha2` holds `sources`, `steps` and `outputs`. The accessors [`PipelineSpec::sources`], [`PipelineSpec::steps`] and [`PipelineSpec::outputs`] read either as the second, so nothing downstream has to know which one a file was written in.",
       "properties": {
         "allowFeedback": {
           "description": "The author knows this resident pipeline triggers itself and accepts it (PL-37).\n\nA derived pipeline whose output type is the type its own subscription watches feeds its own trigger, and the reconciler refuses it. Setting this says the loop is deliberate, which is why PL-37 puts the change in the yellow lane: a person reviews it.",
@@ -456,6 +492,13 @@
             }
           ],
           "description": "Optional output entity type and write mode."
+        },
+        "outputs": {
+          "description": "Where the result is written, each through its own Endpoint (PL-52, PL-55); `v1alpha2`.",
+          "items": {
+            "$ref": "#/definitions/PipelineOutput"
+          },
+          "type": "array"
         },
         "period": {
           "description": "How often the pipeline polls its source, as a Bento duration (`15s`, `5m`).\n\nThe reconciler reads it to pick the class (PL-26) and copies it into the runner's `input.generate.interval` (PL-27). Absent means push-based: an MQTT or subscription input driven by its source rather than by a clock.",
@@ -500,18 +543,49 @@
           ],
           "description": "Optional context source query or subscription trigger for derived pipelines (PL-31)."
         },
+        "sources": {
+          "description": "The inputs, merged by a Bento `broker` when there are several (PL-52, PL-53); `v1alpha2`.",
+          "items": {
+            "$ref": "#/definitions/PipelineSource"
+          },
+          "type": "array"
+        },
+        "steps": {
+          "description": "The processors, in the order they run (PL-52); `v1alpha2`.",
+          "items": {
+            "$ref": "#/definitions/Step"
+          },
+          "type": "array"
+        },
         "targetEndpoint": {
-          "allOf": [
+          "anyOf": [
             {
               "$ref": "#/definitions/Urn"
+            },
+            {
+              "type": "null"
             }
           ],
-          "description": "Target endpoint URN through which writes occur (PF-39, PL-18)."
+          "description": "Target endpoint URN through which writes occur (PF-39, PL-18); `v1alpha1` only."
         }
       },
       "required": [
-        "class",
-        "targetEndpoint"
+        "class"
+      ],
+      "type": "object"
+    },
+    "ProcessorStep": {
+      "additionalProperties": false,
+      "description": "A step that names a runner processor (PL-52).",
+      "properties": {
+        "processor": {
+          "additionalProperties": true,
+          "description": "Exactly one entry: the processor's name and its configuration.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "processor"
       ],
       "type": "object"
     },
@@ -663,6 +737,27 @@
       },
       "type": "object"
     },
+    "Step": {
+      "anyOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProcessorStep"
+            }
+          ],
+          "description": "`processor: { <name>: <config> }`."
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Compute"
+            }
+          ],
+          "description": "`kind: bloblang | mapping | wasm | container` with that kind's fields."
+        }
+      ],
+      "description": "One step of a `v1alpha2` pipeline (PL-52): a compute kind of PL-33, or one processor the pinned runner ships, its configuration verbatim in the processor's own field names."
+    },
     "SubscriptionTrigger": {
       "additionalProperties": false,
       "description": "Subscription configuration triggering pipeline execution.",
@@ -768,7 +863,7 @@
   "description": "Kubernetes-style resource envelope (MF-01..MF-04).",
   "properties": {
     "apiVersion": {
-      "description": "API version (must match [`API_VERSION`]).",
+      "description": "API version: [`API_VERSION`], or a version [`serves`] accepts for this kind.",
       "type": "string"
     },
     "kind": {

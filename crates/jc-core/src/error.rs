@@ -82,7 +82,7 @@ pub enum Error {
         reason: String,
     },
     /// The manifest apiVersion does not match joinedcontext.com/v1alpha1.
-    #[error("apiVersion must be `joinedcontext.com/v1alpha1`, got `{0}`")]
+    #[error("apiVersion `{0}` is not served for this kind: every kind is `joinedcontext.com/v1alpha1`, a Pipeline may also be `joinedcontext.com/v1alpha2`")]
     ApiVersion(String),
     /// The manifest kind does not match the expected kind for the struct.
     #[error("kind must be `{expected}`, got `{got}`")]

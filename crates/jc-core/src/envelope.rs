@@ -10,6 +10,16 @@ use std::collections::BTreeMap;
 /// The canonical API version for joinedcontext resources (MF-01).
 pub const API_VERSION: &str = "joinedcontext.com/v1alpha1";
 
+/// The version `Pipeline` alone is also served at: sources, steps and outputs (PL-54,
+/// ADR-N-023). A `v1alpha1` Pipeline stays valid and reads as the `v1alpha2` one it means.
+pub const API_VERSION_V1ALPHA2: &str = "joinedcontext.com/v1alpha2";
+
+/// Whether this platform serves `kind` at `api_version` (MF-01, PL-54): every kind at
+/// [`API_VERSION`], and `Pipeline` at [`API_VERSION_V1ALPHA2`] as well.
+pub fn serves(kind: &str, api_version: &str) -> bool {
+    api_version == API_VERSION || (kind == "Pipeline" && api_version == API_VERSION_V1ALPHA2)
+}
+
 /// Trait implemented by every manifest spec kind.
 pub trait Kind:
     Serialize + serde::de::DeserializeOwned + JsonSchema + Clone + std::fmt::Debug + PartialEq
@@ -36,6 +46,13 @@ pub trait Kind:
     /// so [`ResourceEnvelope::validate`] is the single entry point for `jcctl`, the Portal
     /// API and CI.
     fn validate_spec(&self, _meta: &ObjectMeta) -> Result<()> {
+        Ok(())
+    }
+
+    /// Kind-specific agreement of the spec with the envelope's `apiVersion` (PL-54). The
+    /// default accepts what [`serves`] accepts; a kind with two versions says which fields
+    /// belong to which.
+    fn validate_api_version(&self, _api_version: &str) -> Result<()> {
         Ok(())
     }
 
@@ -100,8 +117,8 @@ impl Scope {
     bound(serialize = "S: Kind", deserialize = "S: Kind")
 )]
 pub struct ResourceEnvelope<S: Kind> {
-    /// API version (must match [`API_VERSION`]).
-    #[serde(deserialize_with = "de_api_version")]
+    /// API version: [`API_VERSION`], or a version [`serves`] accepts for this kind.
+    #[serde(deserialize_with = "de_api_version_of::<S, _>")]
     pub api_version: String,
     /// Resource kind name (must match [`Kind::KIND`]).
     #[serde(deserialize_with = "de_kind::<S, _>")]
@@ -122,6 +139,17 @@ where
 {
     let s = String::deserialize(deserializer)?;
     if s != API_VERSION {
+        return Err(serde::de::Error::custom(Error::ApiVersion(s)));
+    }
+    Ok(s)
+}
+
+/// Deserializes and validates that this platform serves the kind `S` at `apiVersion` (PL-54).
+pub fn de_api_version_of<'de, S: Kind, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    let s = String::deserialize(deserializer)?;
+    if !serves(S::KIND, &s) {
         return Err(serde::de::Error::custom(Error::ApiVersion(s)));
     }
     Ok(s)
@@ -219,6 +247,10 @@ impl<S: Kind> ResourceEnvelope<S> {
         if let Some(status) = &self.status {
             status.validate()?;
         }
+        if !serves(S::KIND, &self.api_version) {
+            return Err(Error::ApiVersion(self.api_version.clone()));
+        }
+        self.spec.validate_api_version(&self.api_version)?;
         self.spec.validate_spec(&self.metadata)
     }
 
