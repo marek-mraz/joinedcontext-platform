@@ -75,10 +75,6 @@ struct Tool {
     /// that every caller the endpoint admits may call (EP-55).
     operations: &'static [Operation],
     description: &'static str,
-    /// Whether the tool only reads. The annotation is what an agent runtime reads before
-    /// it decides whether a human has to confirm the call, so it states what the tool
-    /// does rather than what would be convenient (AG-07).
-    read_only: bool,
     schema: fn() -> Value,
     /// What the broker's answer is called in the structured half of the result. MCP's
     /// `structuredContent` is an object matching the tool's output schema, so a bare list
@@ -86,12 +82,24 @@ struct Tool {
     result_key: &'static str,
 }
 
+impl Tool {
+    /// Whether the tool only reads, from the operations it stands for rather than from a
+    /// boolean somebody set beside them (T-1066, AG-07).
+    ///
+    /// This is what an agent runtime reads before it decides whether a person has to confirm
+    /// the call, and what the elicitation gate asks, so it has to state what the tool does. A
+    /// tool that writes at all is not read-only: *any* write is a write, and a rule that asked
+    /// whether *any* operation reads would let a mixed tool through the gate.
+    fn read_only(&self) -> bool {
+        !self.operations.iter().any(Operation::is_write)
+    }
+}
+
 const TOOLS: &[Tool] = &[
     Tool {
         name: "query_entities",
         operations: &[Operation::QueryEntity],
         description: "Query the entities of this context space by type and NGSI-LD filter.",
-        read_only: true,
         schema: || {
             json!({
                 "type": "object",
@@ -116,7 +124,6 @@ const TOOLS: &[Tool] = &[
         name: "get_entity",
         operations: &[Operation::RetrieveEntity],
         description: "Retrieve one entity of this context space by its exact URN.",
-        read_only: true,
         schema: || {
             json!({
                 "type": "object",
@@ -137,7 +144,6 @@ const TOOLS: &[Tool] = &[
             Operation::RetrieveEntityTypeDetails,
         ],
         description: "The entity types this context space holds, as the caller may see them.",
-        read_only: true,
         schema: || {
             json!({
                 "type": "object",
@@ -156,7 +162,6 @@ const TOOLS: &[Tool] = &[
             Operation::RetrieveAttrTypeDetails,
         ],
         description: "The attributes this context space holds, as the caller may see them.",
-        read_only: true,
         schema: || {
             json!({
                 "type": "object",
@@ -172,7 +177,6 @@ const TOOLS: &[Tool] = &[
         name: "query_temporal",
         operations: &[Operation::QueryTemporal],
         description: "Query the history of this context space's entities in a time window.",
-        read_only: true,
         schema: temporal_schema,
         result_key: "entities",
     },
@@ -180,7 +184,6 @@ const TOOLS: &[Tool] = &[
         name: "retrieve_temporal",
         operations: &[Operation::RetrieveTemporal],
         description: "The history of one entity of this context space in a time window.",
-        read_only: true,
         schema: || {
             let mut schema = temporal_schema();
             let object = schema
@@ -196,7 +199,6 @@ const TOOLS: &[Tool] = &[
         name: "batch_query",
         operations: &[Operation::QueryBatch],
         description: "Query many entities of this context space by id or type in one call.",
-        read_only: true,
         schema: || {
             json!({
                 "type": "object",
@@ -220,7 +222,6 @@ const TOOLS: &[Tool] = &[
         name: "list_subscriptions",
         operations: &[Operation::QuerySubscription],
         description: "The context subscriptions of this space the caller may see.",
-        read_only: true,
         schema: || {
             json!({
                 "type": "object",
@@ -239,7 +240,6 @@ const TOOLS: &[Tool] = &[
             "The caller's effective grants here: operations, attributes, residual constraints. \
              `format` picks the language: `permissions` (AuthZEN, the default), `odrl` (ODRL 2.2) \
              or `grant-ast` (UCAST); the grants are the same in all three (EP-60).",
-        read_only: true,
         schema: || {
             json!({
                 "type": "object",
@@ -262,7 +262,6 @@ const TOOLS: &[Tool] = &[
         ],
         description:
             "Inspect the data model of this context space, narrowed to the caller's grant.",
-        read_only: true,
         schema: || {
             json!({
                 "type": "object",
@@ -287,7 +286,6 @@ const TOOLS: &[Tool] = &[
         name: "upsert_entity",
         operations: &[Operation::UpsertBatch],
         description: "Create or update one entity of this context space.",
-        read_only: false,
         schema: || {
             json!({
                 "type": "object",
@@ -304,7 +302,6 @@ const TOOLS: &[Tool] = &[
         name: "create_subscription",
         operations: &[Operation::CreateSubscription],
         description: "Create a context subscription",
-        read_only: false,
         schema: || {
             json!({
                 "type": "object",
@@ -502,8 +499,8 @@ pub fn tools_for(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> V
                 "inputSchema": (tool.schema)(),
                 "outputSchema": output_schema(tool),
                 "annotations": {
-                    "readOnlyHint": tool.read_only,
-                    "destructiveHint": !tool.read_only,
+                    "readOnlyHint": tool.read_only(),
+                    "destructiveHint": !tool.read_only(),
                 },
             })
         })
@@ -515,7 +512,7 @@ pub fn tools_for(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> V
 /// Only a read: a write goes to the space this URL names and to no member, so saying "over
 /// the union" on `create_entity` would describe something the platform does not do.
 fn described(tool: &Tool, federates: &[String]) -> String {
-    match (tool.read_only, federates) {
+    match (tool.read_only(), federates) {
         (true, [_, ..]) => format!(
             "{} This space federates {}: the answer is the union of their data and can be \
              partial.",
@@ -718,7 +715,7 @@ async fn call_tool(
     // shows it and repeats the same call carrying the answer. The id is the server's, which
     // is what makes the second call the person's — a boolean the model writes into its own
     // call proves nothing, because the model writes both calls (T-0849, Architecture/07 §3).
-    if !tool.read_only {
+    if !tool.read_only() {
         let owner = caller_of(&subject);
         let surface = endpoint.base_path.clone();
         let digest = elicitation::digest_of(&arguments);
@@ -1412,4 +1409,57 @@ pub fn json_response(status: StatusCode, body: &Value) -> Response<Body> {
             serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec()),
         ))
         .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Tool, TOOLS};
+    use jc_core::kinds::Operation;
+
+    /// T-1066, AG-07, AG-08: `read_only` decides whether a person is asked before the call
+    /// proceeds, so it is derived from the operations rather than set beside them. The two
+    /// writing tools and every reading one are named here, because a tool added on the wrong
+    /// side of this line is a write nobody confirms.
+    #[test]
+    fn a_tool_that_writes_at_all_is_not_read_only() {
+        let writing: Vec<&str> = TOOLS
+            .iter()
+            .filter(|tool| !tool.read_only())
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(writing, vec!["upsert_entity", "create_subscription"]);
+
+        for tool in TOOLS {
+            let writes = tool.operations.iter().any(Operation::is_write);
+            assert_eq!(
+                tool.read_only(),
+                !writes,
+                "{} is on the wrong side of the elicitation gate",
+                tool.name
+            );
+        }
+    }
+
+    /// A tool that stands for no operation describes the endpoint rather than its data, and
+    /// describing is reading (EP-55).
+    #[test]
+    fn a_tool_with_no_operation_of_its_own_reads() {
+        for tool in TOOLS.iter().filter(|tool| tool.operations.is_empty()) {
+            assert!(tool.read_only(), "{}", tool.name);
+        }
+    }
+
+    /// The rule the task proposed — read-only when *any* operation reads — would have let a
+    /// mixed tool through the gate. This is the case that tells the two rules apart.
+    #[test]
+    fn a_tool_that_both_reads_and_writes_is_not_read_only() {
+        let mixed = Tool {
+            name: "read_and_write",
+            operations: &[Operation::QueryEntity, Operation::UpsertBatch],
+            description: "",
+            schema: || serde_json::json!({}),
+            result_key: "entities",
+        };
+        assert!(!mixed.read_only());
+    }
 }
