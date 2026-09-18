@@ -38,7 +38,13 @@ pub async fn handler(
             .into_response();
     }
 
-    let target_url = format!("https://{}/{}", host, rest.trim_start_matches('/'));
+    // The host is allow-listed; the path must stay a path on it (T-1301).
+    if super::escapes(&rest) {
+        return jc_core::ProblemDetails::forbidden()
+            .with_detail("path traversal not permitted")
+            .into_response();
+    }
+    let target_url = format!("https://{host}/{rest}");
     let upstream_resp = match state.http.get(&target_url).send().await {
         Ok(r) => r,
         Err(e) => return jc_core::ProblemDetails::internal_opaque(&e.to_string()).into_response(),

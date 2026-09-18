@@ -58,7 +58,7 @@ async fn forward(
         Err(p) => return (*p).into_response(),
     };
 
-    if rest.contains("..") || rest.starts_with('/') || rest.contains("//") {
+    if super::escapes(&rest) {
         return jc_core::ProblemDetails::forbidden()
             .with_detail("path traversal not permitted")
             .into_response();

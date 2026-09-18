@@ -1302,3 +1302,54 @@ async fn the_body_cannot_name_another_run_or_project() {
         "a body naming another run is never answered from that run"
     );
 }
+
+/// T-1300, T-1301: a path that would leave its base once the outbound URL is parsed — a
+/// double-encoded `..`, a backslash, a dot segment — is refused on the data route before the
+/// gateway is asked, and on the packages route before anything leaves the proxy; an ordinary
+/// read under the endpoint still reaches the gateway.
+#[tokio::test]
+async fn a_path_that_would_leave_its_base_is_refused_on_the_data_and_packages_routes() {
+    let gateway = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&gateway)
+        .await;
+    let state = test_state_with_gateway(sample_run(false, "building"), &gateway.uri());
+    for uri in [
+        "/v1/data/%252e%252e/%252e%252e/other-endpoint/ngsi-ld/v1/entities",
+        "/v1/data/ngsi-ld/v1/%252e%252e/entities",
+        "/v1/data/ngsi-ld%5C..%5Cadmin",
+        "/v1/data/./ngsi-ld/v1/entities",
+        "/v1/packages/crates.io/%252e%252e/%252e%252e/admin",
+        "/v1/packages/crates.io/../../etc/passwd",
+        "/v1/packages/crates.io/api%5C..%5Cadmin",
+    ] {
+        let resp = router(state.clone())
+            .oneshot(ticketed("GET", uri, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{uri}");
+    }
+    assert!(
+        gateway
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "the gateway was called"
+    );
+
+    let resp = router(state)
+        .oneshot(ticketed(
+            "GET",
+            "/v1/data/ngsi-ld/v1/entities?type=Bike",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        gateway.received_requests().await.unwrap_or_default().len(),
+        1
+    );
+}

@@ -30,15 +30,8 @@ pub async fn handler(
     let mut body_val = serde_json::from_slice::<serde_json::Value>(&body_bytes).ok();
 
     if let Some(file_path) = rest.strip_prefix("contents/") {
-        // axum decoded the path once; anything still percent-encoded (`%2e%2e` from a
-        // double-encoded `..`) would be decoded again by the URL parser on the way to the
-        // forge, so nothing encoded and no dot or empty segment gets through (T-0817).
-        let escapes = file_path.contains('%')
-            || file_path
-                .split('/')
-                .any(|segment| matches!(segment, "." | ".."))
-            || file_path.contains("//");
-        if escapes || !file_path.starts_with(&run.path_prefix) {
+        // Nothing encoded, no backslash, no dot or empty segment (T-0817, `super::escapes`).
+        if super::escapes(file_path) || !file_path.starts_with(&run.path_prefix) {
             return jc_core::ProblemDetails::forbidden()
                 .with_detail("file path outside assigned application directory")
                 .into_response();
