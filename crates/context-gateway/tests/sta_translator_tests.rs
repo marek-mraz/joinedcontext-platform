@@ -855,7 +855,7 @@ async fn an_offset_inside_the_ceiling_pages_and_bounds_what_the_broker_is_asked_
         gateway(&broker.url, endpoint(&[])),
         Method::GET,
         &sta(&format!(
-            "/Datastreams('{URN}/pm10')/Observations?$top=10&$skip=100000"
+            "/Datastreams('{URN}/pm10')/Observations?$top=10&$skip=989"
         )),
     )
     .await;
@@ -867,8 +867,37 @@ async fn an_offset_inside_the_ceiling_pages_and_bounds_what_the_broker_is_asked_
         .find(|hop| hop.path.starts_with("/ngsi-ld/v1/temporal/entities/"))
         .expect("the temporal tree");
     assert!(
-        hop.query.contains("lastN=100011"),
+        hop.query.contains("lastN=1000"),
         "the deepest page the surface allows, and nothing beyond it: {}",
         hop.query
     );
+}
+
+/// GW26 caps `lastN` at 1000, so an Observations page deeper than that would come back with the
+/// wrong rows. It is refused by name before the broker is asked; the entity listing, where
+/// `$skip` is an offset and not a history depth, still pages to its own ceiling.
+#[tokio::test]
+async fn an_observations_page_deeper_than_the_history_cap_is_refused_by_name() {
+    for path in [
+        format!("/Datastreams('{URN}/pm10')/Observations?$top=10&$skip=990"),
+        format!("/Datastreams('{URN}/pm10')/Observations?$top=10&$skip=100000"),
+    ] {
+        let broker = BrokerStub::start(vec![history()]).await;
+        let (status, problem, _) = call(
+            gateway(&broker.url, endpoint(&[])),
+            Method::GET,
+            &sta(&path),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        let detail = problem["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("$skip") && detail.contains("$filter"),
+            "{problem}"
+        );
+        assert!(
+            broker.hops().is_empty(),
+            "nothing was asked upstream: {path}"
+        );
+    }
 }

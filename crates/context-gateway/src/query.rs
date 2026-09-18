@@ -205,7 +205,7 @@ fn kept(params: &[(String, String)]) -> Vec<(String, String)> {
 }
 
 /// The most instances per attribute a temporal read asks the broker for (GW26).
-const LAST_N_CAP: u64 = 1_000;
+pub(crate) const LAST_N_CAP: u64 = 1_000;
 
 fn render(params: &[(String, String)]) -> String {
     params

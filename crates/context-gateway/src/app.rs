@@ -2931,6 +2931,18 @@ async fn sta_series(
     // one without a second query. Without the peek a `$top` request could never offer
     // `@iot.nextLink`, because the ceiling and the answer would always be the same size.
     let ceiling = top.saturating_add(skip);
+    // `$skip` becomes `lastN` here, and one request asks the broker for at most
+    // `LAST_N_CAP` instances (GW26). A deeper page would be cut to the cap and answer with the
+    // wrong rows, so it is refused by name; a `$filter` window reaches older observations.
+    let deepest = (query::LAST_N_CAP as usize).saturating_sub(1);
+    if ceiling > deepest {
+        return bad_parameter(&ogc::ParamError {
+            parameter: "$skip",
+            detail: format!(
+                "$top and $skip together reach at most {deepest} observations back; narrow the series with $filter on phenomenonTime"
+            ),
+        });
+    }
     let mut upstream = vec![
         ("attrs".to_owned(), attribute.to_owned()),
         ("lastN".to_owned(), ceiling.saturating_add(1).to_string()),
