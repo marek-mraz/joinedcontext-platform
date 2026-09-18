@@ -17,7 +17,7 @@ use crate::pdp::evaluator::{
 use crate::resolver::{Endpoint, Model};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The media type of a JSON Schema document (EP-49).
 pub const JSON_SCHEMA: &str = "application/schema+json";
@@ -193,6 +193,12 @@ pub struct Visible {
     denied_types: BTreeSet<String>,
     /// Attributes a prohibition takes back.
     denied_attrs: BTreeSet<String>,
+    /// The slots the projection gives each class, when the endpoint projects a model.
+    ///
+    /// A grant's attribute list is one set for every type it names, but a projection is not:
+    /// it says which slots each class has. Held per class, so a caller granted `age` on `User`
+    /// is never described an `age` on `Vehicle` (MP-02, T-2132).
+    slots: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Visible {
@@ -212,11 +218,34 @@ impl Visible {
         !self.denied_types.contains(name) && (self.types.is_empty() || self.types.contains(name))
     }
 
-    /// Whether the model may describe this attribute.
+    /// Whether the model may describe this attribute at all, on any class it belongs to.
+    ///
+    /// The `@context` is one document for the whole model, so a term is in it when any class
+    /// the caller reads carries it; a class definition is narrowed by [`Self::covers_slot`].
     fn covers_attr(&self, name: &str) -> bool {
         STRUCTURAL.contains(&name)
             || (!self.denied_attrs.contains(name)
                 && (self.attrs.is_empty() || self.attrs.contains(name)))
+    }
+
+    /// Whether the model may describe this attribute **on this class** (MP-02, EP-47).
+    fn covers_slot(&self, class: &str, name: &str) -> bool {
+        if !self.covers_attr(name) {
+            return false;
+        }
+        match self.slots.get(class) {
+            Some(slots) => STRUCTURAL.contains(&name) || slots.contains(name),
+            // No projection: the grant's own attribute set is the whole of the narrowing, as
+            // it was before a projection could disagree with it.
+            None => true,
+        }
+    }
+
+    /// The attributes of one class the caller may be described, in the order they are rendered.
+    fn slots_of<'a>(&'a self, class: &'a str) -> impl Iterator<Item = &'a String> + 'a {
+        self.attrs
+            .iter()
+            .filter(move |attr| self.covers_slot(class, attr))
     }
 }
 
@@ -264,6 +293,15 @@ pub fn visible(subject: &Subject, endpoint: &Endpoint, now: DateTime<Utc>) -> Vi
             .flatten()
             .collect();
         visible.attrs = narrow_to_identity(&visible.attrs, &slots);
+        visible.slots = projection
+            .classes
+            .iter()
+            .filter_map(|class| {
+                projection
+                    .attributes_of(&class.name)
+                    .map(|slots| (class.name.clone(), slots))
+            })
+            .collect();
     }
     visible
 }
@@ -435,7 +473,7 @@ fn redact_slots(
         return;
     };
     properties.retain(|name, _| {
-        let kept = visible.covers_attr(name);
+        let kept = visible.covers_slot(class, name);
         if !kept {
             redacted.push(format!("{class}.{name}"));
         }
@@ -463,7 +501,7 @@ fn derive_defs(model: &Model, visible: &Visible, into: &mut Map<String, Value>) 
             json!({ "type": "string", "format": "uri" }),
         );
         properties.insert("type".to_owned(), json!({ "const": class }));
-        for attr in visible.attrs.iter().filter(|a| visible.covers_attr(a)) {
+        for attr in visible.slots_of(class) {
             // Without the compiled model there is no datatype to state, and stating one
             // the model never declared would be an invention.
             properties.insert(attr.clone(), json!({}));
@@ -510,7 +548,11 @@ pub fn context(models: &[&Model], visible: &Visible, redacted: &mut Vec<String>)
                 for class in model.classes.iter().filter(|c| visible.covers_type(c)) {
                     terms.insert(class.clone(), json!(format!("#{class}")));
                 }
-                for attr in visible.attrs.iter().filter(|a| visible.covers_attr(a)) {
+                for attr in model
+                    .classes
+                    .iter()
+                    .flat_map(|class| visible.slots_of(class))
+                {
                     terms.insert(attr.clone(), json!(format!("#{attr}")));
                 }
             }
