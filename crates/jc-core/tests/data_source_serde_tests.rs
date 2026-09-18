@@ -194,10 +194,25 @@ fn a_connection_cannot_point_at_a_scheme_it_does_not_speak() {
         "https://opendata.banskabystrica.sk/aq.json",
         "tcp://mqtt.banskabystrica.sk:1883",
     );
-    assert!(DataSource::from_yaml(&broker)
+    let error = DataSource::from_yaml(&broker)
         .expect("parses")
         .validate()
-        .is_err());
+        .expect_err("a broker scheme on an http connection is refused");
+    // T-1194: this check was proposed for merging with `sync`'s `validate_remote_url` into one
+    // shared scheme validator. What a data source needs to say is that the connection type does
+    // not speak the scheme — plaintext is not the question here, `http://` is a legal one. A
+    // shared function returns a shared reason, and one of the two would then be wrong.
+    assert!(
+        error
+            .to_string()
+            .contains("not one this connection type speaks"),
+        "{error}"
+    );
+    let plaintext = HTTP.replace("https://opendata", "http://opendata");
+    DataSource::from_yaml(&plaintext)
+        .expect("parses")
+        .validate()
+        .expect("an http data source is a legal one, unlike a sync origin");
 }
 
 #[test]

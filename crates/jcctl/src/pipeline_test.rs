@@ -20,6 +20,11 @@ pub const MAX_MESSAGES: usize = 20;
 pub const MAX_SAMPLE_BYTES: usize = 5 * 1024 * 1024;
 /// The stream id prefix on the runner: `pipeline-test-{id}`.
 pub const STREAM_PREFIX: &str = "pipeline-test-";
+/// What a failed fetch of a sample URL prefixes its own error with, so the reader of a trace
+/// can tell "the feed did not answer" from "the mapping failed" (T-1192).
+pub const FETCH_FAILED: &str = "fetch: ";
+/// What a fetch that answered nothing reports, which is a failure the same way a 404 is.
+pub const EMPTY_BODY: &str = "the feed answered an empty body";
 
 /// What the sample is, so the harness knows how to split it into messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -75,6 +80,9 @@ pub fn harness(
     sample: &Sample,
     capture_url: &str,
 ) -> Result<Value, HarnessError> {
+    // A URL sample is fetched by a processor rather than read by an input, which the branch
+    // below explains; the prelude that does it is pushed once the processor list exists.
+    let mut fetch_once = false;
     let input = match (&sample.text, &sample.url) {
         (Some(_), Some(_)) => return Err(HarnessError::TwoSamples),
         (None, None) => return Err(HarnessError::NoSample),
@@ -94,11 +102,31 @@ pub fn harness(
             if !(url.starts_with("http://") || url.starts_with("https://")) {
                 return Err(HarnessError::BadUrl(url.clone()));
             }
-            json!({ "http_client": { "url": url, "verb": "GET", "timeout": "3s", "retries": 0 } })
+            // Not an `http_client` input: that one polls without pause, and a 1.2 MB feed
+            // reached the capture route many times a second until the Portal was OOM-killed
+            // (T-1192). One `generate` message fetched by an `http` processor is one fetch.
+            fetch_once = true;
+            json!({ "generate": { "count": 1, "interval": "", "mapping": "root = \"\"" } })
         }
     };
 
     let mut processors = Vec::new();
+    if fetch_once {
+        let url = sample.url.as_deref().unwrap_or_default();
+        processors.push(json!({ "http": {
+            "url": url, "verb": "GET", "timeout": "3s", "retries": 0
+        }}));
+        // An empty body is a failure with a name, rather than a message every later processor
+        // fails on for a reason that says nothing about the feed.
+        processors.push(json!({ "mapping": format!(
+            "root = if !errored() && content().length() == 0 {{ throw(\"{EMPTY_BODY}\") }} else {{ content() }}"
+        )}));
+        // The fetch's own error is kept in metadata, where the envelope reads it before the
+        // error of whatever the empty message failed at next.
+        processors.push(json!({ "catch": [{ "mapping": format!(
+            "meta jc_fetch_error = \"{FETCH_FAILED}\" + error()\nroot = \"\""
+        )}]}));
+    }
     match sample.format {
         SampleFormat::Text => {}
         SampleFormat::Csv | SampleFormat::Json => {
@@ -127,13 +155,17 @@ pub fn harness(
             kind => return Err(HarnessError::NotABentoProcessor(kind)),
         }
     }
+    // `let out = this` would read a failed message as JSON and fail again on a body that is
+    // not JSON; the runner then posts the raw body to the capture route, is refused, and
+    // retries until the stream is deleted (T-1192, Bento 1.21). Read only when it did not
+    // fail, and report a failed fetch's own error before the one it caused downstream.
     processors.push(json!({ "mapping": concat!(
         "let failed = errored()\n",
-        "let out = this\n",
+        "let out = if $failed { null } else { this }\n",
         "root = {}\n",
         "root.input = meta(\"jc_input\")\n",
         "root.output = if $failed { null } else { $out }\n",
-        "root.error = if $failed { error() } else { null }"
+        "root.error = if $failed { meta(\"jc_fetch_error\").or(error()) } else { null }"
     )}));
     // The envelope replaces the failed message, so the flag must not follow it to the output.
     processors.push(json!({ "catch": [] }));
@@ -397,24 +429,80 @@ mod tests {
     }
 
     #[test]
-    fn a_url_sample_is_fetched_by_the_runner_and_text_is_one_message() {
+    fn a_url_sample_is_fetched_once_and_text_is_one_message() {
         let sample = Sample {
             text: None,
             url: Some("https://feeds.example/air.json".into()),
             format: SampleFormat::Text,
         };
         let config = harness(&spec(None), &sample, "http://portal/c").expect("a harness");
-        assert_eq!(
-            config["input"]["http_client"]["url"],
-            "https://feeds.example/air.json"
+        // The input emits one empty message and a processor does the fetch. An `http_client`
+        // input polls without pause, and a test is one fetch of one feed (T-1192).
+        assert!(
+            config["input"].get("http_client").is_none(),
+            "a polling input reached the capture route many times a second: {config}"
         );
+        assert_eq!(config["input"]["generate"]["count"], 1);
         let processors = config["pipeline"]["processors"]
             .as_array()
             .expect("processors");
         assert_eq!(
+            processors[0]["http"]["url"],
+            "https://feeds.example/air.json"
+        );
+        assert_eq!(processors[0]["http"]["retries"], 0);
+        assert!(
+            processors[1]["mapping"]
+                .as_str()
+                .expect("a mapping")
+                .contains(EMPTY_BODY),
+            "a feed that answers nothing fails with a name: {processors:?}"
+        );
+        assert!(
+            processors[2]["catch"][0]["mapping"]
+                .as_str()
+                .expect("a mapping")
+                .contains(FETCH_FAILED),
+            "the fetch's own error is kept where the envelope reads it: {processors:?}"
+        );
+        assert_eq!(
             processors.len(),
-            5,
-            "capture, envelope, catch, the array split and its unarchive: nothing else (PL-48)"
+            8,
+            "the three of the fetch, then capture, envelope, catch, the array split and its \
+             unarchive: nothing else (PL-48)"
+        );
+    }
+
+    /// T-1192: what the Portal used to patch onto the harness after the fact, now written here.
+    ///
+    /// Both were bugs that only show on a URL sample that fails: a message read as JSON when
+    /// it has already errored fails again on a body that is not JSON, the runner posts the raw
+    /// body to the capture route, is refused, and retries until the stream is deleted.
+    #[test]
+    fn a_failed_message_is_not_read_as_json_and_a_failed_fetch_keeps_its_own_error() {
+        let sample = Sample {
+            text: None,
+            url: Some("https://feeds.example/air.json".into()),
+            format: SampleFormat::Text,
+        };
+        let config = harness(&spec(None), &sample, "http://portal/c").expect("a harness");
+        let envelope = config["pipeline"]["processors"]
+            .as_array()
+            .expect("processors")
+            .iter()
+            .find_map(|processor| {
+                processor["mapping"]
+                    .as_str()
+                    .filter(|mapping| mapping.starts_with("let failed = errored()"))
+            })
+            .expect("the envelope");
+        assert!(
+            envelope.contains("let out = if $failed { null } else { this }"),
+            "a failed message is never read as JSON: {envelope}"
+        );
+        assert!(
+            envelope.contains("meta(\"jc_fetch_error\").or(error())"),
+            "the feed's own error is reported, not the one it caused: {envelope}"
         );
     }
 

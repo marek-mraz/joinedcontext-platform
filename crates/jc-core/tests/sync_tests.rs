@@ -157,7 +157,19 @@ fn plaintext_http_origins_are_refused_for_every_variant() {
         let sync = SyncSource::from_yaml(&yaml).expect("parses");
         let err = sync.validate().expect_err("plaintext http must be refused");
         match err {
-            Error::Name { field: f, .. } => assert_eq!(f, field),
+            // T-1194: the reason is the point, not the check. This was proposed for merging
+            // with `data_source`'s scheme check into one `validate_url_scheme(value, schemes,
+            // field)`; one function returns one reason, and the reason an operator needs here
+            // is that plaintext was refused, not that a connection type speaks other schemes.
+            Error::Name {
+                field: f, reason, ..
+            } => {
+                assert_eq!(f, field);
+                assert!(
+                    reason.contains("plaintext http is refused"),
+                    "a sync origin says why it was refused: {reason}"
+                );
+            }
             other => panic!("expected Error::Name, got {other:?}"),
         }
     }

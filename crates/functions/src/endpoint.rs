@@ -181,4 +181,32 @@ mod tests {
         assert!(!allowed("../x", "/api/endpoint/../x/access"));
         assert!(!is_slug("bikes"));
     }
+
+    /// T-1193: `is_slug` is not `EndpointSlug::new` with a shorter name.
+    ///
+    /// It was proposed as a duplicate of the kind's own validator, to be replaced by
+    /// `EndpointSlug::new(slug).is_ok()`. The two agree on every slug the Portal mints and
+    /// disagree on one thing that matters here: `EndpointSlug` has no upper bound, because a
+    /// long slug is only a long identifier in a manifest. In the sandbox the slug arrives in
+    /// a URL a function wrote, and the ceiling is the bound on what a function can address.
+    /// Collapsing the two would drop it silently, which is why this test names it.
+    #[test]
+    fn the_sandbox_bounds_a_slug_at_both_ends() {
+        let long = "a".repeat(33);
+        assert!(
+            !is_slug(&long),
+            "33 characters is past the sandbox's ceiling"
+        );
+        assert!(
+            jc_core::kinds::EndpointSlug::new(&long).is_ok(),
+            "the kind accepts it, which is why the ceiling lives here"
+        );
+        let minted = "a".repeat(26);
+        assert!(is_slug(&minted));
+        assert!(jc_core::kinds::EndpointSlug::new(&minted).is_ok());
+        for short in ["", "bikes", &"a".repeat(25)] {
+            assert!(!is_slug(short), "{short}");
+            assert!(jc_core::kinds::EndpointSlug::new(short).is_err(), "{short}");
+        }
+    }
 }

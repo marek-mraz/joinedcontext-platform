@@ -19,7 +19,7 @@ pub const RESIDENT_BELOW_SECONDS: u64 = 30;
 /// Returns whether a pipeline executes as a scheduled CronJob (PL-04, PL-26).
 ///
 /// An explicit class wins; `auto` runs scheduled when `period >= 30s`.
-pub fn is_scheduled(spec: &PipelineSpec) -> bool {
+fn is_scheduled(spec: &PipelineSpec) -> bool {
     match spec.class {
         PipelineClass::Scheduled => true,
         PipelineClass::Resident => false,

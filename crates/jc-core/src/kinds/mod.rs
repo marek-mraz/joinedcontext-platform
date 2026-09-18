@@ -66,8 +66,8 @@ pub use organization::{
     Contact, ContactRole, OrganizationSpec, ProjectsPolicy, DEFAULT_NAME_COOLDOWN_DAYS,
 };
 pub use pipeline::{
-    is_scheduled, Compute, ComputeKind, Output, OutputMode, PipelineClass, PipelineQuotas,
-    PipelineSource, PipelineSpec, SourceQuery, SubscriptionTrigger, TemporalWindow, Trigger,
+    Compute, ComputeKind, Output, OutputMode, PipelineClass, PipelineQuotas, PipelineSource,
+    PipelineSpec, SourceQuery, SubscriptionTrigger, TemporalWindow, Trigger,
 };
 pub use policy::{
     EntitySelector, Operation, OperationGroup, OperationRef, PolicyEffect, PolicySpec, Principal,
