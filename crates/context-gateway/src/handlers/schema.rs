@@ -535,3 +535,153 @@ fn inner_context(document: &Value) -> Option<&Map<String, Value>> {
         _ => document.as_object(),
     }
 }
+
+#[cfg(test)]
+mod visible_tests {
+    use super::*;
+    use crate::resolver::Model;
+    use jc_core::kinds::{Audience, PolicySpec, Representation};
+
+    fn policy(yaml: &str) -> PolicySpec {
+        serde_norway::from_str(yaml).expect("the policy parses")
+    }
+
+    fn model(classes: &[&str]) -> Model {
+        Model {
+            name: "air-quality".to_owned(),
+            version: "1.0.0".to_owned(),
+            major: 1,
+            classes: classes.iter().map(|class| (*class).to_owned()).collect(),
+            json_schema: None,
+            context: None,
+        }
+    }
+
+    fn endpoint(policies: Vec<PolicySpec>) -> Endpoint {
+        Endpoint {
+            slug: "s".to_owned(),
+            title: std::collections::BTreeMap::new(),
+            description: std::collections::BTreeMap::new(),
+            space: "ovzdusie".to_owned(),
+            project: "ovzdusie".to_owned(),
+            audience: Audience::Public,
+            allowed_projects: Vec::new(),
+            representations: vec![Representation::NgsiLd],
+            rate_limit: None,
+            file_limits: None,
+            hidden_attributes: Default::default(),
+            projection: None,
+            view_mapping: None,
+            base_path: "/api/endpoint/s".to_owned(),
+            models: vec![model(&["AirQualityObserved", "Vehicle"])],
+            policies,
+        }
+    }
+
+    fn granting(types: &[&str], attrs: &[&str]) -> PolicySpec {
+        let entities = types
+            .iter()
+            .map(|entity_type| format!("      - type: {entity_type}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        policy(&format!(
+            "contextSpaceRef: ovzdusie\n\
+             assigner: did:web:hel.fi\n\
+             assignee: {{ kind: role, id: public }}\n\
+             operations: [queryEntity]\n\
+             information:\n  - entities:\n{entities}\n    propertyNames: [{}]\n",
+            attrs.join(", ")
+        ))
+    }
+
+    fn prohibiting(types: &[&str], attrs: &[&str]) -> PolicySpec {
+        let mut spec = granting(types, attrs);
+        spec.effect = jc_core::kinds::PolicyEffect::Prohibition;
+        spec
+    }
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-09-18T00:00:00Z")
+            .expect("a fixed instant")
+            .with_timezone(&Utc)
+    }
+
+    /// T-1158, GW8, EP-47: a prohibition that names no attribute takes the whole type back, and
+    /// one that names attributes takes only those.
+    #[test]
+    fn a_prohibition_takes_back_a_type_or_the_attributes_it_names() {
+        let whole_type = endpoint(vec![
+            granting(&["AirQualityObserved", "Vehicle"], &["pm10", "speed"]),
+            prohibiting(&["Vehicle"], &[]),
+        ]);
+        let seen = visible(&Subject::anonymous(), &whole_type, now());
+        assert!(seen.covers_type("AirQualityObserved"));
+        assert!(
+            !seen.covers_type("Vehicle"),
+            "the prohibition took the type"
+        );
+        assert_eq!(
+            visible_types(&whole_type, &seen),
+            vec!["AirQualityObserved"]
+        );
+
+        let one_attribute = endpoint(vec![
+            granting(&["AirQualityObserved"], &["pm10", "pm25"]),
+            prohibiting(&["AirQualityObserved"], &["pm25"]),
+        ]);
+        let seen = visible(&Subject::anonymous(), &one_attribute, now());
+        assert!(seen.covers_type("AirQualityObserved"), "the type stays");
+        assert!(seen.covers_attr("pm10"));
+        assert!(
+            !seen.covers_attr("pm25"),
+            "the prohibition took the attribute"
+        );
+    }
+
+    /// EP-61: what the endpoint does not serve is not described either, whatever a grant says,
+    /// so the schema and the data cannot disagree about which attributes exist.
+    #[test]
+    fn a_hidden_attribute_is_never_described_even_where_a_grant_names_it() {
+        let mut hiding = endpoint(vec![granting(
+            &["AirQualityObserved"],
+            &["pm10", "contact"],
+        )]);
+        hiding.hidden_attributes = ["contact".to_owned()].into_iter().collect();
+
+        let seen = visible(&Subject::anonymous(), &hiding, now());
+        assert!(seen.covers_attr("pm10"));
+        assert!(!seen.covers_attr("contact"));
+    }
+
+    /// The identity of an entity is not an attribute a grant lists: `id` and `type` are how it
+    /// is addressed at all, so they survive a narrowing that names neither (EP-47).
+    #[test]
+    fn the_structural_members_survive_every_narrowing() {
+        let narrow = endpoint(vec![granting(&["AirQualityObserved"], &["pm10"])]);
+        let seen = visible(&Subject::anonymous(), &narrow, now());
+        assert!(seen.covers_attr("id"));
+        assert!(seen.covers_attr("type"));
+        assert!(!seen.covers_attr("pm25"));
+    }
+
+    /// An endpoint with no policy at all describes what it publishes: an empty grant set means
+    /// "every type the model declares", and the request reached this surface only because the
+    /// PDP admitted it. The narrowing here is the schema's, not the door's.
+    #[test]
+    fn no_policy_describes_the_published_model_rather_than_nothing() {
+        let bare = endpoint(Vec::new());
+        let seen = visible(&Subject::anonymous(), &bare, now());
+        assert!(seen.covers_type("AirQualityObserved"));
+        assert!(seen.covers_attr("anything"));
+        assert_eq!(visible_types(&bare, &seen).len(), 2);
+    }
+
+    /// A type nobody granted is refused exactly as an unknown one is (EP-47).
+    #[test]
+    fn only_answers_nothing_for_a_type_the_caller_may_not_read() {
+        let granted = endpoint(vec![granting(&["AirQualityObserved"], &["pm10"])]);
+        let seen = visible(&Subject::anonymous(), &granted, now());
+        assert!(seen.only("AirQualityObserved").is_some());
+        assert!(seen.only("Vehicle").is_none());
+    }
+}

@@ -20,12 +20,19 @@ repository (PL-01), plus the `DataSource` the pipeline reads from (MF-35).
 | `helsinki-palvelukartta/` | the region's service map units | 1 h, CronJob | `PointOfInterest` |
 | `helsinki-hri-population/` | Paavo postal-code statistics, CSV | daily, CronJob | `StatisticalPopulation` |
 | `helsinki-ev-charging/` | OpenStreetMap charging stations, Overpass | 30 min, CronJob | `EVChargingStation` |
+| `vehicle-reaper/` | a page of the space's own `Vehicle` entities | 60 s, CronJob | deletes what aged past ten minutes |
 
-All fourteen write into the documented demonstration instance: organization `hel.fi`, project
+Fourteen of them write into the documented demonstration instance: organization `hel.fi`, project
 `helsinki`, spaces `air-quality`, `transport`, `bikes`, `traffic`, `weather`, `marine`,
 `parking`, `events`, `services`, `statistics` and `charging`. The MQTT and the GTFS-realtime
 recipe are two views of the same fleet and mint the same ids, so a deployment runs one of them,
 not both.
+
+`vehicle-reaper/` is the one that deletes rather than writes: it reads a page through the same
+Endpoint a pipeline writes into and names the ids it found back to
+`entityOperations/delete` (PL-32, DEMO.md step 3). Nothing is deleted by a filter the runner
+composes — the entities that go are the entities that run saw — and an entity nobody dated is
+unknown rather than old, so it stays.
 
 The last ten are the Helsinki open-data set, and they carry two files the first four do not:
 `endpoint.yaml` is the Endpoint the pipeline writes into and the public reads from, and its

@@ -17,7 +17,7 @@ use jcctl::bento::{render, InputContext, ORG_DOMAIN_VAR};
 use jcctl::pipelines::{runtime_of, Runtime};
 
 /// Every example folder, and the connection type it is there to demonstrate.
-const EXAMPLES: [(&str, DataSourceType); 14] = [
+const EXAMPLES: [(&str, DataSourceType); 15] = [
     ("hsl-hfp-mqtt", DataSourceType::Mqtt),
     ("http-json-poll", DataSourceType::Http),
     ("csv-fetch", DataSourceType::Http),
@@ -32,6 +32,9 @@ const EXAMPLES: [(&str, DataSourceType); 14] = [
     ("helsinki-palvelukartta", DataSourceType::Http),
     ("helsinki-hri-population", DataSourceType::Http),
     ("helsinki-ev-charging", DataSourceType::Http),
+    // The one example that deletes rather than upserts (T-1158): it reads a page of the
+    // endpoint it writes to, which is an `http` source like any other.
+    ("vehicle-reaper", DataSourceType::Http),
 ];
 
 /// The examples that also publish: the folder carries the Endpoint the pipeline writes into
@@ -313,10 +316,15 @@ fn the_domain_of_a_minted_id_comes_from_the_environment_and_never_from_the_pipel
                  (PF-44): {line}"
             );
         }
-        assert!(
-            bento.contains(&injection),
-            "{example}/bento.yaml mints an id without {injection} (PF-44)"
-        );
+        // An example that mints an id takes the domain from the environment. One that mints
+        // none — the reaper reads ids the broker already holds and names them back — has no
+        // domain to inject, and demanding one would be demanding a line with nothing to do.
+        if bento.contains("urn:ngsi-ld:%v") {
+            assert!(
+                bento.contains(&injection),
+                "{example}/bento.yaml mints an id without {injection} (PF-44)"
+            );
+        }
         for line in bento.lines().filter(|line| line.contains("urn:ngsi-ld:")) {
             assert!(
                 line.contains("urn:ngsi-ld:%v:%v:%v:%v"),

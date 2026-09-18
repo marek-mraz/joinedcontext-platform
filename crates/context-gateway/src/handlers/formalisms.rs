@@ -421,3 +421,146 @@ pub fn markdown(models: &[&Model], classes: &[Class]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn model(name: &str, major: u32) -> Model {
+        Model {
+            name: name.to_owned(),
+            version: format!("{major}.0.0"),
+            major,
+            classes: Vec::new(),
+            json_schema: None,
+            context: None,
+        }
+    }
+
+    /// One class as the projection leaves it: the JSON Schema definition, already narrowed.
+    fn class<'a>(name: &'a str, model: &'a Model, definition: &'a Value) -> Class<'a> {
+        Class {
+            name,
+            model,
+            definition,
+        }
+    }
+
+    /// T-1158, EP-46: an endpoint over two models renders both, each under its own namespace,
+    /// so a partner can tell which model a shape belongs to.
+    #[test]
+    fn two_models_render_as_two_shapes_under_two_namespaces() {
+        let air = model("air-quality", 1);
+        let transport = model("transport", 2);
+        let observed = json!({ "properties": { "pm10": { "type": "number" } } });
+        let vehicle = json!({ "properties": { "speed": { "type": "number" } } });
+
+        let shapes = shacl(&[
+            class("AirQualityObserved", &air, &observed),
+            class("Vehicle", &transport, &vehicle),
+        ]);
+
+        assert!(shapes.contains("urn:joinedcontext:model:air-quality:v1:AirQualityObservedShape"));
+        assert!(shapes.contains("urn:joinedcontext:model:transport:v2:VehicleShape"));
+        assert_eq!(shapes.matches("a sh:NodeShape").count(), 2, "{shapes}");
+    }
+
+    #[test]
+    fn a_class_with_no_slots_is_a_shape_with_no_properties() {
+        let air = model("air-quality", 1);
+        let empty = json!({ "properties": {} });
+        let shapes = shacl(&[class("AirQualityObserved", &air, &empty)]);
+
+        assert!(shapes.contains("a sh:NodeShape"));
+        assert!(!shapes.contains("sh:property"), "{shapes}");
+
+        let ontology = owl(&[class("AirQualityObserved", &air, &empty)]);
+        assert!(ontology.contains("a owl:Class"));
+        assert!(!ontology.contains("owl:DatatypeProperty"), "{ontology}");
+    }
+
+    /// Nothing to render is a document with its header and nothing else: a partner reading it
+    /// learns the endpoint publishes no class, which is different from a broken document.
+    #[test]
+    fn no_class_at_all_still_renders_a_document() {
+        for text in [shacl(&[]), owl(&[]), rdf(&[])] {
+            assert!(text.contains("@prefix"), "{text}");
+            assert!(!text.contains("NodeShape"), "{text}");
+            assert!(!text.contains("owl:Class"), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_enumeration_is_a_shacl_in_list_and_a_multivalued_slot_has_no_ceiling() {
+        let air = model("air-quality", 1);
+        let definition = json!({
+            "properties": {
+                "quality": { "type": "string", "enum": ["good", "poor"] },
+                "readings": { "type": "array", "items": { "type": "number" } }
+            },
+            "required": ["quality"]
+        });
+        let shapes = shacl(&[class("AirQualityObserved", &air, &definition)]);
+
+        assert!(shapes.contains(r#"sh:in ( "good" "poor" )"#), "{shapes}");
+        assert!(
+            shapes.contains("sh:minCount 1"),
+            "a required slot: {shapes}"
+        );
+        // The multivalued one takes no `sh:maxCount`, which is what makes it many.
+        let readings = shapes
+            .split("sh:property")
+            .find(|part| part.contains("\"readings\""))
+            .expect("the readings property");
+        assert!(!readings.contains("sh:maxCount"), "{readings}");
+    }
+
+    /// The LinkML the surface serves is one document per model, in the order they were given.
+    #[test]
+    fn linkml_carries_one_document_per_model() {
+        let air = model("air-quality", 1);
+        let transport = model("transport", 2);
+        let observed = json!({ "properties": { "pm10": { "type": "number" } } });
+        let vehicle = json!({ "properties": { "speed": { "type": "number" } } });
+
+        let source = linkml(
+            &[&air, &transport],
+            &[
+                class("AirQualityObserved", &air, &observed),
+                class("Vehicle", &transport, &vehicle),
+            ],
+        );
+
+        assert!(source.contains("air-quality"), "{source}");
+        assert!(source.contains("transport"), "{source}");
+        assert!(source.contains("AirQualityObserved"), "{source}");
+        assert!(source.contains("Vehicle"), "{source}");
+    }
+
+    /// A description with a pipe in it must not break the table it is written into.
+    #[test]
+    fn a_description_never_breaks_the_markdown_table_it_is_written_into() {
+        let air = model("air-quality", 1);
+        let definition = json!({
+            "properties": {
+                "pm10": {
+                    "type": "number",
+                    "description": "particulate matter | under 10 µm"
+                }
+            }
+        });
+        let doc = markdown(&[&air], &[class("AirQualityObserved", &air, &definition)]);
+
+        let row = doc
+            .lines()
+            .find(|line| line.contains("pm10"))
+            .expect("the slot's row");
+        // Four columns: slot, range, required, description. A raw pipe would make five.
+        assert_eq!(
+            row.matches('|').count() - row.matches("\\|").count(),
+            5,
+            "a pipe in the description opened a column: {row}"
+        );
+    }
+}
