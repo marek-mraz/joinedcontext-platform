@@ -729,3 +729,74 @@ information:
         !compiled.is_match("urn:ngsi-ld:AirQualityObserved:banskabystricaXsk:ovzdusie:sever-01")
     );
 }
+
+/// R22, AG-13, T-1213: the narrowing signal describes the answer, not the request.
+///
+/// `ovzdusie`'s public grant whitelists four property names and deliberately withholds
+/// `reliability` and `refDevice`. A caller who names no `attrs` — the ordinary read, and the
+/// one every dashboard and every MCP tool makes — used to be told nothing: the flag compared
+/// the granted attribute set against the request's, and a request that asked for nothing
+/// cannot have had anything taken from it. The entities came back short and unannounced.
+#[test]
+fn a_whitelist_narrows_a_read_that_named_no_attribute() {
+    let verdict = evaluate(
+        &Subject::anonymous(),
+        Operation::QueryEntity,
+        &Request {
+            types: set(&["AirQualityObserved"]),
+            ..Request::default()
+        },
+        "ovzdusie",
+        &[public_read()],
+        now(),
+    );
+    let constraints = verdict.constraints().expect("the public grant rewrites");
+
+    assert!(
+        constraints.attrs.is_superset(&set(&["pm10"]))
+            && !constraints.attrs.contains("reliability"),
+        "the whitelist is what will be served: {:?}",
+        constraints.attrs
+    );
+    assert!(
+        constraints.restricted,
+        "the answer is not everything the space holds, and the caller who asked is told so"
+    );
+}
+
+/// The other half, so the flag stays worth reading: a grant that takes nothing away does not
+/// claim to. Without this the rule could be satisfied by always answering `true`.
+#[test]
+fn a_grant_that_narrows_nothing_says_nothing() {
+    let whole_space = policy(
+        r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+operations: [queryEntity, retrieveEntity]
+information:
+  - entities:
+      - type: AirQualityObserved
+"#,
+    );
+    let verdict = evaluate(
+        &Subject::anonymous(),
+        Operation::QueryEntity,
+        &Request {
+            types: set(&["AirQualityObserved"]),
+            ..Request::default()
+        },
+        "ovzdusie",
+        &[whole_space],
+        now(),
+    );
+    let constraints = verdict.constraints().expect("the grant rewrites");
+
+    assert!(
+        constraints.attrs.is_empty(),
+        "no whitelist means no projection, so the whole entity is served"
+    );
+    assert!(
+        !constraints.restricted,
+        "nothing was taken away, and a flag that is always true tells a reader nothing"
+    );
+}

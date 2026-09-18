@@ -300,8 +300,15 @@ fn intersect(
 
     Constraints {
         tenant: tenant.to_owned(),
+        // The signal describes the answer, not the request (R22, AG-13, T-1213). A read that
+        // names no `attrs` is the ordinary read, and it is the one that most needs telling:
+        // its entities come back with whatever the grant's whitelist left out and no other
+        // way to know why. Comparing against `request.attrs` said nothing there, because a
+        // request that asked for nothing cannot have had anything taken from it.
         restricted: types.len() < request.types.len()
             || attrs.len() < request.attrs.len()
+            || !granted_attrs.is_empty()
+            || !filters.is_empty()
             || geo.restricted
             || clamped.restricted,
         types,
