@@ -266,9 +266,70 @@ fn set_headers(headers: &mut axum::http::HeaderMap, decision: &Decision) {
 
 #[cfg(test)]
 mod tests {
-    use super::caller_key;
+    use super::{caller_key, Decision, RateLimiter};
     use axum::body::Body;
     use axum::extract::Request;
+    use jc_core::kinds::RateLimits;
+    use std::time::{Duration, Instant};
+
+    fn limits(per_minute: u32, burst: Option<u32>) -> RateLimits {
+        RateLimits {
+            requests_per_minute: per_minute,
+            burst,
+        }
+    }
+
+    /// T-1073, EP-20: `requestsPerMinute` is a rate per sixty seconds, and the bucket refills at
+    /// that rate. The 60 in `check` is the seconds in a minute — the unit of the field's own
+    /// name — and not a window anybody may retune: halving it would double every endpoint's
+    /// real rate while every manifest still said `requestsPerMinute`.
+    #[test]
+    fn a_minute_of_waiting_refills_a_minute_of_requests() {
+        let limiter = RateLimiter::new();
+        let start = Instant::now();
+        let quota = limits(60, Some(60));
+
+        // The burst is spent, and the next one is refused.
+        for _ in 0..60 {
+            assert!(limiter.check("slug", "caller", &quota, start).allowed);
+        }
+        let refused = limiter.check("slug", "caller", &quota, start);
+        assert!(!refused.allowed);
+        // Sixty a minute is one a second: the wait for one token is a second, not a minute.
+        assert_eq!(refused.reset, 1);
+
+        // Half a minute refills half the quota, and a whole one fills it to the ceiling.
+        let half = start + Duration::from_secs(30);
+        for _ in 0..30 {
+            assert!(limiter.check("slug", "caller", &quota, half).allowed);
+        }
+        assert!(!limiter.check("slug", "caller", &quota, half).allowed);
+
+        let minute = half + Duration::from_secs(60);
+        let Decision { remaining, .. } = limiter.check("slug", "caller", &quota, minute);
+        assert_eq!(
+            remaining, 59,
+            "the bucket refilled to its ceiling, not past it"
+        );
+    }
+
+    /// The slowest limit a manifest may carry is one a minute (`RateLimits::validate` refuses
+    /// zero), and the wait it names is the minute the field is named for.
+    #[test]
+    fn one_a_minute_makes_the_second_caller_wait_a_minute() {
+        let limiter = RateLimiter::new();
+        let start = Instant::now();
+        let slowest = limits(1, Some(1));
+
+        assert!(limiter.check("slug", "caller", &slowest, start).allowed);
+        let refused = limiter.check("slug", "caller", &slowest, start);
+        assert!(!refused.allowed);
+        assert_eq!(refused.reset, 60, "one a minute is a minute of waiting");
+
+        // And after that minute the next one passes.
+        let later = start + Duration::from_secs(60);
+        assert!(limiter.check("slug", "caller", &slowest, later).allowed);
+    }
 
     fn asking(headers: &[(&str, &str)]) -> Request {
         let mut builder = Request::builder().uri("/ngsi-ld/v1/entities?type=Device");
