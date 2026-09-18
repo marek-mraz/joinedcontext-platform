@@ -18,7 +18,7 @@ classes:
     class_uri: bb:AirQualityObserved
     description: One air quality reading of one sensor.
     is_a: Entity
-    slots: [temperature, reliability, refDevice, label, address]
+    slots: [temperature, reliability, refDevice, label, address, pollutant, measuredAt]
   Address:
     class_uri: bb:Address
     description: A nested object with a shape, carried inline and not by reference.
@@ -70,6 +70,19 @@ slots:
     range: Address
     annotations:
       ngsi_ld_kind: JsonProperty
+  pollutant:
+    slot_uri: bb:pollutant
+    description: Which pollutant this reading is of, as a term of a vocabulary.
+    range: Pollutant
+    annotations:
+      ngsi_ld_kind: VocabProperty
+  measuredAt:
+    slot_uri: bb:measuredAt
+    description: The depths the sensor sampled, in the order it sampled them.
+    range: float
+    multivalued: true
+    annotations:
+      ngsi_ld_kind: ListProperty
 
 enums:
   ReliabilityLevel:
@@ -77,3 +90,9 @@ enums:
       low:
       medium:
       high:
+  Pollutant:
+    permissible_values:
+      pm10:
+        meaning: bb:pm10
+      pm25:
+        meaning: bb:pm25

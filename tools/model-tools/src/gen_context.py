@@ -98,6 +98,23 @@ def compile_context(source: str | Path) -> dict[str, Any]:
             # A language map: {"sk": "…", "en": "…"}. A value type here would fight the map.
             entry.pop("@type", None)
             entry["@container"] = "@language"
+        elif kind == "VocabProperty":
+            # The value is a term of a vocabulary, not the five characters it is written with:
+            # `@vocab` expands it against the vocabulary so a partner reading `pm10` gets an
+            # IRI it can look up (DM-05, §1.1). Without this it stays a string.
+            entry["@type"] = "@vocab"
+        elif kind == "ListProperty":
+            # The order is part of the meaning, and a JSON-LD array without `@list` is a set:
+            # a consumer may reorder it and lose what the model said (DM-05, §1.1). A list of
+            # entity ids keeps `@type: @id` beside the container, which LinkML wrote from the
+            # range, so the ids still expand as IRIs.
+            entry["@container"] = "@list"
+        elif kind == "JsonProperty":
+            # Opaque JSON, stated rather than left to inference: `@json` keeps the document a
+            # value instead of a node, so expansion does not walk into it and invent terms for
+            # its keys. It also takes back the `@type: @id` LinkML writes for a class range,
+            # which would make every consumer resolve the object as an IRI and lose it.
+            entry["@type"] = "@json"
         elif entry.get("@type") == "@id":
             # LinkML writes `@type: @id` for every slot whose range is a class, which is
             # right for a Relationship and wrong for a JsonProperty: an imported `address`

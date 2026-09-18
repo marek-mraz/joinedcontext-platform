@@ -60,6 +60,55 @@ def test_a_language_property_expands_to_one_literal_per_locale(senzor):
     assert labels == {Literal("Senzor", lang="sk"), Literal("Sensor", lang="en")}
 
 
+def test_a_vocab_property_expands_its_value_to_a_term_and_not_to_a_string(senzor):
+    """DM-05, §1.1: a VocabProperty names a term of a vocabulary. Without `@type: @vocab` the
+    value stays the five characters it is written with, and a partner reading `pm10` has
+    nothing to look up."""
+    document = compile_context(senzor)
+    assert document["@context"]["pollutant"]["@type"] == "@vocab"
+
+    graph = _expanded(document, {"type": "AirQualityObserved", "pollutant": "pm10"})
+    objects = list(graph.objects(None, URIRef(f"{BB}pollutant")))
+    assert objects == [URIRef(f"{BB}pm10")], f"the term did not resolve: {objects}"
+
+
+def test_a_list_property_keeps_the_order_the_model_gave_it(senzor):
+    """DM-05, §1.1: a JSON-LD array without `@list` is a set, and a consumer may reorder it.
+    The kind says the order is part of the meaning, so the container has to say so too."""
+    document = compile_context(senzor)
+    assert document["@context"]["measuredAt"]["@container"] == "@list"
+
+    graph = _expanded(
+        document, {"type": "AirQualityObserved", "measuredAt": [0.5, 2.0, 10.0]}
+    )
+    # An RDF list is a chain of rdf:first/rdf:rest, which is exactly what `@list` produces and
+    # what a plain array does not.
+    from rdflib import RDF
+
+    head = next(graph.objects(None, URIRef(f"{BB}measuredAt")))
+    order = []
+    node = head
+    while node != RDF.nil:
+        order.append(next(graph.objects(node, RDF.first)).toPython())
+        node = next(graph.objects(node, RDF.rest))
+    assert order == [0.5, 2.0, 10.0], f"the order was lost: {order}"
+
+
+def test_an_opaque_document_stays_a_value_and_is_not_walked_into(senzor):
+    """DM-05, §1.1: `@json` says the document is a value this model does not describe, so
+    expansion does not invent a term for every key inside it."""
+    document = compile_context(senzor)
+    assert document["@context"]["address"]["@type"] == "@json"
+
+    graph = _expanded(
+        document,
+        {"type": "AirQualityObserved", "address": {"streetAddress": "Namestie SNP 1"}},
+    )
+    assert not list(graph.objects(None, URIRef(f"{BB}streetAddress"))), (
+        "a key of the opaque document became a term of its own"
+    )
+
+
 def test_a_term_definition_carries_only_json_ld_keywords(senzor):
     """JSON-LD 1.1 refuses a term definition with a key it does not know, and a refused
     context expands to nothing at all."""
