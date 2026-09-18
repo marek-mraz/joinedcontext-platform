@@ -226,6 +226,13 @@ spec:
 "#,
     )
     .expect("the manifest is written");
+    // The space pins its segment; `doprava` is not in the repository and renders (PF-84).
+    std::fs::create_dir_all(dir.join("projects/ovzdusie/spaces/ovzdusie")).expect("a space");
+    std::fs::write(
+        dir.join("projects/ovzdusie/spaces/ovzdusie/space.yaml"),
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: ovzdusie\n  namespace: ovzdusie\nspec:\n  urnSegment: ovzdusie\n",
+    )
+    .expect("the space is written");
 
     let repo = jcctl::loader::Repository::load(&dir).expect("the repository loads");
     let accounts = accounts_of(&repo);

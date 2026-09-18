@@ -15,6 +15,7 @@ metadata:
   namespace: ovzdusie
 spec:
   isSandbox: false
+  urnSegment: ovzdusie
 "#;
 
 const ENDPOINT: &str = r#"apiVersion: joinedcontext.com/v1alpha1

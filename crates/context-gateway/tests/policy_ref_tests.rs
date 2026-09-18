@@ -12,6 +12,7 @@ metadata:
   namespace: helsinki
 spec:
   isSandbox: false
+  urnSegment: helsinki
 "#;
 
 const ALL: &str = r#"apiVersion: joinedcontext.com/v1alpha1

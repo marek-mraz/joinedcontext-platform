@@ -174,6 +174,7 @@ fn context_space_sandbox_ttl_rules_pf_19() {
         default_locale: None,
         data_model_ref: None,
         ttl_days: Some(7),
+        urn_segment: None,
     };
     assert!(spec.validate().is_ok());
 

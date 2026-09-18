@@ -75,8 +75,11 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
             continue;
         };
         let project = id.namespace.clone().unwrap_or_default();
-        let space = spec.context_space_ref.name().to_owned();
-        let key = (project.clone(), space.clone());
+        let space_name = spec.context_space_ref.name().to_owned();
+        // Tenant, entity ids and policy URNs all carry the rendered segment (PF-84); the
+        // manifests beside the endpoint name the space locally.
+        let space = repo.space_segment(&project, &space_name);
+        let key = (project.clone(), space_name.clone());
         let named = policies.get(&key).map(Vec::as_slice).unwrap_or_default();
         let bound = match &spec.policy_ref {
             Some(policy_ref) => bound_policy(&id.name, policy_ref, &space, named),
@@ -91,7 +94,7 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
                 reference.name.clone(),
             );
             match projections.get(&named) {
-                Some(projection) if projection.context_space_ref == space => {
+                Some(projection) if projection.context_space_ref == space_name => {
                     Some(Arc::clone(projection))
                 }
                 Some(_) => {
@@ -233,14 +236,15 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
         };
         let project = id.namespace.clone().unwrap_or_default();
         let key = (project.clone(), id.name.clone());
+        let segment = repo.space_segment(&project, &id.name);
         spaces.push(Space {
             endpoint: Arc::new(Endpoint {
-                slug: id.name.clone(),
+                slug: segment.clone(),
                 // The canonical surface is the space itself, so its record reads the
                 // space's own title and description below.
                 title: BTreeMap::new(),
                 description: BTreeMap::new(),
-                space: id.name.clone(),
+                space: segment.clone(),
                 project,
                 audience: Audience::Public,
                 allowed_projects: Vec::new(),
@@ -261,7 +265,7 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
                 // A space's canonical surface serves the space's own model; a view is a
                 // decision of a published endpoint (SP-01, EP-54).
                 view_mapping: None,
-                base_path: format!("/cs/{}", id.name),
+                base_path: format!("/cs/{segment}"),
             }),
             title: language_map(&resource.manifest.metadata.rest, "title"),
             description: language_map(&resource.manifest.metadata.rest, "description"),

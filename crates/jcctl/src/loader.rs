@@ -590,6 +590,24 @@ impl Repository {
         self.resources.get(id)
     }
 
+    /// The `{space}` segment of the Context Space `name` of `project` (PF-84).
+    ///
+    /// A space the repository does not hold, or cannot parse, renders without a pin: an id
+    /// minted for it can then never land in a space that pins another segment.
+    pub fn space_segment(&self, project: &str, name: &str) -> String {
+        let pin = self
+            .resources
+            .iter()
+            .find(|(id, _)| {
+                id.kind == "ContextSpace"
+                    && id.name == name
+                    && id.namespace.as_deref() == Some(project)
+            })
+            .and_then(|(_, resource)| resource.manifest.spec.get("urnSegment"))
+            .and_then(|pin| pin.as_str().map(str::to_owned));
+        jc_core::kinds::urn_segment(project, name, pin.as_deref())
+    }
+
     /// Iterates over all loaded resources in deterministic `ResourceId` sorted order (CC-18).
     pub fn iter(&self) -> impl Iterator<Item = (&ResourceId, &LoadedResource)> {
         self.resources.iter()

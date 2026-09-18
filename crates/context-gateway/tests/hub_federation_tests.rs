@@ -139,6 +139,18 @@ fn written(members: &[Member]) -> Repository {
         )
         .expect("the registration is written");
     }
+    // The hub predates PF-84 and pins its segment, so its ids read `...:{HUB}:...`.
+    let space = dir.join(format!("projects/{PROJECT}/spaces/{HUB}"));
+    std::fs::create_dir_all(&space).expect("the space directory");
+    std::fs::write(
+        space.join("space.yaml"),
+        format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\n\
+             metadata:\n  name: {HUB}\n  namespace: {PROJECT}\n\
+             spec:\n  urnSegment: {HUB}\n"
+        ),
+    )
+    .expect("the space is written");
     Repository::load(&dir).expect("the repository loads")
 }
 

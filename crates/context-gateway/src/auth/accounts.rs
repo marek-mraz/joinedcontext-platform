@@ -119,13 +119,18 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
             client,
             Account {
                 name: id.name.clone(),
-                project,
+                project: project.clone(),
                 roles: spec
                     .roles
                     .iter()
                     .map(|binding| ScopedRole {
                         role: binding.role.clone(),
-                        context_space: binding.scope.context_space.clone(),
+                        // The gateway knows a space by its segment (PF-84).
+                        context_space: binding
+                            .scope
+                            .context_space
+                            .as_deref()
+                            .map(|name| repo.space_segment(&project, name)),
                         project: binding.scope.project.clone(),
                         organization: binding.scope.organization.is_some(),
                     })

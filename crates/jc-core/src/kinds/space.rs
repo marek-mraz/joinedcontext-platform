@@ -147,6 +147,21 @@ pub struct ContextSpaceSpec {
     /// Enforced time-to-live in days for ephemeral sandboxes (1..=14, PF-19).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_days: Option<u32>,
+    /// The `{space}` segment of this space's entity ids, when it is not the rendered
+    /// `{project}-{name}`; pins the segment of a space that predates PF-84 (PF-84).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urn_segment: Option<String>,
+}
+
+/// The `{space}` segment of every entity id of a space: its pin, else `{project}-{name}` (PF-84).
+///
+/// The one function the gateway, the reconciler and the Portal call, so no caller-supplied
+/// value ever decides which space an id belongs to.
+pub fn urn_segment(project: &str, name: &str, pin: Option<&str>) -> String {
+    match pin {
+        Some(pin) => pin.to_owned(),
+        None => format!("{project}-{name}"),
+    }
 }
 
 impl Kind for ContextSpaceSpec {
@@ -203,6 +218,12 @@ impl ContextSpaceSpec {
     pub fn validate_with_meta(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_space_name(&meta.name)?;
         self.validate()?;
-        Ok(())
+        match (&self.urn_segment, &meta.namespace) {
+            (Some(pin), _) => names::validate_space_name(pin),
+            (None, Some(project)) => {
+                names::validate_space_name(&urn_segment(project, &meta.name, None))
+            }
+            (None, None) => Ok(()),
+        }
     }
 }

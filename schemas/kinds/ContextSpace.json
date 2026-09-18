@@ -108,6 +108,13 @@
             "integer",
             "null"
           ]
+        },
+        "urnSegment": {
+          "description": "The `{space}` segment of this space's entity ids, when it is not the rendered `{project}-{name}`; pins the segment of a space that predates PF-84 (PF-84).",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"

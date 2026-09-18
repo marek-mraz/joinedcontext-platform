@@ -91,14 +91,12 @@ pub fn federations_of(repo: &Repository) -> Federations {
             continue;
         }
         let project = id.namespace.clone().unwrap_or_default();
-        by_space
-            .entry((project, spec.context_space_ref.name().to_owned()))
-            .or_default()
-            .push(Member {
-                name: id.name.clone(),
-                identity: spec.federation.identity,
-                external: spec.endpoint_ref.is_none(),
-            });
+        let space = repo.space_segment(&project, spec.context_space_ref.name());
+        by_space.entry((project, space)).or_default().push(Member {
+            name: id.name.clone(),
+            identity: spec.federation.identity,
+            external: spec.endpoint_ref.is_none(),
+        });
     }
     Federations { by_space }
 }
