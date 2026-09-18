@@ -29,6 +29,71 @@ const GTFS_MESSAGE: &str = "transit_realtime.FeedMessage";
 /// mints its ids under the new one without an edit (Architecture/03 §3).
 pub const ORG_DOMAIN_VAR: &str = "JC_ORG_DOMAIN";
 
+/// The variable a mapping mints the `{space}` segment of an id from (PL-57, PF-84).
+///
+/// One runner serves every pipeline of a project, so unlike [`ORG_DOMAIN_VAR`] the space
+/// cannot be a variable of the runner's process: the renderer writes it into each stream,
+/// the rendered segment of that output's space in place of `env("JC_SPACE")`. The first
+/// output is `JC_SPACE`, the second `JC_SPACE_2`, and so on ([`space_var`]).
+pub const SPACE_VAR: &str = "JC_SPACE";
+
+/// The variable output `index` (0-based) reads its space from (PL-57).
+pub fn space_var(index: usize) -> String {
+    match index {
+        0 => SPACE_VAR.to_owned(),
+        n => format!("{SPACE_VAR}_{}", n + 1),
+    }
+}
+
+/// Writes each output's segment into every string of a stream where a mapping reads it,
+/// `env("JC_SPACE")` as a Bloblang string and `${JC_SPACE}` as the bare segment (PL-57).
+///
+/// `segments[i]` is the segment of output `i`. A variable with no output behind it is left
+/// as it is: the runner then reads an unset variable, and the write guard refuses the id.
+pub fn inject_space(value: &mut serde_json::Value, segments: &[String]) {
+    match value {
+        serde_json::Value::String(text) => {
+            if !text.contains(SPACE_VAR) {
+                return;
+            }
+            // Longest name first, so `JC_SPACE` never rewrites the head of `JC_SPACE_2`.
+            for (index, segment) in segments.iter().enumerate().rev() {
+                let var = space_var(index);
+                *text = text
+                    .replace(&format!("env(\"{var}\")"), &format!("\"{segment}\""))
+                    .replace(&format!("${{{var}}}"), segment);
+            }
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| inject_space(item, segments)),
+        serde_json::Value::Object(map) => map
+            .values_mut()
+            .for_each(|item| inject_space(item, segments)),
+        _ => {}
+    }
+}
+
+/// Every line of a Bento file that writes one of `names` as a string literal, as
+/// `(1-based line, the name)` (CC-83).
+///
+/// Only a whole quoted literal counts: `"helsinki"` is the space typed in, while a URL or a
+/// title that contains the word is not. Comment lines are skipped.
+pub fn literal_names(bento: &str, names: &[&str]) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+    for (index, line) in bento.lines().enumerate() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        for name in names.iter().filter(|name| !name.is_empty()) {
+            if line.contains(&format!("\"{name}\"")) || line.contains(&format!("'{name}'")) {
+                found.push((index + 1, (*name).to_owned()));
+            }
+        }
+    }
+    found
+}
+
 /// What the renderer needs beyond the connection itself.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct InputContext<'a> {

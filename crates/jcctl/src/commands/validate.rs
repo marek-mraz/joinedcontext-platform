@@ -97,6 +97,20 @@ pub fn run(repo_dir: &Path) -> Report {
         });
     }
 
+    for (id, path, line, literal) in repo.literal_spaces() {
+        report.warnings.push(Finding {
+            path,
+            document: 1,
+            line,
+            message: format!(
+                "Pipeline {} types the space as \"{literal}\". Build the id from env(\"{}\") \
+                 instead, so the pipeline mints ids of the space it runs in (CC-83, PL-57).",
+                id.name,
+                crate::bento::SPACE_VAR
+            ),
+        });
+    }
+
     for (id, resource) in repo.iter() {
         let yaml = match serde_norway::to_string(&resource.manifest) {
             Ok(yaml) => yaml,

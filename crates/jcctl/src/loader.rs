@@ -570,6 +570,41 @@ impl Repository {
         &self.literal_domains
     }
 
+    /// The `bento.yaml` files beside Pipeline manifests that type a space segment or the
+    /// project's name as a string literal where `env("JC_SPACE")` belongs (CC-83, PL-57), as
+    /// `(pipeline, bento path, 1-based line, the literal)`.
+    pub fn literal_spaces(&self) -> Vec<(ResourceId, PathBuf, usize, String)> {
+        let mut found = Vec::new();
+        for (id, resource) in self.iter().filter(|(id, _)| id.kind == "Pipeline") {
+            let Some(project) = id.namespace.as_deref() else {
+                continue;
+            };
+            let bento = resource
+                .path
+                .parent()
+                .map(|dir| dir.join("bento.yaml"))
+                .unwrap_or_else(|| PathBuf::from("bento.yaml"));
+            let Ok(text) = std::fs::read_to_string(self.root.join(&bento)) else {
+                continue;
+            };
+            let segments: Vec<String> = self
+                .iter()
+                .filter(|(space, _)| {
+                    space.kind == "ContextSpace" && space.namespace.as_deref() == Some(project)
+                })
+                .map(|(space, _)| self.space_segment(project, &space.name))
+                .collect();
+            let mut names: Vec<&str> = segments.iter().map(String::as_str).collect();
+            names.push(project);
+            names.sort_unstable();
+            names.dedup();
+            for (line, literal) in crate::bento::literal_names(&text, &names) {
+                found.push((id.clone(), bento.clone(), line, literal));
+            }
+        }
+        found
+    }
+
     /// The overlay this repository was loaded with, when `JC_ENVIRONMENT` named one (CC-73).
     pub fn environment(&self) -> Option<&str> {
         self.environment.as_deref()
