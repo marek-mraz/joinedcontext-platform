@@ -10,3 +10,4 @@ pub mod publish_ckan;
 pub mod seed;
 pub mod sync;
 pub mod validate;
+pub mod workspace;

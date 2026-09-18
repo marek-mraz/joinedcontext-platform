@@ -13,7 +13,7 @@ use jcctl::platform::InMemory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -101,6 +101,16 @@ fn main() -> ExitCode {
         ["roles", "input", rest @ ..] => match roles_input_options(rest) {
             Some(options) => roles_input(&options),
             None => usage(),
+        },
+        ["workspace", "render", "--repo-dir", dir, "--prefix", prefix, rest @ ..] => match rest {
+            [] => workspace_render(Path::new(dir), prefix, None),
+            ["--out-dir", out] => workspace_render(Path::new(dir), prefix, Some(Path::new(out))),
+            _ => usage(),
+        },
+        ["workspace", "diff", "--base-dir", base, "--repo-dir", dir, rest @ ..] => match rest {
+            [] => workspace_diff(Path::new(base), Path::new(dir), false),
+            ["--json"] => workspace_diff(Path::new(base), Path::new(dir), true),
+            _ => usage(),
         },
         ["schema", "export", rest @ ..] => match out_dir(rest) {
             Some(out) => match export_schemas(&out) {
@@ -247,6 +257,67 @@ fn sync(repo_dir: &Path, options: &jcctl::commands::sync::Options, as_json: bool
         ExitCode::from(2)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Writes the preview render of `dir` (CC-78): to `out` one file per manifest, else to stdout
+/// as one YAML stream.
+fn workspace_render(dir: &Path, prefix: &str, out: Option<&Path>) -> ExitCode {
+    let files = match commands::workspace::render(dir, prefix) {
+        Ok(files) => files,
+        Err(err) => return fail(&err.to_string()),
+    };
+    let Some(out) = out else {
+        for (_, yaml) in &files {
+            print!("---\n{yaml}");
+        }
+        return ExitCode::SUCCESS;
+    };
+    for (name, yaml) in &files {
+        let path = out.join(name);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, yaml));
+        if let Err(err) = written {
+            return fail(&format!("{}: {err}", path.display()));
+        }
+    }
+    println!("{} manifests rendered to {}", files.len(), out.display());
+    ExitCode::SUCCESS
+}
+
+/// What the workspace checked out at `dir` changes against its base at `base` (CC-79), as
+/// the Portal's compare lists it. Exit 2 when it changes something, like `plan`.
+fn workspace_diff(base: &Path, dir: &Path, as_json: bool) -> ExitCode {
+    let entries = match commands::workspace::diff_dirs(base, dir) {
+        Ok(entries) => entries,
+        Err(err) => return fail(&err.to_string()),
+    };
+    if as_json {
+        println!("{}", commands::workspace::to_json(&entries));
+    } else if entries.is_empty() {
+        println!("the workspace changes nothing");
+    } else {
+        for entry in &entries {
+            println!("{} {}", entry.operation.as_str(), entry.id);
+            for field in &entry.fields {
+                let show = |value: &Option<serde_json::Value>| {
+                    value.as_ref().map_or("-".to_owned(), |v| v.to_string())
+                };
+                println!(
+                    "  {}: {} -> {}",
+                    field.path,
+                    show(&field.live),
+                    show(&field.declared)
+                );
+            }
+        }
+    }
+    if entries.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
     }
 }
 
