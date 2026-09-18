@@ -73,6 +73,25 @@
       ],
       "type": "object"
     },
+    "EndpointRef": {
+      "additionalProperties": false,
+      "description": "An Endpoint named by where it lives rather than by its slug (EP-77).",
+      "properties": {
+        "name": {
+          "description": "The Endpoint's name in that project.",
+          "type": "string"
+        },
+        "project": {
+          "description": "The project the Endpoint belongs to.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "project"
+      ],
+      "type": "object"
+    },
     "EndpointSlug": {
       "description": "Cryptographically random endpoint slug with at least 128 bits of entropy (lowercase RFC 4648 base32 without padding, >=26 chars, EP-02)",
       "pattern": "^[a-z2-7]{26,}$",
@@ -261,13 +280,27 @@
           ],
           "description": "Optional reference to cached access token in secret store."
         },
-        "endpointSlug": {
-          "allOf": [
+        "endpointRef": {
+          "anyOf": [
             {
-              "$ref": "#/definitions/EndpointSlug"
+              "$ref": "#/definitions/EndpointRef"
+            },
+            {
+              "type": "null"
             }
           ],
-          "description": "Opaque slug of the target endpoint."
+          "description": "The source Endpoint by project and name, inside one Organization repository; the loader resolves it to this environment's slug (EP-77)."
+        },
+        "endpointSlug": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EndpointSlug"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Opaque slug of the target endpoint, for a source in another instance (EP-77)."
         },
         "schedule": {
           "anyOf": [
@@ -282,8 +315,7 @@
         }
       },
       "required": [
-        "alias",
-        "endpointSlug"
+        "alias"
       ],
       "type": "object"
     },

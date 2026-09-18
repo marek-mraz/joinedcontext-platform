@@ -97,6 +97,16 @@ pub fn run(repo_dir: &Path) -> Report {
         });
     }
 
+    for (id, path, why) in repo.unresolved_references() {
+        let where_from = repo.get(id);
+        report.findings.push(Finding {
+            path: path.clone(),
+            document: where_from.map(|r| r.document).unwrap_or(1),
+            line: where_from.map(|r| r.line).unwrap_or(1),
+            message: format!("SharedSpaceReference {}: {why}", id.name),
+        });
+    }
+
     for (id, path, line, literal) in repo.literal_spaces() {
         report.warnings.push(Finding {
             path,

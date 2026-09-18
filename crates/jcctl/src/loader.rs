@@ -293,6 +293,84 @@ pub struct Repository {
     /// `(resource, path, the string)`. A finding while `dev`'s repository is being migrated,
     /// an error once it is.
     literal_domains: Vec<(ResourceId, PathBuf, String)>,
+    /// SharedSpaceReferences whose `endpointRef` names no Endpoint, or one whose audience
+    /// leaves the referring project out (EP-77, EP-15), as `(resource, path, why)`.
+    unresolved_references: Vec<(ResourceId, PathBuf, String)>,
+}
+
+/// Renders every SharedSpaceReference's `endpointRef` as the `endpointSlug` this environment
+/// minted, and answers the ones it could not (EP-77).
+///
+/// A name never widens access: the reference resolves only when the source Endpoint's
+/// audience admits the referring project (EP-15), so a project cannot learn a slug it may not
+/// use by naming the Endpoint.
+fn resolve_endpoint_refs(
+    resources: &mut BTreeMap<ResourceId, LoadedResource>,
+) -> Vec<(ResourceId, PathBuf, String)> {
+    use serde_json::Value;
+    let endpoints: BTreeMap<(String, String), Value> = resources
+        .iter()
+        .filter(|(id, _)| id.kind == "Endpoint")
+        .filter_map(|(id, loaded)| {
+            Some((
+                (id.namespace.clone()?, id.name.clone()),
+                loaded.manifest.spec.clone(),
+            ))
+        })
+        .collect();
+    let mut unresolved = Vec::new();
+    for (id, loaded) in resources.iter_mut() {
+        if id.kind != "SharedSpaceReference" {
+            continue;
+        }
+        let Some(spec) = loaded.manifest.spec.as_object_mut() else {
+            continue;
+        };
+        let Some(reference) = spec.get("endpointRef") else {
+            continue;
+        };
+        let text = |key: &str| {
+            reference
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let (project, name) = (text("project"), text("name"));
+        let referrer = id.namespace.clone().unwrap_or_default();
+        let Some(endpoint) = endpoints.get(&(project.clone(), name.clone())) else {
+            unresolved.push((
+                id.clone(),
+                loaded.path.clone(),
+                format!("endpointRef names Endpoint {project}/{name}, which the repository does not hold"),
+            ));
+            continue;
+        };
+        let admitted = match endpoint.get("audience").and_then(Value::as_str) {
+            Some("public" | "organization") => true,
+            _ => {
+                referrer == project
+                    || endpoint
+                        .get("allowedProjects")
+                        .and_then(Value::as_array)
+                        .is_some_and(|allowed| {
+                            allowed.iter().any(|p| p.as_str() == Some(&referrer))
+                        })
+            }
+        };
+        match endpoint.get("slug").and_then(Value::as_str) {
+            Some(slug) if admitted => {
+                spec.remove("endpointRef");
+                spec.insert("endpointSlug".to_owned(), Value::String(slug.to_owned()));
+            }
+            _ => unresolved.push((
+                id.clone(),
+                loaded.path.clone(),
+                format!("Endpoint {project}/{name} is not shared with project {referrer} (EP-15)"),
+            )),
+        }
+    }
+    unresolved
 }
 
 /// Every regular file under `root`, in deterministic path order (CC-08).
@@ -554,6 +632,8 @@ impl Repository {
             }
         }
 
+        let unresolved_references = resolve_endpoint_refs(&mut resources);
+
         Ok(Self {
             root: root.to_path_buf(),
             resources,
@@ -561,6 +641,7 @@ impl Repository {
             org_domain,
             hosts,
             literal_domains,
+            unresolved_references,
         })
     }
 
@@ -568,6 +649,12 @@ impl Repository {
     /// (CC-74), as `(resource, path, the string)`.
     pub fn literal_domains(&self) -> &[(ResourceId, PathBuf, String)] {
         &self.literal_domains
+    }
+
+    /// The SharedSpaceReferences whose `endpointRef` did not resolve (EP-77), as
+    /// `(resource, path, why)`.
+    pub fn unresolved_references(&self) -> &[(ResourceId, PathBuf, String)] {
+        &self.unresolved_references
     }
 
     /// The `bento.yaml` files beside Pipeline manifests that type a space segment or the

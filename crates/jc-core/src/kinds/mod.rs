@@ -53,7 +53,7 @@ pub use dataspace::{
     DataOfferSpec, DataSpaceParticipantSpec, Did,
 };
 pub use endpoint::{
-    Audience, Caching, EndpointSlug, EndpointSpec, FileLimits, Projection, RateLimits,
+    Audience, Caching, EndpointRef, EndpointSlug, EndpointSpec, FileLimits, Projection, RateLimits,
     Representation, SharedSpaceReferenceSpec,
 };
 pub use environment::{EnvironmentSpec, SecretBackend};

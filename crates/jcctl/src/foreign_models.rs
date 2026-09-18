@@ -564,10 +564,16 @@ pub fn surface_of(
                     .map_err(|err| MirrorError::Spec(err.to_string()))?;
             spec.validate()
                 .map_err(|err| MirrorError::Spec(err.to_string()))?;
-            Ok(Surface::At(local_surface(
-                public_url,
-                spec.endpoint_slug.as_str(),
-            )?))
+            // The loader rendered an `endpointRef` it could resolve as the slug (EP-77); one
+            // left unresolved is a validate finding and serves no surface here.
+            match spec.endpoint_slug {
+                Some(slug) => Ok(Surface::At(local_surface(public_url, slug.as_str())?)),
+                None => Ok(Surface::None(
+                    "endpointRef did not resolve to an Endpoint shared with this project, so no \
+                     schema surface is derived (EP-77)"
+                        .to_owned(),
+                )),
+            }
         }
         "ContextSourceRegistration" => {
             let spec: jc_core::kinds::ContextSourceRegistrationSpec =

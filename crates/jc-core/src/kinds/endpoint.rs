@@ -521,8 +521,13 @@ impl Projection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SharedSpaceReferenceSpec {
-    /// Opaque slug of the target endpoint.
-    pub endpoint_slug: EndpointSlug,
+    /// Opaque slug of the target endpoint, for a source in another instance (EP-77).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_slug: Option<EndpointSlug>,
+    /// The source Endpoint by project and name, inside one Organization repository; the
+    /// loader resolves it to this environment's slug (EP-77).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_ref: Option<EndpointRef>,
     /// Local alias name for the remote context space.
     pub alias: String,
     /// How often the peer's schema surface is mirrored; 24 hours when absent (DM-49).
@@ -531,6 +536,16 @@ pub struct SharedSpaceReferenceSpec {
     /// Optional reference to cached access token in secret store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_token_secret_ref: Option<SecretRef>,
+}
+
+/// An Endpoint named by where it lives rather than by its slug (EP-77).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EndpointRef {
+    /// The project the Endpoint belongs to.
+    pub project: String,
+    /// The Endpoint's name in that project.
+    pub name: String,
 }
 
 impl Kind for SharedSpaceReferenceSpec {
@@ -548,6 +563,20 @@ impl Kind for SharedSpaceReferenceSpec {
 impl SharedSpaceReferenceSpec {
     /// Validates that the local alias conforms to DNS-1123 label rules.
     pub fn validate(&self) -> Result<()> {
+        match (&self.endpoint_slug, &self.endpoint_ref) {
+            (Some(_), None) => {}
+            (None, Some(reference)) => {
+                names::validate_dns1123_label(&reference.project)?;
+                names::validate_dns1123_label(&reference.name)?;
+            }
+            _ => {
+                return Err(Error::Name {
+                    field: "spec.endpointRef",
+                    value: String::new(),
+                    reason: "name the source by exactly one of endpointRef (this organization) or endpointSlug (another instance)",
+                })
+            }
+        }
         names::validate_dns1123_label(&self.alias).map_err(|e| match e {
             Error::Name { reason, .. } => Error::Name {
                 field: "spec.alias",
