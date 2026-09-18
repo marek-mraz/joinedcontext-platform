@@ -179,3 +179,39 @@ fn test_empty_roles_and_credentials_fail_validation() {
     sa2.spec.credentials.clear();
     assert!(sa2.validate().is_err());
 }
+
+/// T-1454: the Keycloak client id is `{project}-{name}`, and the realm's own workloads have
+/// clients of that shape too. An account that would derive one is refused, naming the id; the
+/// same name in another project is an ordinary account.
+#[test]
+fn an_account_that_derives_a_platform_client_id_is_refused() {
+    use jc_core::kinds::service_account::{keycloak_client_id, PLATFORM_CLIENTS};
+    let account = |project: &str, name: &str| {
+        GOLDEN
+            .replace("name: vendorx-parking-push", &format!("name: {name}"))
+            .replace("namespace: bb-doprava", &format!("namespace: {project}"))
+    };
+    for (project, name) in [
+        ("activity", "ingest"),
+        ("portal", "api"),
+        ("apisix", "gateway"),
+    ] {
+        let sa = ServiceAccount::from_yaml(&account(project, name)).expect("parses");
+        let err = sa
+            .validate()
+            .expect_err("a platform client id is refused")
+            .to_string();
+        let id = keycloak_client_id(project, name);
+        assert!(PLATFORM_CLIENTS.contains(&id.as_str()));
+        assert!(err.contains(&id), "the refusal names the id: {err}");
+    }
+    for (project, name) in [
+        ("helsinki", "ingest"),
+        ("activity", "ingest-2"),
+        ("portal-x", "api"),
+    ] {
+        let sa = ServiceAccount::from_yaml(&account(project, name)).expect("parses");
+        sa.validate()
+            .unwrap_or_else(|err| panic!("{project}/{name} is an ordinary account: {err}"));
+    }
+}

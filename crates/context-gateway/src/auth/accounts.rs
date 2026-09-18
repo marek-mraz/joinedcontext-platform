@@ -13,9 +13,7 @@ use jcctl::loader::Repository;
 use std::collections::{BTreeSet, HashMap};
 
 /// The Keycloak client id of a service account (Architecture/12 section 3).
-pub fn client_id(project: &str, name: &str) -> String {
-    format!("{project}-{name}")
-}
+pub use jc_core::kinds::service_account::keycloak_client_id as client_id;
 
 /// What the gateway needs to know about one service account.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,8 +87,14 @@ impl ServiceAccounts {
 }
 
 /// Builds the table from a loaded repository.
+///
+/// The hyphen that joins project and name is also a character of both, so two accounts can derive
+/// one client id (`helsinki` + `kpi-writer`, `helsinki-kpi` + `writer`). Such an id resolves to
+/// nobody rather than to whichever account was read last: a token is never handed another
+/// project's roles (T-1454).
 pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
     let mut by_client_id = HashMap::new();
+    let mut ambiguous = std::collections::BTreeSet::new();
     for (id, resource) in repo.iter() {
         if id.kind != "ServiceAccount" {
             continue;
@@ -101,8 +105,18 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
             continue;
         };
         let project = id.namespace.clone().unwrap_or_default();
+        let client = client_id(&project, &id.name);
+        if ambiguous.contains(&client) {
+            continue;
+        }
+        if by_client_id.contains_key(&client) {
+            tracing::warn!(client = %client, "two service accounts derive one client id; it resolves to nobody");
+            by_client_id.remove(&client);
+            ambiguous.insert(client);
+            continue;
+        }
         by_client_id.insert(
-            client_id(&project, &id.name),
+            client,
             Account {
                 name: id.name.clone(),
                 project,

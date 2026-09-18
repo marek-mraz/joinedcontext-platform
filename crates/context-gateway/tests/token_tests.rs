@@ -250,3 +250,57 @@ spec:
 
     std::fs::remove_dir_all(&dir).expect("clean up");
 }
+
+/// T-1454: the hyphen that joins project and name is a character of both, so `helsinki` +
+/// `kpi-writer` and `helsinki-kpi` + `writer` derive one client id. That id resolves to nobody,
+/// whichever manifest is read first; an account whose id is its own keeps resolving.
+#[test]
+fn a_client_id_two_accounts_derive_resolves_to_nobody() {
+    let dir = std::env::temp_dir().join("gateway-accounts-ambiguous-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    for (project, name) in [
+        ("helsinki", "kpi-writer"),
+        ("helsinki-kpi", "writer"),
+        ("helsinki", "etl"),
+    ] {
+        let folder = dir.join(format!("projects/{project}/access/serviceaccounts"));
+        std::fs::create_dir_all(&folder).expect("a repository");
+        std::fs::write(
+            folder.join(format!("{name}.yaml")),
+            format!(
+                r#"apiVersion: joinedcontext.com/v1alpha1
+kind: ServiceAccount
+metadata:
+  name: {name}
+  namespace: {project}
+spec:
+  owner:
+    user: demo.steward
+  purpose: "writes {project}"
+  roles:
+    - role: space-writer
+      scope:
+        project: {project}
+  credentials:
+    - kind: oauth-client
+      name: default
+"#
+            ),
+        )
+        .expect("the manifest is written");
+    }
+
+    let repo = jcctl::loader::Repository::load(&dir).expect("the repository loads");
+    let accounts = accounts_of(&repo);
+    assert!(
+        accounts.resolve("helsinki-kpi-writer").is_none(),
+        "an ambiguous client id is nobody's"
+    );
+    assert_eq!(
+        accounts.resolve("helsinki-etl").map(|a| a.name.as_str()),
+        Some("etl")
+    );
+    assert_eq!(accounts.len(), 1);
+
+    std::fs::remove_dir_all(&dir).expect("clean up");
+}

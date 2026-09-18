@@ -176,9 +176,43 @@ impl Kind for ServiceAccountSpec {
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
+        if let Some(project) = meta.namespace.as_deref() {
+            let id = keycloak_client_id(project, &meta.name);
+            if PLATFORM_CLIENTS.contains(&id.as_str()) {
+                return Err(Error::Name {
+                    field: "metadata.name",
+                    value: id,
+                    reason: "is the Keycloak client id of a platform workload, which a \
+                             ServiceAccount must not take (T-1454); choose another name",
+                });
+            }
+        }
         self.validate()
     }
 }
+
+/// The Keycloak client id of a service account: derived, never chosen (Architecture/12 §3).
+pub fn keycloak_client_id(project: &str, name: &str) -> String {
+    format!("{project}-{name}")
+}
+
+/// The realm's clients that belong to the platform itself and have no `ServiceAccount` manifest:
+/// the keys of `components/*/keycloak-clients.yaml` in `joinedcontext-deployment`, less the ones
+/// the seed declares as accounts (`helsinki-pipelines`, `helsinki-agent-proxy`,
+/// `banskabystrica-conformance`, `mcp-mobile`). A token's `azp` is the one claim that tells these
+/// workloads apart (the Portal's activity ingest admits `activity-ingest` alone), so an account
+/// that derives one of them is refused (T-1454). A new platform client is added here too.
+pub const PLATFORM_CLIENTS: &[&str] = &[
+    "activity-ingest",
+    "apisix-gateway",
+    "ckan",
+    "edge",
+    "gitea",
+    "grafana",
+    "portal-api",
+    "portal-reconciler",
+    "portal-ui",
+];
 
 impl ServiceAccountSpec {
     /// Validates owner, purpose, roles, credential formats, and limits.
