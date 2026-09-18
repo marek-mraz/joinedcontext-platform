@@ -194,9 +194,18 @@ fn kept(params: &[(String, String)]) -> Vec<(String, String)> {
     params
         .iter()
         .filter(|(name, _)| PASSTHROUGH.contains(&name.as_str()))
-        .cloned()
+        .map(
+            |(name, value)| match (name.as_str(), value.parse::<u64>()) {
+                // One request cannot make the shared broker read an unbounded history (GW26).
+                ("lastN", Ok(n)) if n > LAST_N_CAP => (name.clone(), LAST_N_CAP.to_string()),
+                _ => (name.clone(), value.clone()),
+            },
+        )
         .collect()
 }
+
+/// The most instances per attribute a temporal read asks the broker for (GW26).
+const LAST_N_CAP: u64 = 1_000;
 
 fn render(params: &[(String, String)]) -> String {
     params

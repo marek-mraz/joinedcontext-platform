@@ -843,7 +843,38 @@ fn refuse_write(
         Value::Array(entities) => entities.iter().collect(),
         other => vec![other],
     };
+    // An addressed write changes the entity in its path and nothing else (GW17, PF-44).
+    let addressed = operations::addressed_entity(path).map(query::decode);
     for entity in entities {
+        if let (Some(path_id), Some(object)) = (&addressed, entity.as_object()) {
+            let named = object.get("id").or_else(|| object.get("@id"));
+            if named.is_some_and(|id| id.as_str() != Some(path_id.as_str())) {
+                return Some(
+                    ProblemDetails::bad_request()
+                        .with_detail("the body names another entity than the path"),
+                );
+            }
+            if let Some(kind) = object.get("type").or_else(|| object.get("@type")) {
+                if let Err(refusal) = write_guard::check_identifier(
+                    path_id,
+                    Some(kind.as_str().unwrap_or_default()),
+                    &endpoint.space,
+                    org_domain,
+                ) {
+                    return Some(ProblemDetails::from(refusal));
+                }
+            }
+        }
+        // What an Endpoint does not show cannot be changed through it (EP-61, GW17).
+        if let Some(hidden) = entity.as_object().and_then(|object| {
+            object
+                .keys()
+                .find(|key| endpoint.hidden_attributes.contains(*key))
+        }) {
+            let refusal = write_guard::Refusal::AttributeOutsideGrant(hidden.clone());
+            tracing::info!(slug = %endpoint.slug, %refusal, "write refused");
+            return Some(ProblemDetails::from(refusal));
+        }
         // A batch delete is an array of URN strings: each is an identifier and nothing else
         // (T-0806).
         let outcome = if let Some(raw) = entity.as_str() {
