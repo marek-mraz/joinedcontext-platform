@@ -331,3 +331,42 @@ def test_the_shape_outranks_the_description(imported):
     the only source that can be wrong, so it is consulted last and only where the shape says
     nothing."""
     assert imported["slots"]["address"]["annotations"]["ngsi_ld_kind"] == "JsonProperty"
+
+
+def test_a_unit_the_catalogue_states_in_prose_is_imported_with_its_anchor(imported):
+    """DM-06, DM-59, T-1100: Smart Data Models has no unit field — the unit is a clause of the
+    description, written by hand (`Units:'Celsius degrees'`). The importer reads that clause and
+    writes the whole block: the UCUM symbol, the UN/CEFACT code NGSI-LD puts on the wire, and
+    the QUDT anchor a federated reader dereferences."""
+    temperature = imported["slots"]["temperature"]
+    assert temperature["unit"] == {
+        "ucum_code": "Cel",
+        "exact_mappings": ["ucefact:CEL", "qudt-unit:DEG_C"],
+        "has_quantity_kind": "qudt-quantkind:Temperature",
+    }
+    # And the vocabularies it cited are declared, or nothing could render the model (DM-59).
+    for prefix in ("ucefact", "qudt-unit", "qudt-quantkind"):
+        assert prefix in imported["prefixes"], prefix
+
+
+def test_a_unit_spelling_the_table_does_not_carry_leaves_the_slot_without_one(imported):
+    """A wrong unit is a wrong number in every export, every axis and every federated
+    comparison, so a spelling the crosswalk does not know gives no unit at all. The catalogue
+    writes `w/m2` for irradiance and the platform offers no code for it."""
+    assert "unit" not in imported["slots"]["airQualityIndex"]
+    # The description is kept whole, so a person can still read what the catalogue said.
+    assert "w/m2" in imported["slots"]["airQualityIndex"]["description"]
+
+
+def test_a_unit_is_read_from_the_clause_and_never_from_loose_prose():
+    """`Units:'…'` and nothing looser: a unit read out of free text finds `meters` in
+    "meters of the road segment" and labels a count as a length."""
+    from import_sdm import _unit_of
+
+    assert _unit_of("Length of the segment in meters") is None
+    assert _unit_of("Property. Distance. Units:'meters'")["ucum_code"] == "m"
+    assert _unit_of('Property. Speed. Units:"Km/h"')["ucum_code"] == "km/h"
+    # A trailing full stop and stray case are the catalogue's own habits, not a new unit.
+    assert _unit_of("Property. Units:'CELSIUS DEGREES'.")["ucum_code"] == "Cel"
+    assert _unit_of("Property. Units:'parsecs'") is None
+    assert _unit_of(None) is None

@@ -27,11 +27,11 @@
         },
         "temperature": {
           "type": "number",
-          "description": "Temperature of the item."
+          "description": "Temperature of the item. Units:'Celsius degrees'"
         },
         "airQualityIndex": {
           "type": "number",
-          "description": "Air quality index."
+          "description": "Air quality index. Units:'w/m2'"
         },
         "reliability": {
           "type": "string",

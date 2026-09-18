@@ -24,6 +24,8 @@ import requests
 import yaml
 
 from common import UPSTREAM_ANNOTATION
+# The one crosswalk Model Tools keeps; the editor's `UNIT_CODES` is the other copy (DM-59).
+from infer_schema import UNIT_PREFIXES, UNIT_QUDT, UNIT_UCUM
 
 SDM_ORG = "smart-data-models"
 SDM_NAMESPACE = "https://smartdatamodels.org/"
@@ -278,6 +280,65 @@ def _kind_of(slot_name: str, definition: dict[str, Any], context: dict[str, Any]
 #: A timestamp typed as a string is a timestamp nothing can filter on (DM-20).
 FORMAT_RANGES = {"date-time": "datetime", "date": "date", "time": "time", "uri": "uriorcurie"}
 
+#: What a catalogue attribute's prose calls a unit, and the UN/CEFACT code it is (DM-06, T-1100).
+#:
+#: Smart Data Models has no unit field: the unit is a clause of the description, written by hand
+#: and spelled differently every time — `Units:'Celsius degrees'`, `Units:'Km/h'`,
+#: `Units:'w/m2'`, `Units:'centimeters'`. So this is a synonym table over the codes the platform
+#: already offers (`infer_schema.UNIT_UCUM`), and a spelling that is not in it leaves the slot
+#: without a unit rather than with a guessed one: a wrong unit is a wrong number, and every
+#: consumer of the model would carry it.
+UNIT_SYNONYMS = {
+    "GQ": ("micrograms per cubic meter", "micrograms per cubic metre", "ug/m3", "µg/m3", "ug/m³"),
+    "M1": ("milligrams per liter", "milligrams per litre", "mg/l"),
+    "CEL": ("celsius degrees", "degrees celsius", "celsius", "cel"),
+    "P1": ("percent", "percentage", "%"),
+    "MTR": ("meters", "metres", "meter", "metre", "m"),
+    "KMT": ("kilometers", "kilometres", "km"),
+    "MTS": ("meters per second", "metres per second", "m/s"),
+    "KMH": ("kilometers per hour", "kilometres per hour", "km/h", "kph"),
+    "SEC": ("seconds", "second", "s"),
+    "HUR": ("hours", "hour", "h"),
+    "KGM": ("kilograms", "kilogram", "kg"),
+    "TNE": ("tonnes", "tonne"),
+    "LTR": ("liters", "litres", "liter", "litre", "l"),
+    "MTQ": ("cubic meters", "cubic metres", "m3", "m³"),
+    "KWH": ("kilowatt hours", "kwh", "kw.h"),
+    "WTT": ("watts", "watt", "w"),
+    "A24": ("candelas per square meter", "cd/m2"),
+    "2N": ("decibels", "decibel", "db"),
+    "HPA": ("hectopascals", "hectopascal", "hpa"),
+    "C62": ("dimensionless",),
+}
+#: The clause the catalogue writes the unit in, and nothing looser: `Units:'…'` with either
+#: quote. A unit read out of free prose would find "meters" in "meters of the road segment".
+UNIT_CLAUSE = re.compile(r"Units?\s*:\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+
+
+def _unit_of(description: str | None) -> dict[str, Any] | None:
+    """The unit an attribute's prose states, as the block DM-06 and DM-59 ask for.
+
+    The catalogue writes it as `Units:'Celsius degrees'` and nothing more structured, so this
+    reads that clause and looks the spelling up; a spelling the table does not carry answers
+    `None`, and the slot keeps no unit at all. Guessing one is worse than having none: a
+    wrong unit is a wrong number in every export, every axis and every federated comparison.
+    """
+    if not description:
+        return None
+    found = UNIT_CLAUSE.search(description)
+    if not found:
+        return None
+    spelled = " ".join(found.group(1).lower().split()).strip(" .'\"")
+    for code, spellings in UNIT_SYNONYMS.items():
+        if spelled in spellings:
+            qudt_unit, quantity_kind = UNIT_QUDT[code]
+            return {
+                "ucum_code": UNIT_UCUM[code],
+                "exact_mappings": [f"ucefact:{code}", f"qudt-unit:{qudt_unit}"],
+                "has_quantity_kind": f"qudt-quantkind:{quantity_kind}",
+            }
+    return None
+
 
 def _range_of(definition: dict[str, Any], imported: dict[str, Any]) -> str | None:
     return imported.get("range") or FORMAT_RANGES.get(definition.get("format") or "")
@@ -458,6 +519,9 @@ def convert(
         iri = _iri(slot_name, context)
         if iri:
             slot["slot_uri"] = iri
+        unit = _unit_of(slot.get("description"))
+        if unit:
+            slot["unit"] = unit
         slots[slot_name] = {k: v for k, v in slot.items() if v is not None and v is not False}
 
     # Enums schema-automator derived for a core slot (`type`) have no slot left to serve.
@@ -478,6 +542,10 @@ def convert(
     prefixes = {"linkml": "https://w3id.org/linkml/"}
     if any(str(slot.get("slot_uri", "")).startswith(SDM_NAMESPACE) for slot in slots.values()):
         prefixes["sdm"] = SDM_NAMESPACE
+    # A unit mapping under an undeclared prefix stops generation (DM-59), so an import that
+    # read a unit declares the vocabularies it cited.
+    if any("unit" in slot for slot in slots.values()):
+        prefixes.update(UNIT_PREFIXES)
 
     model_iri = _iri(name, context) or f"{provenance['repository']}#{name}"
     document: dict[str, Any] = {
