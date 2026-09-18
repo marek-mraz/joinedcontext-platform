@@ -455,11 +455,6 @@ impl DataModelSpec {
         Ok(())
     }
 
-    /// Returns the version-pinned schema URL path for this data model (DM-22, SP-13).
-    pub fn schema_url_path(&self, name: &str) -> String {
-        format!("schema/v{}/{name}.json", self.version.major())
-    }
-
     /// Returns `true` if this data model version can be referenced by Endpoints and Pipelines (DM-26).
     pub fn can_be_referenced(&self) -> bool {
         self.lifecycle == DataModelLifecycle::Published

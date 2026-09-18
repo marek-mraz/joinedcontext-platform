@@ -45,10 +45,6 @@ fn golden_data_model_parses_validates_and_roundtrips() {
     assert_eq!(dm.spec.version.major(), 2);
     assert_eq!(dm.spec.classes, vec!["AirQualityObserved".to_string()]);
     assert!(dm.spec.can_be_referenced());
-    assert_eq!(
-        dm.spec.schema_url_path("bb-air-quality"),
-        "schema/v2/bb-air-quality.json"
-    );
 
     let serialized = dm.to_yaml().expect("serialize");
     assert_eq!(dm, DataModel::from_yaml(&serialized).expect("re-import"));
