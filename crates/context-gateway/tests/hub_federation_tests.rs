@@ -498,3 +498,79 @@ fn the_table_is_what_the_repository_says_and_nothing_else() {
         "a source elsewhere is marked as one"
     );
 }
+
+/// T-1183/T-1184, EP-70, PF-48: the EntityMap of a federated query belongs to the broker, and
+/// the gateway's job is to stay out of its way.
+///
+/// CIM 009 clause 5.14 puts the candidate map in the broker that performs the distributed
+/// operation, which here is the hub broker (T-0345) — the gateway never fans out and so has no
+/// id set of its own to cache. Both halves of the contract are one hop each: `NGSILD-EntityMap`
+/// is not a header a client could use to forge identity or tenancy, so the tenancy middleware
+/// leaves it alone, and the response header naming the map that answered comes back unchanged.
+/// A gateway-side cache keyed on the query would be a second, contradicting map, and an
+/// allowlist of relayed response headers would silence this one.
+#[tokio::test]
+async fn the_entity_map_header_crosses_the_gateway_in_both_directions() {
+    const MAP: &str = "urn:ngsi-ld:EntityMap:helsinki:hub:8f2c";
+
+    let seen: Calls = Arc::new(Mutex::new(Vec::new()));
+    let state = Arc::clone(&seen);
+    let app = Router::new()
+        .fallback(any(
+            |State(seen): State<Calls>, request: Request<Body>| async move {
+                seen.lock().expect("the call log").push(
+                    request
+                        .headers()
+                        .get("ngsild-entitymap")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("<none>")
+                        .to_owned(),
+                );
+                let mut headers = HeaderMap::new();
+                headers.insert("content-type", "application/json".parse().expect("a value"));
+                headers.insert("ngsild-entitymap", MAP.parse().expect("a value"));
+                (StatusCode::OK, headers, json!([]).to_string())
+            },
+        ))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let address = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let members = table(vec![member(
+        "transport",
+        FederationIdentity::ServiceAccount,
+    )]);
+    let response = router(gateway(&format!("http://{address}"), members))
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/endpoint/{HUB_SLUG}/ngsi-ld/v1/entities?type=Vehicle&limit=10"
+                ))
+                .header("NGSILD-EntityMap", MAP)
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("ngsild-entitymap")
+            .and_then(|value| value.to_str().ok()),
+        Some(MAP),
+        "the caller learns which map answered, so its next page can name the same one"
+    );
+    assert_eq!(
+        *seen.lock().expect("the call log"),
+        vec![MAP.to_owned()],
+        "the broker performs the distributed operation and needs the map the caller named"
+    );
+}
