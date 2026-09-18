@@ -115,7 +115,13 @@ pub enum DerivedError {
 
 /// Renders the derived half of one pipeline.
 pub fn render(spec: &PipelineSpec, context: &DerivedContext) -> Result<Derived, DerivedError> {
-    let source = spec.source.as_ref().ok_or(DerivedError::NotDerived)?;
+    // Either shape (PL-54); the derived half renders one source, the first.
+    let source = spec
+        .sources()
+        .into_iter()
+        .next()
+        .ok_or(DerivedError::NotDerived)?;
+    let source = &source;
     if source.endpoint_ref.is_none() {
         return Err(DerivedError::NoEndpoint);
     }
@@ -279,9 +285,13 @@ fn compute_processor(
     spec: &PipelineSpec,
     context: &DerivedContext,
 ) -> Result<Option<Value>, DerivedError> {
-    let Some(compute) = &spec.compute else {
+    let Some(compute) = spec.steps().into_iter().find_map(|step| match step {
+        jc_core::kinds::Step::Compute(compute) => Some(compute),
+        jc_core::kinds::Step::Processor(_) => None,
+    }) else {
         return Ok(None);
     };
+    let compute = &compute;
     match compute.kind {
         // Inline in the manifest it is the last processor (PL-41); otherwise the author writes
         // the mapping in the pipeline's own bento.yaml and there is nothing to add.
@@ -327,15 +337,22 @@ fn module_path(digest: &str) -> Result<String, DerivedError> {
 
 /// PL-37: a pipeline that writes what it watches feeds itself.
 fn guard_feedback(spec: &PipelineSpec, source: &PipelineSource) -> Result<(), DerivedError> {
-    let (Some(trigger), Some(output)) = (&source.trigger, &spec.output) else {
+    let Some(trigger) = &source.trigger else {
         return Ok(());
     };
-    if spec.allow_feedback || trigger.subscription.entity_type != output.entity_type {
+    if spec.allow_feedback {
         return Ok(());
     }
-    Err(DerivedError::Feedback {
-        entity_type: output.entity_type.clone(),
-    })
+    // Any output that writes the watched type feeds the trigger, in either shape (PL-54).
+    match spec
+        .outputs()
+        .into_iter()
+        .filter_map(|output| output.entity_type)
+        .find(|written| *written == trigger.subscription.entity_type)
+    {
+        Some(entity_type) => Err(DerivedError::Feedback { entity_type }),
+        None => Ok(()),
+    }
 }
 
 /// Seconds in an ISO 8601 duration of fixed-length parts.

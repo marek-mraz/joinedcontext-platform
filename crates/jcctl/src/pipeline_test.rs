@@ -10,7 +10,7 @@
 //! and the error when a processor failed. Nothing here resolves a `secretRef` or reaches the
 //! target endpoint (MF-38).
 
-use jc_core::kinds::{ComputeKind, PipelineSpec};
+use jc_core::kinds::{ComputeKind, PipelineSpec, Step};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -145,14 +145,18 @@ pub fn harness(
         }
     }
     processors.push(json!({ "mapping": "meta jc_input = content().string()" }));
-    if let Some(compute) = &spec.compute {
-        match compute.kind {
-            ComputeKind::Bloblang => {
-                if let Some(mapping) = &compute.bloblang {
-                    processors.push(json!({ "mapping": mapping }));
+    // Every step in order, in either shape (PL-54): a processor step as the runner runs it.
+    for step in spec.steps() {
+        match step {
+            Step::Processor(step) => processors.push(json!(step.processor)),
+            Step::Compute(compute) => match compute.kind {
+                ComputeKind::Bloblang => {
+                    if let Some(mapping) = &compute.bloblang {
+                        processors.push(json!({ "mapping": mapping }));
+                    }
                 }
-            }
-            kind => return Err(HarnessError::NotABentoProcessor(kind)),
+                kind => return Err(HarnessError::NotABentoProcessor(kind)),
+            },
         }
     }
     // `let out = this` would read a failed message as JSON and fail again on a body that is
@@ -638,5 +642,50 @@ mod tests {
             problems_of(&json!([1])),
             vec!["the mapping did not produce an object"]
         );
+    }
+    #[test]
+    fn a_second_version_pipeline_runs_every_step_in_order_and_refuses_one_that_is_not_bento() {
+        let second: PipelineSpec = serde_json::from_value(json!({
+            "class": "resident",
+            "sources": [{ "dataSourceRef": { "kind": "DataSource", "name": "shmu-csv" } }],
+            "steps": [
+                { "kind": "bloblang", "bloblang": "root.id = this.station_id" },
+                { "processor": { "log": { "message": "seen" } } }
+            ],
+            "outputs": [{ "targetEndpoint": "urn:ngsi-ld:Endpoint:hel.fi:helsinki:helsinki-all" }]
+        }))
+        .expect("a v1alpha2 spec");
+        let sample = Sample {
+            text: Some("station_id,pm10\n01,18.2\n".into()),
+            url: None,
+            format: SampleFormat::Csv,
+        };
+        let config = harness(
+            &second,
+            &sample,
+            "http://portal:9090/internal/pipeline-tests/abc",
+        )
+        .expect("a harness");
+        let processors = config["pipeline"]["processors"]
+            .as_array()
+            .expect("processors");
+        assert_eq!(processors[2]["mapping"], "root.id = this.station_id");
+        assert_eq!(processors[3]["log"]["message"], "seen");
+
+        let mut wasm = second.clone();
+        wasm.steps = vec![Step::Compute(
+            serde_json::from_value(json!({
+                "kind": "wasm", "module": "./compute", "function": "run"
+            }))
+            .expect("a wasm step"),
+        )];
+        assert!(matches!(
+            harness(
+                &wasm,
+                &sample,
+                "http://portal:9090/internal/pipeline-tests/abc"
+            ),
+            Err(HarnessError::NotABentoProcessor(ComputeKind::Wasm))
+        ));
     }
 }

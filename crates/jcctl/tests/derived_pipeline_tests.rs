@@ -484,3 +484,35 @@ fn the_subscription_is_standard_ngsi_ld_and_nothing_more() {
         vec!["accept", "uri"]
     );
 }
+
+/// PL-37 in the second shape (PL-54): any output that writes the watched type feeds the trigger.
+#[test]
+fn a_second_version_pipeline_whose_second_output_writes_the_watched_type_is_refused() {
+    let yaml = r#"apiVersion: joinedcontext.com/v1alpha2
+kind: Pipeline
+metadata:
+  name: district-air-index
+  namespace: ovzdusie
+spec:
+  class: resident
+  sources:
+    - endpointRef: { kind: Endpoint, name: ovzdusie-internal }
+      trigger: { subscription: { type: AirQualityObserved, watchedAttributes: [pm10] } }
+  steps:
+    - kind: bloblang
+      bloblang: "root = this"
+  outputs:
+    - targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:ep-derived
+      type: AirQualityIndexDaily
+    - targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:ep-other
+      type: AirQualityObserved
+"#;
+    let manifest = Pipeline::from_yaml(yaml).expect("parses");
+    manifest.validate().expect("validates");
+    assert_eq!(
+        render(&manifest.spec, &context()),
+        Err(DerivedError::Feedback {
+            entity_type: "AirQualityObserved".to_owned()
+        })
+    );
+}
