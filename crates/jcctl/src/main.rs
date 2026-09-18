@@ -337,61 +337,46 @@ fn exit_of(clean: bool) -> ExitCode {
 /// cron job whose exit code is the alert, and an operator reads the two resolutions per
 /// resource (CC-38, UI-26).
 fn drift(dir: &Path, as_json: bool, adopt_dir: Option<&Path>, live: Connection) -> ExitCode {
-    let repo = match Repository::load(dir) {
-        Ok(repo) => repo,
-        Err(err) => return fail(&err.to_string()),
-    };
-    let report = match commands::drift::detect(&repo, &InMemory::new()) {
-        Ok(report) => report,
-        Err(err) => return fail(&err.to_string()),
-    };
-
-    if let Some(out) = adopt_dir {
-        match commands::drift::write_adoptions(out, &report) {
-            Ok(written) => eprintln!(
-                "jcctl: {written} adoptable manifests written to {}",
-                out.display()
-            ),
-            Err(err) => return fail(&err.to_string()),
-        }
-    }
-    for drifted in &report.drifted {
-        for redaction in &drifted.redactions {
-            eprintln!(
-                "jcctl: {}/{} adopts without `{redaction}` (MF-17: a manifest carries a \
-                 secretRef, never a secret)",
-                drifted.id.kind, drifted.id.name
-            );
-        }
+    // Configuration is not compared, and there is nothing to compare it against: every
+    // component reads its manifests from the repository (CC-72, T-0421), so the repository is
+    // what is running and a manifest cannot drift away from itself. Running the resource
+    // comparison against an empty platform — which is the only one that exists — reported every
+    // declared resource as `missing` on every run, on a platform where nothing was wrong, and
+    // an alert that is always on is one an operator learns to ignore (T-1216).
+    // `commands::drift::detect` is kept for the day a live configuration store exists; it is
+    // what adoption is built on, and its tests are what keep it ready.
+    if adopt_dir.is_some() {
+        eprintln!(
+            "jcctl: --adopt-dir has nothing to write: a live entity is data, and data is not \
+             adopted into the repository"
+        );
     }
 
-    if as_json {
-        println!("{}", json(&report.to_json()));
-    } else {
-        print!("{}", report.render());
-    }
-
-    // A seed entity the broker no longer holds as declared is drift too, and the same
-    // comparison `plan` makes says so (CC-21, CC-72). Nothing is written, and nothing is
-    // adopted: a live entity is data, and data is not adopted into the repository.
+    // A seed entity the broker no longer holds as declared is drift, and the same comparison
+    // `plan` makes says so (CC-21, CC-72). Nothing is written and nothing is adopted.
     let gateway = match live.open() {
         Ok(gateway) => gateway,
         Err(err) => return fail(&err),
     };
-    let seeds = match &gateway {
-        None => None,
-        Some(gateway) => match commands::seed::plan(dir, gateway) {
-            Ok(seeds) => Some(seeds),
-            Err(err) => return fail(&err.to_string()),
-        },
+    let Some(gateway) = gateway else {
+        // Not a clean run: nothing was compared. A scheduled job whose exit code is the alert
+        // must not report "no drift" when it could not look (CC-21).
+        return fail(
+            "drift needs --gateway-url (or JC_GATEWAY_URL) with --token-file: the seed entities \
+             are what can drift, and they are read through the space surface",
+        );
     };
-    if let Some(seeds) = &seeds {
-        if !as_json {
-            print!("{}", seeds.render());
-        }
+    let seeds = match commands::seed::plan(dir, &gateway) {
+        Ok(seeds) => seeds,
+        Err(err) => return fail(&err.to_string()),
+    };
+    if as_json {
+        println!("{}", json(&seeds.to_json()));
+    } else {
+        print!("{}", seeds.render());
     }
 
-    exit_of(report.is_clean() && seeds.as_ref().is_none_or(commands::seed::Report::is_clean))
+    exit_of(seeds.is_clean())
 }
 
 /// Parses `--json` and the optional `--adopt-dir <path>`, in any order.

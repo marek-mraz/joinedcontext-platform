@@ -8,7 +8,6 @@ use jcctl::commands::drift::{detect, Kind};
 use jcctl::platform::InMemory;
 use jcctl::RawManifest;
 use serde_json::json;
-use std::path::Path;
 use std::process::{Command, Output};
 
 /// The demo repository, live and converged: nothing has drifted yet.
@@ -271,33 +270,44 @@ fn a_credential_the_platform_hands_back_never_reaches_an_adoption() {
 }
 
 #[test]
-fn the_command_exits_two_on_drift_and_zero_on_a_converged_platform() {
-    // The CLI runs against the in-process platform until the Context Gateway serves the
-    // configuration API, so an empty repository is the converged case and a repository with
-    // manifests is a platform missing every one of them.
-    let empty = common::temp_dir("drift-cli-empty");
-    let clean = run(&["drift", "--repo-dir", empty.to_str().unwrap()]);
+fn the_command_needs_a_gateway_and_never_calls_an_unread_platform_clean() {
+    // T-1216: it used to run the resource comparison against an empty in-process platform and
+    // report every declared manifest as `missing` — on every run, on a platform where nothing
+    // was wrong. Configuration cannot drift at all: every component reads it from the
+    // repository (CC-72, T-0421), so what `drift` compares is the seed entities, and those are
+    // read through the space surface.
+    let dir = demo_repo("drift-cli-no-gateway");
+    let output = run(&["drift", "--repo-dir", dir.to_str().unwrap()]);
+
     assert!(
-        clean.status.success(),
-        "{}",
-        String::from_utf8_lossy(&clean.stderr)
+        !output.status.success(),
+        "a run that compared nothing exited as if it had found nothing"
     );
-    assert!(String::from_utf8_lossy(&clean.stdout).contains("no drift"));
+    let said = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(said.contains("--gateway-url"), "{said}");
+    let printed = String::from_utf8_lossy(&output.stdout).to_string();
+    for kind in [
+        "Organization",
+        "Project",
+        "ContextSpace",
+        "DataModel",
+        "missing",
+    ] {
+        assert!(
+            !printed.contains(kind),
+            "the report still names configuration, which cannot drift: {printed}"
+        );
+    }
 
-    let dir = demo_repo("drift-cli");
-    let drifted = run(&["drift", "--repo-dir", dir.to_str().unwrap(), "--json"]);
-    assert_eq!(drifted.status.code(), Some(2));
-    let report: serde_json::Value =
-        serde_json::from_slice(&drifted.stdout).expect("stdout is one JSON document");
-    assert_eq!(report["summary"]["drifted"], 4);
-    assert_eq!(report["drifted"][0]["drift"], "MISSING");
-
-    let _ = std::fs::remove_dir_all(&empty);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn the_adopt_dir_flag_writes_where_it_is_told() {
+fn the_adopt_dir_flag_says_it_has_nothing_to_write() {
+    // A live entity is data, and data is not adopted into the repository (CC-38): a seed
+    // entity's one resolution is revert. The flag stays for the day a live configuration store
+    // exists — `detect` and `write_adoptions` are what adoption is built on — and until then it
+    // says so instead of writing an empty directory and looking like it worked.
     let dir = demo_repo("drift-cli-adopt");
     let out = common::temp_dir("drift-cli-adopt-out");
     let output = run(&[
@@ -308,10 +318,8 @@ fn the_adopt_dir_flag_writes_where_it_is_told() {
         out.to_str().unwrap(),
     ]);
 
-    assert_eq!(output.status.code(), Some(2));
-    // Nothing is live, so there is nothing to adopt; the run still says what it wrote.
-    assert!(String::from_utf8_lossy(&output.stderr).contains("0 adoptable manifests"));
-    assert!(Path::new(&out).exists());
+    let said = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(said.contains("nothing to write"), "{said}");
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&out);

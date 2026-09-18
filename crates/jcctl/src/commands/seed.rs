@@ -41,6 +41,36 @@ impl Report {
         self.pending() == 0
     }
 
+    /// The report as JSON, which is what `--json` prints and what a scheduled run parses.
+    ///
+    /// The same shape the resource report uses (API/03 §6): a summary a dashboard reads
+    /// without walking the list, and one object per entity that is not as declared. An
+    /// unchanged entity is left out — a report is what to act on, not an inventory.
+    pub fn to_json(&self) -> serde_json::Value {
+        let drifted: Vec<serde_json::Value> = self
+            .changes
+            .iter()
+            .filter(|change| change.action != Action::Unchanged)
+            .map(|change| {
+                serde_json::json!({
+                    "space": change.space,
+                    "id": change.id,
+                    "drift": match change.action {
+                        Action::Create => "MISSING",
+                        _ => "MODIFIED",
+                    },
+                    // A live entity is data, and data is not adopted into the repository
+                    // (CC-38): reverting is the one resolution a seed entity has.
+                    "resolutions": ["revert"],
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "summary": { "checked": self.changes.len(), "drifted": drifted.len() },
+            "drifted": drifted,
+        })
+    }
+
     /// One line per entity, and a last line that counts them.
     pub fn render(&self) -> String {
         let mut out = String::new();
