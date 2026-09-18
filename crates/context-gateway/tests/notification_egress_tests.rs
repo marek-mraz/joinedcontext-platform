@@ -290,6 +290,8 @@ fn gateway_with(
                 Some(PUBLIC_URL.to_owned()),
             )
             .deliver_through(egress.map(str::to_owned))
+            // The sinks listen on this address; the installation would name its own (T-1302).
+            .deliver_privately_to(vec!["127.0.0.1".to_owned()])
             .serve([Endpoint {
                 policies: vec![policy],
                 ..endpoint(hidden)
@@ -954,5 +956,96 @@ async fn a_subscription_stored_under_the_public_url_is_delivered_after_the_egres
         seen.lock().expect("the delivery log").len(),
         1,
         "a subscription written under the old base is still delivered"
+    );
+}
+
+/// A subscription whose endpoint points inside the platform's own networks: `status` for it.
+async fn created_with_endpoint(uri: &str) -> (StatusCode, Vec<Value>) {
+    create(json!({
+        "type": "Subscription",
+        "entities": [{ "type": "AirQualityObserved" }],
+        "notification": { "endpoint": { "uri": uri } }
+    }))
+    .await
+}
+
+#[tokio::test]
+async fn a_subscription_with_a_private_or_metadata_notification_endpoint_is_refused() {
+    for uri in [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.43.0.10:8080/admin",
+        "http://192.168.1.1/",
+        "https://172.16.0.5/hook",
+        "http://100.64.0.1/",
+        "http://0.0.0.0:8080/",
+        "http://[::1]:8080/",
+        "http://[fd00::1]/",
+        "http://[fe80::1]/",
+        "http://[::ffff:10.0.0.1]/",
+        "http://user:pass@10.0.0.1/",
+    ] {
+        let (status, forwarded) = created_with_endpoint(uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert!(
+            forwarded.is_empty(),
+            "nothing was stored for {uri}: {forwarded:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_subscription_with_a_loopback_notification_endpoint_is_refused() {
+    for uri in [
+        "http://127.0.0.2:8080/",
+        "http://localhost:8080/",
+        "http://api.localhost/",
+        "http://LOCALHOST./",
+    ] {
+        let (status, forwarded) = created_with_endpoint(uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert!(
+            forwarded.is_empty(),
+            "nothing was stored for {uri}: {forwarded:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_subscription_with_a_public_notification_endpoint_is_accepted() {
+    let (status, forwarded) = created_with_endpoint("https://example.com/webhook").await;
+    assert!(status.is_success(), "{status}");
+    assert_eq!(forwarded.len(), 1, "the broker got the subscription");
+}
+
+#[tokio::test]
+async fn a_host_the_installation_names_is_let_through_although_it_is_private() {
+    // The test gateway names 127.0.0.1, as an installation names its in-cluster subscriber.
+    let (status, forwarded) = created_with_endpoint("http://127.0.0.1:9000/hook").await;
+    assert!(status.is_success(), "{status}");
+    assert_eq!(forwarded.len(), 1);
+}
+
+#[tokio::test]
+async fn a_stored_endpoint_whose_name_resolves_inside_the_platform_is_not_delivered_to() {
+    let (webhook, seen, _) = sink().await;
+    // The same sink, reached by a name rather than by the address the installation named.
+    let by_name = webhook.replacen("127.0.0.1", "localhost", 1);
+    let (status, _) = deliver(
+        Some(stored(
+            &by_name,
+            json!(["temperature"]),
+            "((temperature<100))",
+        )),
+        vec![SENSOR.to_owned()],
+        vec![sensor(SENSOR)],
+        &[],
+        &by_name,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        seen.lock().expect("the delivery log").is_empty(),
+        "nothing left the gateway"
     );
 }

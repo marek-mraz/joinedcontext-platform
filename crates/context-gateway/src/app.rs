@@ -99,6 +99,8 @@ pub struct Gateway {
     pub public_url: Option<String>,
     /// The base a rewritten notification endpoint carries, when it is not the public one.
     pub egress_url: Option<String>,
+    /// Hosts inside the platform's networks a notification may be delivered to (T-1302).
+    pub private_hosts: Vec<String>,
     /// One token bucket per endpoint and caller (EP-20).
     pub rate_limiter: RateLimiter,
     /// The questions a destructive MCP tool is waiting on an answer to (AG-08, T-0849).
@@ -119,6 +121,7 @@ impl Gateway {
             agreements: ArcSwap::from_pointee(Agreements::new()),
             public_url: None,
             egress_url: None,
+            private_hosts: Vec::new(),
             rate_limiter: RateLimiter::new(),
             elicitations: crate::mcp::elicitation::Elicitations::new(),
         }
@@ -146,6 +149,13 @@ impl Gateway {
     /// public edge, where it would arrive indistinguishable from any request off the internet.
     pub fn deliver_through(mut self, egress_url: Option<String>) -> Self {
         self.egress_url = egress_url;
+        self
+    }
+
+    /// Lets notifications reach these hosts although they sit inside the platform's own
+    /// networks: an installation's in-cluster subscribers, named one by one (T-1302).
+    pub fn deliver_privately_to(mut self, hosts: Vec<String>) -> Self {
+        self.private_hosts = hosts;
         self
     }
 
@@ -635,6 +645,7 @@ async fn serve_ngsi_ld(
             &constraints,
             &endpoint,
             gateway.egress_base(),
+            &gateway.private_hosts,
             operation,
         ) {
             Ok(narrowed) => sent = narrowed,
@@ -858,6 +869,7 @@ fn narrowed_subscription(
     constraints: &Constraints,
     endpoint: &Endpoint,
     base_url: &str,
+    private_hosts: &[String],
     operation: Operation,
 ) -> Result<Vec<u8>, Box<ProblemDetails>> {
     let mut payload: Value = serde_json::from_slice(body).map_err(|_| {
@@ -868,6 +880,7 @@ fn narrowed_subscription(
         constraints,
         endpoint,
         base_url,
+        private_hosts,
         operation == Operation::CreateSubscription,
     )?;
     serde_json::to_vec(&payload).map_err(|error| {

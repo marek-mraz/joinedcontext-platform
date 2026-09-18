@@ -99,7 +99,11 @@ async fn main() -> ExitCode {
 
     // Where the broker delivers a notification, which is not where a caller's token is
     // audience-bound: the public URL when the deployment names no egress URL (R46).
-    let gateway = Arc::new(gateway.deliver_through(config.egress_url.clone()));
+    let gateway = Arc::new(
+        gateway
+            .deliver_through(config.egress_url.clone())
+            .deliver_privately_to(config.egress_private_hosts.clone()),
+    );
     // The repository is a cache of the enforcement point's decisions, so it is followed
     // rather than read once: a revoked Policy or ServiceAccount stops granting within a
     // second, without a restart (R48, EP-19, OPS-45).

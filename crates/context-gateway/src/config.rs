@@ -38,6 +38,9 @@ pub struct Config {
     /// public roots (`JC_GATEWAY_EGRESS_CA_BUNDLE`), for subscribers behind the
     /// installation's own CA (R46).
     pub egress_ca_bundle: Option<PathBuf>,
+    /// Hosts inside the platform's own networks a notification may still be delivered to
+    /// (`JC_GATEWAY_EGRESS_PRIVATE_HOSTS`, comma-separated); empty refuses them all (T-1302).
+    pub egress_private_hosts: Vec<String>,
 }
 
 /// Why the environment does not describe a runnable gateway.
@@ -103,6 +106,15 @@ impl Config {
                 .ok()
                 .filter(|path| !path.trim().is_empty())
                 .map(PathBuf::from),
+            egress_private_hosts: std::env::var("JC_GATEWAY_EGRESS_PRIVATE_HOSTS")
+                .map(|hosts| {
+                    hosts
+                        .split(',')
+                        .map(|host| host.trim().to_ascii_lowercase())
+                        .filter(|host| !host.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 }
