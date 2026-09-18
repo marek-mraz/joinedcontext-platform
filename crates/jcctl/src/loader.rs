@@ -145,6 +145,18 @@ impl fmt::Display for ResourceId {
 /// Errors that can occur when loading an organization repository (CC-08, MF-06).
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
+    /// A workspace preview render still holds an organization-unique name without its render
+    /// prefix, so it could reach the project it was branched from (CC-78, PF-83).
+    #[error("the preview render leaves {what} without the prefix `{prefix}`: {value}")]
+    UnprefixedName {
+        /// The render prefix, `ws-{name}-`.
+        prefix: String,
+        /// What kind of name: a namespace, a space segment, an id.
+        what: &'static str,
+        /// Where it is and what it is.
+        value: String,
+    },
+
     /// File path or symlink target escapes repository root (CC-08).
     #[error("path escapes repository root: {path}")]
     PathEscapesRepository {
@@ -296,6 +308,73 @@ pub struct Repository {
     /// SharedSpaceReferences whose `endpointRef` names no Endpoint, or one whose audience
     /// leaves the referring project out (EP-77, EP-15), as `(resource, path, why)`.
     unresolved_references: Vec<(ResourceId, PathBuf, String)>,
+}
+
+/// The namespace an organization-scoped manifest lives in.
+const ORG_NAMESPACE: &str = "org";
+
+/// Whether `text` is an id, or an anchored id pattern, of the organization `domain`: its
+/// domain segment is `domain`, with the dots escaped in a pattern.
+fn of_organization(text: &str, domain: &str) -> bool {
+    let body = text.trim_start_matches('^');
+    body.starts_with("urn:ngsi-ld:")
+        && body
+            .split(':')
+            .nth(3)
+            .is_some_and(|segment| !domain.is_empty() && segment.replace("\\.", ".") == domain)
+}
+
+/// Every id of the organization `domain` written under `value`, whole or inside a longer
+/// string such as a mapping (CC-78): the renderer moves whole ids, so an id inside text is
+/// what a preview would leak.
+fn ids_of(value: &serde_json::Value, domain: &str, found: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => {
+            for (start, _) in text.match_indices("urn:ngsi-ld:") {
+                let id = &text[start..];
+                if of_organization(id, domain) {
+                    found.push(id.to_owned());
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            items.iter().for_each(|item| ids_of(item, domain, found))
+        }
+        serde_json::Value::Object(map) => map.values().for_each(|item| ids_of(item, domain, found)),
+        _ => {}
+    }
+}
+
+/// Prefixes, under `value`, the `{space}` segment of every id of this organization, the
+/// `namespace` of a typed reference into one of `projects`, and the `project` of an
+/// `endpointRef` (CC-78, EP-77).
+fn prefix_references(
+    value: &mut serde_json::Value,
+    prefix: &str,
+    domain: &str,
+    projects: &std::collections::BTreeSet<String>,
+) {
+    match value {
+        serde_json::Value::String(text) if of_organization(text, domain) => {
+            *text = jc_core::apply_render_prefix(text, prefix);
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| prefix_references(item, prefix, domain, projects)),
+        serde_json::Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                match item {
+                    serde_json::Value::String(name)
+                        if (key == "namespace" || key == "project") && projects.contains(name) =>
+                    {
+                        *name = format!("{prefix}{name}");
+                    }
+                    _ => prefix_references(item, prefix, domain, projects),
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Renders every SharedSpaceReference's `endpointRef` as the `endpointSlug` this environment
@@ -474,6 +553,95 @@ impl Repository {
             .ok()
             .filter(|value| !value.trim().is_empty());
         Self::load_for(root, environment.as_deref())
+    }
+
+    /// A workspace preview: the repository rendered with `prefix` (`ws-{name}-`) in front of
+    /// every organization-unique identity (CC-78, ADR-N-024).
+    ///
+    /// Project namespaces are prefixed, and with them every `{project}-{name}` space segment
+    /// (PF-84); a pinned segment is prefixed too, and so is the `{space}` segment of every id of
+    /// this organization a spec writes, through [`jc_core::apply_render_prefix`]. Nothing is
+    /// renamed at rest: the files keep their names and paths (CC-77). A render that still holds
+    /// an unprefixed namespace, space segment or id of this organization is refused, so a
+    /// preview cannot write into the project it came from by construction (PF-83). An empty
+    /// prefix is the ordinary load.
+    pub fn load_preview(
+        root: &Path,
+        environment: Option<&str>,
+        prefix: &str,
+    ) -> Result<Self, LoadError> {
+        let mut repo = Self::load_for(root, environment)?;
+        if prefix.is_empty() {
+            return Ok(repo);
+        }
+        let domain = repo.org_domain.clone().unwrap_or_default();
+        let projects: std::collections::BTreeSet<String> = repo
+            .resources
+            .keys()
+            .filter_map(|id| id.namespace.clone())
+            .filter(|namespace| namespace != ORG_NAMESPACE)
+            .collect();
+        let prefixed = |name: &str| format!("{prefix}{name}");
+        let mut rendered = BTreeMap::new();
+        for (mut id, mut loaded) in std::mem::take(&mut repo.resources) {
+            if let Some(namespace) = id.namespace.as_mut().filter(|ns| projects.contains(*ns)) {
+                *namespace = prefixed(namespace);
+                loaded.manifest.metadata.namespace = Some(namespace.clone());
+            }
+            // A Project is named in `org`; its name is the namespace everything else lives in.
+            if id.kind == "Project" {
+                id.name = prefixed(&id.name);
+                loaded.manifest.metadata.name = id.name.clone();
+            }
+            if id.kind == "ContextSpace" {
+                if let Some(pin) = loaded.manifest.spec.get_mut("urnSegment") {
+                    if let Some(text) = pin.as_str() {
+                        *pin = serde_json::Value::String(prefixed(text));
+                    }
+                }
+            }
+            prefix_references(&mut loaded.manifest.spec, prefix, &domain, &projects);
+            rendered.insert(id, loaded);
+        }
+        repo.resources = rendered;
+        repo.check_prefixed(prefix, &domain)?;
+        Ok(repo)
+    }
+
+    /// Refuses a preview render that holds an organization-unique name without `prefix`
+    /// (CC-78).
+    fn check_prefixed(&self, prefix: &str, domain: &str) -> Result<(), LoadError> {
+        let unprefixed = |what, value: String| LoadError::UnprefixedName {
+            prefix: prefix.to_owned(),
+            what,
+            value,
+        };
+        for (id, loaded) in &self.resources {
+            if let Some(namespace) = id.namespace.as_deref() {
+                if namespace != ORG_NAMESPACE && !namespace.starts_with(prefix) {
+                    return Err(unprefixed("a project namespace", format!("{id}")));
+                }
+                if id.kind == "ContextSpace" {
+                    let segment = self.space_segment(namespace, &id.name);
+                    if !segment.starts_with(prefix) {
+                        return Err(unprefixed("a space segment", format!("{id}: {segment}")));
+                    }
+                }
+            }
+            let mut ids = Vec::new();
+            ids_of(&loaded.manifest.spec, domain, &mut ids);
+            if let Some(id_text) = ids.into_iter().find(|text| {
+                text.split(':')
+                    .nth(4)
+                    .is_some_and(|space| !space.starts_with(prefix))
+            }) {
+                return Err(unprefixed(
+                    "an id of this organization",
+                    format!("{id}: {id_text}"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The same load, with the environment named rather than read from the process (CC-73).

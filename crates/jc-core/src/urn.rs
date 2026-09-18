@@ -108,6 +108,31 @@ impl Urn {
     }
 }
 
+/// The id, or anchored id pattern, with its `{space}` segment prefixed by `prefix` (CC-78).
+///
+/// A workspace preview renders every organization-unique identity with `ws-{name}-` in front;
+/// this is the one implementation of that for ids, which the loader and the gateway both call,
+/// so a preview can never mint or match an id of the space it was branched from. Only the
+/// `{space}` segment moves: type, domain and local id stay as they are. A string that is not an
+/// NGSI-LD URN, or a URN without a `{space}` segment, comes back unchanged, as does everything
+/// with an empty prefix or one the segment already carries.
+pub fn apply_render_prefix(urn: &str, prefix: &str) -> String {
+    let (anchor, body) = match urn.strip_prefix('^') {
+        Some(body) => ("^", body),
+        None => ("", urn),
+    };
+    if prefix.is_empty() || !body.starts_with("urn:ngsi-ld:") {
+        return urn.to_owned();
+    }
+    let mut parts: Vec<&str> = body.splitn(6, ':').collect();
+    if parts.len() < 6 || parts[4].is_empty() || parts[4].starts_with(prefix) {
+        return urn.to_owned();
+    }
+    let prefixed = format!("{prefix}{}", parts[4]);
+    parts[4] = &prefixed;
+    format!("{anchor}{}", parts.join(":"))
+}
+
 impl fmt::Display for Urn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

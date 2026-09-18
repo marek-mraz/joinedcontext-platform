@@ -49,4 +49,4 @@ pub use kinds::{
     DEFAULT_EGRESS_BYTES_PER_RUN,
 };
 pub use registry::{by_kind, by_plural, KindInfo, KINDS};
-pub use urn::Urn;
+pub use urn::{apply_render_prefix, Urn};

@@ -259,3 +259,42 @@ fn serde_round_trips_through_a_json_string_and_rejects_garbage() {
     assert!(serde_json::from_str::<Urn>("\"urn:ngsi-ld:Bad\"").is_err());
     assert!(serde_json::from_str::<Urn>("42").is_err());
 }
+
+/// CC-78: a preview's ids carry its render prefix in the `{space}` segment and nowhere else.
+#[test]
+fn apply_render_prefix_changes_space_segment() {
+    assert_eq!(
+        jc_core::apply_render_prefix("urn:ngsi-ld:Vehicle:hel.fi:helsinki-bikes:v:1", "ws-demo-"),
+        "urn:ngsi-ld:Vehicle:hel.fi:ws-demo-helsinki-bikes:v:1",
+        "a local id that has colons keeps them"
+    );
+    assert_eq!(
+        jc_core::apply_render_prefix(r"^urn:ngsi-ld:Vehicle:hel\.fi:helsinki:.*$", "ws-demo-"),
+        r"^urn:ngsi-ld:Vehicle:hel\.fi:ws-demo-helsinki:.*$",
+        "an anchored pattern moves the same way"
+    );
+}
+
+#[test]
+fn apply_render_prefix_does_not_change_other_segments_or_prefix_twice() {
+    let once = jc_core::apply_render_prefix("urn:ngsi-ld:Endpoint:hel.fi:helsinki:all", "ws-a-");
+    assert_eq!(once, "urn:ngsi-ld:Endpoint:hel.fi:ws-a-helsinki:all");
+    assert_eq!(jc_core::apply_render_prefix(&once, "ws-a-"), once);
+}
+
+#[test]
+fn apply_render_prefix_on_non_urn_returns_unchanged() {
+    for text in [
+        "",
+        "helsinki",
+        "urn:ngsi-ld:Type",
+        "urn:ngsi-ld:T:hel.fi::x",
+        "https://hel.fi/x:y",
+    ] {
+        assert_eq!(jc_core::apply_render_prefix(text, "ws-a-"), text);
+    }
+    assert_eq!(
+        jc_core::apply_render_prefix("urn:ngsi-ld:T:hel.fi:s:x", ""),
+        "urn:ngsi-ld:T:hel.fi:s:x"
+    );
+}

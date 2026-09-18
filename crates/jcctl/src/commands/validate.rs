@@ -496,6 +496,8 @@ fn finding_of(err: LoadError) -> Finding {
         | LoadError::Overlay { path, .. } => (path.clone(), 1, 1),
         // The overlay is missing, so there is no file to point at.
         LoadError::NoSuchEnvironment { .. } => (PathBuf::from("environments"), 1, 1),
+        // A preview render is refused as a whole; the message names the resource.
+        LoadError::UnprefixedName { .. } => (PathBuf::new(), 1, 1),
     };
     Finding {
         path,
