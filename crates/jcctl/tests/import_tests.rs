@@ -536,3 +536,76 @@ fn the_command_exits_one_and_writes_nothing_when_the_bundle_is_refused() {
     let _ = std::fs::remove_dir_all(&source);
     let _ = std::fs::remove_dir_all(&dest);
 }
+
+/// CC-08: no `jcctl` command reads a file outside the directory it was given.
+///
+/// `documents` walked the bundle with `WalkDir` and read every `*.yaml` it found, links included,
+/// so a link planted in an unpacked bundle put a manifest from anywhere on the machine into the
+/// plan. The walk is the loader's now, and the loader has refused this all along (T-1478).
+#[test]
+fn import_refuses_a_link_out_of_the_source() {
+    let source = bundle("import-link-escape-src");
+    let dest = destination("import-link-escape-dest");
+    let outside = temp_dir("import-link-escape-outside");
+    write_file(
+        &outside,
+        "elsewhere.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: smuggled\n  namespace: vzduch\nspec:\n  isSandbox: true\n",
+    );
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        outside.join("elsewhere.yaml"),
+        source.join("projects/vzduch/spaces/vzduch/smuggled.yaml"),
+    )
+    .expect("plant the link");
+
+    let refused = collect(&source, &dest, &options("ovzdusie"))
+        .expect_err("a link out of the bundle is refused");
+    let said = refused.to_string();
+    assert!(
+        said.contains("escapes repository root"),
+        "the refusal says why: {said}"
+    );
+    // The path it names is the one inside the bundle; where the link pointed is not repeated back.
+    assert!(
+        said.contains("projects/vzduch/spaces/vzduch/smuggled.yaml"),
+        "the refusal names the file: {said}"
+    );
+    assert!(
+        !said.contains("elsewhere.yaml") && !said.contains("isSandbox"),
+        "neither the target nor its contents are in the message: {said}"
+    );
+}
+
+/// A link inside the bundle is still read: an unpacked archive may hold them, and the rule is
+/// about leaving the tree, not about links.
+#[test]
+fn import_reads_a_link_that_stays_inside_the_source() {
+    let source = bundle("import-link-inside-src");
+    let dest = destination("import-link-inside-dest");
+    // A staged copy inside the bundle, linked to from where the walk looks.
+    write_file(
+        &source,
+        "projects/vzduch/.staged/voda.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: voda\n  namespace: vzduch\nspec:\n  isSandbox: false\n",
+    );
+    std::fs::create_dir_all(source.join("projects/vzduch/spaces/voda"))
+        .expect("create the space directory the link lives in");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        source.join("projects/vzduch/.staged/voda.yaml"),
+        source.join("projects/vzduch/spaces/voda/space.yaml"),
+    )
+    .expect("plant the link");
+
+    let report = collect(&source, &dest, &options("ovzdusie")).expect("import collects");
+    let paths: Vec<String> = report
+        .imported
+        .iter()
+        .map(|imported| imported.path.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        paths.iter().any(|path| path.contains("voda")),
+        "the linked document was read: {paths:?}"
+    );
+}

@@ -325,13 +325,16 @@ fn documents(source: &Path) -> Result<Vec<(String, String)>, ImportError> {
 
     let mut files = Vec::new();
     if source.is_dir() {
-        for entry in walkdir::WalkDir::new(source)
-            .sort_by_file_name()
-            .into_iter()
-            .filter_map(Result::ok)
-        {
+        // The loader's walk, because the containment rule belongs in one place: this one read a
+        // link whose target left the bundle, so a plan could carry a manifest from anywhere on the
+        // machine the bundle was unpacked on (CC-08, T-1478).
+        let walked = crate::loader::walk_files(source).map_err(|error| ImportError::Io {
+            path: source.to_path_buf(),
+            source: std::io::Error::other(error),
+        })?;
+        for entry in walked {
             let path = entry.path();
-            if path.is_file()
+            if entry.file_type().is_file()
                 && path
                     .extension()
                     .and_then(|e| e.to_str())

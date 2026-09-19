@@ -282,8 +282,7 @@ pub struct Bundle {
 pub fn collect_project(repo_dir: &Path, project: &str) -> std::io::Result<Bundle> {
     let root = repo_dir.join("projects").join(project);
     let mut bundle = Bundle::default();
-    let mut files: Vec<PathBuf> = Vec::new();
-    walk(&root, &mut files)?;
+    let mut files: Vec<PathBuf> = walk(&root)?;
     files.sort();
 
     for path in files {
@@ -436,22 +435,20 @@ fn index_of(project: &str, revision: &str, exported_by: &str, bundle: &Bundle) -
     })
 }
 
-/// Every file under `dir`, depth first; a directory whose name starts with a dot is skipped.
-fn walk(dir: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
+/// Every file under `dir`; a directory whose name starts with a dot is skipped, and a link whose
+/// target leaves `dir` is refused rather than read (CC-08).
+///
+/// The walk is the loader's own, because the containment rule belongs in one place: this one used
+/// `std::fs::metadata`, which follows a link, so a link to `/etc/passwd` inside a checkout put that
+/// file's bytes in the archive (T-1478).
+fn walk(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     if !dir.exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if std::fs::metadata(&path)?.is_dir() {
-            if entry.file_name().to_string_lossy().starts_with('.') {
-                continue;
-            }
-            walk(&path, into)?;
-            continue;
-        }
-        into.push(path);
-    }
-    Ok(())
+    Ok(crate::loader::walk_files(dir)
+        .map_err(std::io::Error::other)?
+        .into_iter()
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.path().to_path_buf())
+        .collect())
 }

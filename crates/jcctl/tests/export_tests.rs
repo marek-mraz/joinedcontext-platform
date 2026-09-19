@@ -345,3 +345,66 @@ fn an_empty_platform_exports_an_empty_repository() {
     assert!(validate::run(&dir).is_valid());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// CC-08: no `jcctl` command reads a file outside the directory it was given.
+///
+/// `walk` used `std::fs::metadata`, which follows a link, so a link planted in a checkout put the
+/// target's bytes in the archive as a native file — the loader has refused this all along, and now
+/// the export walks with the loader's own rule (T-1478).
+#[test]
+fn export_refuses_a_link_out_of_the_checkout() {
+    let repo = demo_repo("export-link-escape");
+    let outside = temp_dir("export-link-escape-outside");
+    std::fs::write(
+        outside.join("stolen.txt"),
+        "a secret from outside the checkout",
+    )
+    .expect("write the file the link points at");
+
+    let inside = repo.join("projects/ovzdusie/pipelines/aq");
+    std::fs::create_dir_all(&inside).expect("create the pipeline directory");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.join("stolen.txt"), inside.join("bento.yaml"))
+        .expect("plant the link");
+
+    let refused = export::collect_project(&repo, "ovzdusie")
+        .expect_err("a link out of the checkout is refused, not read");
+    let said = refused.to_string();
+    assert!(
+        said.contains("escapes repository root"),
+        "the refusal says why: {said}"
+    );
+    assert!(
+        !said.contains("a secret from outside"),
+        "the refusal never carries what it refused: {said}"
+    );
+}
+
+/// The link that stays inside is the one a ConfigMap or Secret volume is made of, so it still works.
+#[test]
+fn export_reads_a_link_that_stays_inside_the_checkout() {
+    let repo = demo_repo("export-link-inside");
+    common::write(
+        &repo,
+        "projects/ovzdusie/pipelines/aq/pipeline.yaml",
+        PIPELINE,
+    );
+    common::write(&repo, "projects/ovzdusie/.real/bento.yaml", BENTO);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        repo.join("projects/ovzdusie/.real/bento.yaml"),
+        repo.join("projects/ovzdusie/pipelines/aq/bento.yaml"),
+    )
+    .expect("plant the link");
+
+    let bundle = export::collect_project(&repo, "ovzdusie").expect("the checkout is read");
+    let natives: Vec<String> = bundle
+        .natives
+        .iter()
+        .map(|(path, _)| path.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        natives.contains(&"projects/ovzdusie/pipelines/aq/bento.yaml".to_owned()),
+        "{natives:?}"
+    );
+}
