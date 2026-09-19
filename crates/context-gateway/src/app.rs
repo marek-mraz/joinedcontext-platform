@@ -718,7 +718,16 @@ async fn serve_ngsi_ld(
         Err(error) => return ProblemDetails::from(error).into_response(),
     };
 
-    let projected = project_answer(answer, operation, &constraints).await;
+    // The answer is judged in the model it arrives in: a view endpoint's grant names the class the
+    // view serves, and the broker answers in the class it stores, exactly as `invert_query`
+    // already assumes for the query's own `type` (DM-51, T-2241).
+    let judged = match &endpoint.view_mapping {
+        None => constraints.clone(),
+        Some(mapping) => {
+            Box::new(constraints.in_source_model(&mapping.target_class, &mapping.source_class))
+        }
+    };
+    let projected = project_answer(answer, operation, &judged).await;
     match &endpoint.view_mapping {
         None => projected,
         Some(mapping) => translated(projected, mapping).await,
