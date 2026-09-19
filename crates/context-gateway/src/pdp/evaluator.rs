@@ -75,6 +75,13 @@ pub struct Request {
     pub geo_q: Option<String>,
     /// The caller's own `temporalQ` filter.
     pub temporal_q: Option<String>,
+    /// Every attribute this request uses to SELECT or ORDER entities (T-1862, owner's rule).
+    ///
+    /// A filter is an oracle: `q=age>30` over a type whose `age` the endpoint does not serve
+    /// still answers with the entities that matched, and bisecting `N` reads the hidden value
+    /// exactly. So the names are collected once, here, and a type that may not serve one of them
+    /// leaves the query before the broker is asked.
+    pub referenced: BTreeSet<String>,
 }
 
 /// The constraint set the gateway injects so the broker can physically only return or
@@ -101,6 +108,13 @@ pub struct Constraints {
     /// granted types, and a type this map does not name keeps its identity only. Empty means no
     /// projection narrowed the request and `attrs` is the whole of the narrowing.
     pub attrs_by_type: BTreeMap<String, BTreeSet<String>>,
+    /// The attributes the grants themselves whitelist, before the caller's own `attrs` narrowed
+    /// them (R9, T-1862).
+    ///
+    /// `attrs` is what the broker is told to return, which is the intersection with what the
+    /// caller asked for; this is what the caller *may* be told about at all, and it is what a
+    /// filter is judged against. Empty means no grant narrows the attributes.
+    pub served: BTreeSet<String>,
     /// The attributes the endpoint publishes nothing of, whatever the grants say (EP-61).
     ///
     /// A denial rather than a second whitelist: `attrs` empty means "every granted
@@ -360,6 +374,7 @@ fn intersect(
         // The grants alone say which attributes this caller may read, not which type each one
         // belongs to; a projection fills this in (MP-02, T-1862).
         attrs_by_type: BTreeMap::new(),
+        served: granted_attrs.clone(),
         hidden: BTreeSet::new(),
         q: conjoin(request.q.as_deref(), &filters),
         granted_scopes: union(grants.iter().filter_map(|policy| policy.scope_q.as_deref())),

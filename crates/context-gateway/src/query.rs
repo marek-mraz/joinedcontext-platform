@@ -113,6 +113,101 @@ pub fn requested(params: &[(String, String)]) -> Request {
         scope_q: first(params, "scopeQ").map(str::to_owned),
         geo_q: joined(params, &["georel", "geometry", "coordinates"]),
         temporal_q: joined(params, &["timerel", "timeAt", "endTimeAt"]),
+        referenced: referenced_attributes(params),
+    }
+}
+
+/// Every attribute name this request uses to pick or order entities (T-1862, MP-02, R9).
+///
+/// Owner's rule of 2026-09-18: "if there is a filter in q, geo, scope, etc. on an attribute that
+/// is not allowed for that entity, that entity should not be considered at all, because with this
+/// you can discover the value just by filtering." The answer was stripped afterwards, so a caller
+/// who could not read `age` could still ask `q=age>30` and bisect `N` until the list changed —
+/// which reads the value exactly, one bit at a time.
+///
+/// `pick` and `omit` only shape the answer and are not references. `attrs` is one: in CIM 009 it
+/// selects the entities that carry one of the names.
+pub fn referenced_attributes(params: &[(String, String)]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    if let Some(q) = first(params, "q") {
+        names.extend(q_attributes(q));
+    }
+    names.extend(
+        split_list(first(params, "attrs"))
+            .into_iter()
+            .map(|name| compact(&name)),
+    );
+    for selector in ["orderBy", "geoproperty", "timeproperty"] {
+        for name in split_list(first(params, selector)) {
+            // `orderBy` takes a leading `!` for descending order; the rest is a path like q's.
+            names.insert(head_of(name.trim_start_matches('!')));
+        }
+    }
+    // A geo query with no `geoproperty` is a query on `location`, which CIM 009 makes the default.
+    if joined(params, &["georel", "geometry", "coordinates"]).is_some()
+        && first(params, "geoproperty").is_none()
+    {
+        names.insert("location".to_owned());
+    }
+    names.remove("");
+    names
+}
+
+/// The attribute names one `q` uses, whatever shape the terms have (CIM 009 4.9).
+///
+/// Terms are separated by `;`, `|` and parentheses; a term is `path op value`, a bare path
+/// (an existence check) or `!path` (a non-existence check). Only the path side is a reference:
+/// the value side is the caller's own, and a value that happens to look like a name is not one.
+fn q_attributes(q: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for term in q.split([';', '|', '(', ')']) {
+        let term = term.trim();
+        if term.is_empty() {
+            continue;
+        }
+        // Everything up to the first comparison character is the path; a term with none is a
+        // bare existence check and is a path whole.
+        let path = term
+            .split(['=', '!', '<', '>', '~'])
+            .next()
+            .unwrap_or_default()
+            .trim();
+        let path = if path.is_empty() {
+            // `!age`: the negation is the first character, so the path follows it.
+            term.trim_start_matches('!').trim()
+        } else {
+            path
+        };
+        names.insert(head_of(path));
+    }
+    names.remove("");
+    names
+}
+
+/// The attribute a path names: its head, compacted.
+///
+/// `age.observedAt`, `age[value]` and `address[city]` are references to `age`, `age` and
+/// `address`; an expanded IRI is the same name as its compacted form, so `https://schema.org/age`
+/// is `age`. Case is kept: NGSI-LD attribute names are case sensitive, and folding them would let
+/// `Age` stand in for `age`.
+fn head_of(path: &str) -> String {
+    // An IRI is compacted first: its own path carries the dots and slashes a short name never
+    // does, so splitting on `.` before compacting would read `https://schema.org/age` as `https`.
+    let compacted = compact(path);
+    compacted
+        .split(['.', '['])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
+}
+
+/// An expanded IRI written as the term it expands to: the last segment of its path.
+fn compact(name: &str) -> String {
+    let name = decode(name.trim()).trim_matches('"').to_owned();
+    match name.rsplit(['/', '#']).next() {
+        Some(last) if name.contains("://") && !last.is_empty() => last.to_owned(),
+        _ => name,
     }
 }
 

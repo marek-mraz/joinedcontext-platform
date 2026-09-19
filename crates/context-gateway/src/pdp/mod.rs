@@ -71,11 +71,21 @@ impl Pdp for PolicyPdp {
         // MP-02: the endpoint's projection, intersected into the same decision. Types and
         // attributes narrow like a grant's; the residual filter is conjoined like a REWRITE
         // constraint; nothing here can add what a policy did not give.
-        match (verdict, &endpoint.projection) {
+        let verdict = match (verdict, &endpoint.projection) {
             (Verdict::Rewrite(constraints), Some(projection)) => {
                 project_constraints(*constraints, projection)
             }
             (verdict, _) => verdict,
+        };
+
+        // The filter is the last thing narrowed, because it is narrowed by what the two steps
+        // above decided: a type whose attributes do not cover every name the request filters or
+        // orders on leaves the query before the broker is asked (T-1862).
+        match verdict {
+            Verdict::Rewrite(constraints) => {
+                drop_types_that_may_not_be_filtered(*constraints, request)
+            }
+            verdict => verdict,
         }
     }
 }
@@ -134,6 +144,95 @@ fn project_constraints(
         }
     }
     constraints.restricted = true;
+    Verdict::Rewrite(Box::new(constraints))
+}
+
+/// The members every entity carries whatever the grants say, so filtering on one is not a
+/// reference to anything a grant could withhold (CIM 009 4.5.1).
+const ALWAYS_SERVED: &[&str] = &[
+    "id",
+    "type",
+    "scope",
+    "createdAt",
+    "modifiedAt",
+    "deletedAt",
+    "expiresAt",
+    "observedAt",
+];
+
+/// Takes out of the query every type that may not be filtered on what the request filters on
+/// (T-1862; owner's rule of 2026-09-18, MP-02, R9).
+///
+/// A filter is a read. `q=age>30` over a type whose `age` this endpoint does not serve used to
+/// reach the broker as written and the answer was stripped afterwards, so the rows that came back
+/// still said which entities have an `age` over thirty — and bisecting `N` reads the value exactly.
+/// The rule is therefore about which entities are *considered*, not about what the answer carries:
+/// a type stays only if every referenced attribute is one it may serve.
+///
+/// Strict on purpose: a type is dropped even when the name it may not serve sits in one branch of
+/// an `|`, because an `|` still lets the branch decide whether a row comes back. ponytail: strict
+/// drop; splitting the query per type is the upgrade if people miss those rows.
+///
+/// No type left means the answer is genuinely nothing: `constraints.empty` is what the surfaces
+/// already answer with `200 []` for a query and `404` for an addressed read, which is exactly what
+/// an attribute that does not exist would give.
+fn drop_types_that_may_not_be_filtered(
+    mut constraints: evaluator::Constraints,
+    request: &Request,
+) -> Verdict {
+    let referenced: Vec<&String> = request
+        .referenced
+        .iter()
+        .filter(|name| !ALWAYS_SERVED.contains(&name.as_str()))
+        .collect();
+    if referenced.is_empty() {
+        return Verdict::Rewrite(Box::new(constraints));
+    }
+
+    // Hidden is a denial over every type (EP-61): filtering on a hidden name can never be served,
+    // whether or not a projection says which type owns it.
+    if referenced
+        .iter()
+        .any(|name| constraints.hidden.contains(name.as_str()))
+    {
+        constraints.empty = true;
+        constraints.restricted = true;
+        return Verdict::Rewrite(Box::new(constraints));
+    }
+
+    if constraints.attrs_by_type.is_empty() {
+        // No projection: the grants' own whitelist is the whole of the narrowing, and it is that
+        // whitelist a filter is judged against — never `attrs`, which is what the caller asked
+        // for. An empty whitelist is a grant over the whole entity, so nothing is referenced that
+        // is not served.
+        if !constraints.served.is_empty()
+            && referenced
+                .iter()
+                .any(|name| !constraints.served.contains(name.as_str()))
+        {
+            constraints.empty = true;
+            constraints.restricted = true;
+        }
+        return Verdict::Rewrite(Box::new(constraints));
+    }
+
+    let kept: BTreeSet<String> = constraints
+        .attrs_by_type
+        .iter()
+        .filter(|(_, slots)| referenced.iter().all(|name| slots.contains(name.as_str())))
+        .map(|(class, _)| class.clone())
+        .collect();
+    if kept.len() < constraints.attrs_by_type.len() {
+        constraints.restricted = true;
+    }
+    if kept.is_empty() {
+        constraints.empty = true;
+        return Verdict::Rewrite(Box::new(constraints));
+    }
+    constraints
+        .attrs_by_type
+        .retain(|class, _| kept.contains(class));
+    constraints.types = kept;
     Verdict::Rewrite(Box::new(constraints))
 }
 

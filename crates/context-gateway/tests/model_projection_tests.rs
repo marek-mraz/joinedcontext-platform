@@ -255,13 +255,17 @@ async fn a_query_through_the_projection_returns_only_the_projected_attributes() 
     );
 }
 
-/// A caller asking for an attribute outside the projection gets the entity without it,
-/// not an error; asking for a type outside it is refused before the broker is asked.
+/// A caller asking for an attribute the projection keeps gets the entity without the ones it
+/// does not; asking for a type outside the projection is refused before the broker is asked.
+///
+/// `attrs` naming an attribute this type may not serve is a selector on it, and since T-1862 that
+/// takes the type out of the query altogether rather than answering with the entities that have
+/// it — see `filter_oracle_tests::attrs_is_a_selector_too`.
 #[tokio::test]
 async fn an_attribute_outside_is_dropped_and_a_type_outside_is_refused() {
     let (status, body, _) = query(
         endpoint(policy(""), Some(projection())),
-        "/ngsi-ld/v1/entities?type=Vehicle&attrs=name,odometer",
+        "/ngsi-ld/v1/entities?type=Vehicle&attrs=name,speed",
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -346,15 +350,19 @@ async fn a_policy_whitelist_disjoint_from_the_projection_serves_identity_only() 
 /// cannot widen what the endpoint is about.
 #[tokio::test]
 async fn the_residual_filter_is_intersected_and_a_caller_cannot_widen_it() {
+    // On a slot the projection publishes: a caller may filter on `speed`, and their filter is
+    // conjoined with the endpoint's own rather than replacing it. (A caller filtering on
+    // `category`, which this projection keeps for itself, is the oracle T-1862 closed: the type
+    // leaves the query and the broker is never asked.)
     let (status, _, asked) = query(
         endpoint(policy(""), Some(projection())),
-        "/ngsi-ld/v1/entities?type=Vehicle&q=category%3D%3D%22internal%22",
+        "/ngsi-ld/v1/entities?type=Vehicle&q=speed%3E10",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     let sent = &asked[0];
     assert!(
-        sent.contains("internal"),
+        sent.contains("speed"),
         "the caller's filter is kept: {sent}"
     );
     assert!(
@@ -530,4 +538,19 @@ async fn an_unprojected_type_in_the_answer_keeps_nothing_but_its_identity() {
         !raw.contains("North depot") && !raw.contains("\"speed\""),
         "{body}"
     );
+}
+
+/// The other half of the residual filter: the projection keeps `category` for itself, so a caller
+/// who filters on it is asking a question this endpoint does not answer (T-1862). The type leaves
+/// the query, the broker is never asked, and the answer is the one an absent attribute gives.
+#[tokio::test]
+async fn a_caller_cannot_filter_on_the_projections_own_attribute() {
+    let (status, body, asked) = query(
+        endpoint(policy(""), Some(projection())),
+        "/ngsi-ld/v1/entities?type=Vehicle&q=category%3D%3D%22internal%22",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!([]), "{body}");
+    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
 }

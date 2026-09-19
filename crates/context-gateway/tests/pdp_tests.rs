@@ -475,6 +475,9 @@ temporalQ: "timerel=after;timeAt=P-1D"
                 .to_owned(),
         ),
         temporal_q: Some("timerel=after;timeAt=P-10Y".to_owned()),
+        // What the caller filters on narrows the types the query considers, not what the
+        // evaluator grants (T-1862); this case is about the grant.
+        referenced: Default::default(),
     };
 
     let verdict = evaluate(
