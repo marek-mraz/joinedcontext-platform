@@ -13,6 +13,7 @@ pub mod data_source;
 pub mod dataspace;
 pub mod endpoint;
 pub mod environment;
+pub mod grid;
 pub mod group;
 pub mod mapping;
 pub mod model_projection;

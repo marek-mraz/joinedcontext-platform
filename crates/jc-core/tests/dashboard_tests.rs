@@ -1,6 +1,7 @@
 //! T-0528: `kind: Dashboard` and `kind: Layer` (UI-17, UI-18, MF-09).
 
 use jc_core::error::Error;
+use jc_core::kinds::grid::GridFormat;
 use jc_core::kinds::{Dashboard, DashboardVisibility, Layer, LayerStyle};
 
 const DASHBOARD: &str = include_str!("golden/025-Dashboard-10-dashboards-and-visualization.yaml");
@@ -126,4 +127,39 @@ fn unknown_members_are_refused() {
         "  visibility: public\n  theme: dark"
     )
     .is_err());
+}
+
+/// T-1440, UI-71, SDK-30: a `grid` widget is the entity grid the explorer and a generated
+/// application render. It names the Endpoint and the type it reads — without either it would open
+/// on nothing — and its configuration is checked here as well as in the browser.
+#[test]
+fn a_grid_widget_names_its_endpoint_its_type_and_a_configuration_that_holds() {
+    let golden = dashboard("", "").expect("the golden dashboard validates");
+    let grid = &golden.spec.pages[1].widgets[1];
+    assert_eq!(grid.widget_type, "grid");
+    assert_eq!(grid.entity_type.as_deref(), Some("AirQualityObserved"));
+    let config = grid.grid.as_ref().expect("a configuration");
+    assert_eq!(config.page_size, Some(25));
+    assert_eq!(config.columns[0].attr, "pm10");
+    assert_eq!(config.columns[0].format, Some(GridFormat::Number));
+    assert_eq!(config.history.as_ref().and_then(|h| h.enabled), Some(true));
+
+    // What the same configuration is refused for, in a manifest as in a browser.
+    assert!(reason(dashboard("pageSize: 25", "pageSize: 5000")).contains("between 1 and 1000"));
+    assert!(reason(dashboard("pageSize: 25", "mode: edit")).contains("a correction"));
+    assert!(
+        reason(dashboard("          entityType: AirQualityObserved\n", ""))
+            .contains("names the entity type")
+    );
+    assert!(reason(dashboard(
+        "entityType: AirQualityObserved",
+        "entityType: airQuality"
+    ))
+    .contains("PascalCase"));
+    // The two fields belong to this widget type alone: a chart with a grid config is a mistake
+    // nobody should have to debug in a browser.
+    assert!(
+        reason(dashboard("widgetType: grid", "widgetType: temporal-chart"))
+            .contains("belong to a widget of type `grid`")
+    );
 }

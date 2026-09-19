@@ -9,6 +9,7 @@
 use crate::envelope::{Kind, ObjectMeta, Scope};
 use crate::error::{Error, Result};
 use crate::i18n::Text;
+use crate::kinds::grid::GridConfig;
 use crate::names;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -32,7 +33,7 @@ pub enum DashboardVisibility {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Widget {
-    /// The widget, e.g. `temporal-chart`.
+    /// The widget, e.g. `temporal-chart` or `grid`.
     pub widget_type: String,
     /// The Endpoint it reads through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43,7 +44,18 @@ pub struct Widget {
     /// The property it shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub property: Option<String>,
+    /// The entity type a `grid` widget shows; the type decides its columns (UI-71).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_type: Option<String>,
+    /// The configuration of a `grid` widget: the same object the explorer and a generated
+    /// application are configured by, without the source and the type those two fields decide
+    /// (SDK-30, T-1440).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<GridConfig>,
 }
+
+/// The widget type of the entity grid.
+pub const GRID_WIDGET: &str = "grid";
 
 /// One page: a map of layers, or a grid of widgets, or both.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -127,6 +139,43 @@ impl DashboardSpec {
                         value: endpoint.clone(),
                         reason: "an endpoint is named by its manifest's `metadata.name`",
                     })?;
+                }
+                // The entity grid reads one Endpoint's entities of one type, like a layer does:
+                // without both it would open on nothing, and its configuration is checked by the
+                // same rules the SDK's parser applies in the browser (UI-71, SDK-30, T-1440).
+                if widget.widget_type == GRID_WIDGET {
+                    if widget.endpoint_ref.is_none() {
+                        return Err(Error::Name {
+                            field: "spec.pages[].widgets[].endpointRef",
+                            value: String::new(),
+                            reason: "a grid widget names the Endpoint it reads through",
+                        });
+                    }
+                    match &widget.entity_type {
+                        Some(entity_type) => {
+                            names::validate_entity_type(entity_type).map_err(|_| Error::Name {
+                                field: "spec.pages[].widgets[].entityType",
+                                value: entity_type.clone(),
+                                reason: "an entity type is PascalCase, as NGSI-LD writes it",
+                            })?;
+                        }
+                        None => {
+                            return Err(Error::Name {
+                                field: "spec.pages[].widgets[].entityType",
+                                value: String::new(),
+                                reason: "a grid widget names the entity type it shows",
+                            });
+                        }
+                    }
+                    if let Some(config) = &widget.grid {
+                        config.validate("spec.pages[].widgets[].grid")?;
+                    }
+                } else if widget.entity_type.is_some() || widget.grid.is_some() {
+                    return Err(Error::Name {
+                        field: "spec.pages[].widgets[].widgetType",
+                        value: widget.widget_type.clone(),
+                        reason: "`entityType` and `grid` belong to a widget of type `grid`",
+                    });
                 }
             }
         }
