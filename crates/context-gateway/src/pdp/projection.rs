@@ -62,6 +62,68 @@ pub fn project(body: &mut Value, granted: &BTreeSet<String>, hidden: &BTreeSet<S
     }
 }
 
+/// The same, by the constraint set, so each entity is stripped by the slots of its own type
+/// (MP-02, T-1862).
+///
+/// `constraints.attrs` is the union the broker was given, which is a superset for every entity
+/// whose type owns only part of it. Where a projection says which slots each class has, the
+/// answer is cut by the entity's own types instead: a `Vehicle` in an answer to
+/// `type=User,Vehicle` keeps `weight` and never the `age` the projection gives to a `User`.
+pub fn project_by_type(body: &mut Value, constraints: &Constraints) {
+    match body {
+        Value::Array(entities) => {
+            for entity in entities {
+                entity_by_type(entity, constraints);
+            }
+        }
+        entity => entity_by_type(entity, constraints),
+    }
+}
+
+/// One entity, stripped by the attributes its own types may serve.
+fn entity_by_type(entity: &mut Value, constraints: &Constraints) {
+    if constraints.attrs_by_type.is_empty() {
+        project_entity(entity, &constraints.attrs, &constraints.hidden);
+        return;
+    }
+    // A type the map does not name is a type this endpoint serves nothing of: identity only,
+    // never the union. An entity with several types keeps the union over the ones it is granted,
+    // because each of them is a type the caller may read it as.
+    let mut allowed: BTreeSet<String> = BTreeSet::new();
+    for name in types_of(entity) {
+        if let Some(slots) = constraints.attrs_by_type.get(&name) {
+            allowed.extend(slots.iter().cloned());
+        }
+    }
+    project_entity_to(entity, &allowed, &constraints.hidden);
+}
+
+/// The type or types one entity declares, as plain names.
+fn types_of(entity: &Value) -> Vec<String> {
+    match entity.get("type").or_else(|| entity.get("@type")) {
+        Some(Value::String(one)) => vec![one.clone()],
+        Some(Value::Array(many)) => many
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// [`project_entity`] with no "empty means everything" rule: an empty `allowed` set is an
+/// entity cut to its identity, which is what a type outside the projection gets.
+fn project_entity_to(entity: &mut Value, allowed: &BTreeSet<String>, hidden: &BTreeSet<String>) {
+    let Some(members) = entity.as_object_mut() else {
+        return;
+    };
+    members.retain(|name, _| {
+        STRUCTURAL.contains(&name.as_str())
+            || SYSTEM.contains(&name.as_str())
+            || (allowed.contains(name) && !hidden.contains(name))
+    });
+}
+
 /// The attributes an entity carries that the grants do not cover (R9, GW17).
 ///
 /// A read strips them; a write that touches any of them is denied whole, because silently

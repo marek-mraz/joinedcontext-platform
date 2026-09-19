@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use jc_core::kinds::{
     Operation, OperationRef, PolicySpec, Principal, PrincipalKind, RegistrationInfo,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Who is calling, as established by the PEP — never as claimed by the client (GW20).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -88,7 +88,19 @@ pub struct Constraints {
     /// The anchored id patterns of the matching grants (R24).
     pub id_patterns: BTreeSet<String>,
     /// The attributes the response is projected to; empty means no projection (R9).
+    ///
+    /// One set for the whole request, which is what CIM 009's own `attrs` parameter is and
+    /// therefore all the broker can be told. It is a superset of what any one entity may carry
+    /// whenever [`Self::attrs_by_type`] says which slots belong to which type.
     pub attrs: BTreeSet<String>,
+    /// The attributes each type may serve, when a projection says so (MP-02, T-1862).
+    ///
+    /// `attrs` is the union over the effective types, because the broker takes one list. An
+    /// answer stripped by that union serves a `Vehicle` the `age` the projection gives only to a
+    /// `User`, so the stripping reads this map instead: an entity keeps the attributes of its own
+    /// granted types, and a type this map does not name keeps its identity only. Empty means no
+    /// projection narrowed the request and `attrs` is the whole of the narrowing.
+    pub attrs_by_type: BTreeMap<String, BTreeSet<String>>,
     /// The attributes the endpoint publishes nothing of, whatever the grants say (EP-61).
     ///
     /// A denial rather than a second whitelist: `attrs` empty means "every granted
@@ -345,6 +357,9 @@ fn intersect(
             })
             .collect(),
         attrs,
+        // The grants alone say which attributes this caller may read, not which type each one
+        // belongs to; a projection fills this in (MP-02, T-1862).
+        attrs_by_type: BTreeMap::new(),
         hidden: BTreeSet::new(),
         q: conjoin(request.q.as_deref(), &filters),
         granted_scopes: union(grants.iter().filter_map(|policy| policy.scope_q.as_deref())),

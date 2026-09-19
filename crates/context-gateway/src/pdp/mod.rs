@@ -13,7 +13,7 @@ use crate::resolver::Endpoint;
 use chrono::{DateTime, Utc};
 use evaluator::{Request, Subject, Verdict};
 use jc_core::kinds::Operation;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// What decides. Every request passes it before anything is forwarded (GW1, ADR-N-003).
@@ -98,15 +98,27 @@ fn project_constraints(
     if types.is_empty() {
         return Verdict::Deny;
     }
-    // ponytail: the slots of every effective type in one set, not per type. Two projected
-    // classes sharing a slot name expose it on both; per-type attribute sets need the R9
-    // projection to look at `type`, which it does not yet.
+    // Per type, because a projection is a statement about a class: `User: [age]` and
+    // `Vehicle: [weight]` joined into one set served a Vehicle's `age` to anyone who asked for
+    // both types (T-1862, MP-02). The joined set stays as `attrs`, which is the one list CIM 009
+    // lets the broker be told; the answer is stripped by the map.
+    let by_type: BTreeMap<String, BTreeSet<String>> = types
+        .iter()
+        .map(|class| {
+            let slots: BTreeSet<String> = projection.attributes_of(class).unwrap_or_default();
+            (
+                class.clone(),
+                evaluator::narrow_to_identity(&constraints.attrs, &slots),
+            )
+        })
+        .collect();
     let slots: BTreeSet<String> = types
         .iter()
         .filter_map(|class| projection.attributes_of(class))
         .flatten()
         .collect();
     constraints.attrs = evaluator::narrow_to_identity(&constraints.attrs, &slots);
+    constraints.attrs_by_type = by_type;
     constraints.types = types;
     if let Some(filter) = &projection.filter {
         if let Some(q) = &filter.q {

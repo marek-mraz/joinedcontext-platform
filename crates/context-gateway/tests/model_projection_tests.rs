@@ -67,6 +67,29 @@ fn vehicle() -> Value {
     })
 }
 
+/// The same fleet, answered as the broker holds it: every entity carries every attribute of the
+/// model, which is what makes a projection's per-type narrowing visible (T-1862).
+fn mixed_fleet() -> Value {
+    json!([
+        {
+            "id": "urn:ngsi-ld:Vehicle:hel.fi:fleet:bus-01",
+            "type": "Vehicle",
+            "name": { "type": "Property", "value": "Bus 01" },
+            "speed": { "type": "Property", "value": 32 },
+            "age": { "type": "Property", "value": 7 },
+            "odometer": { "type": "Property", "value": 120_000 }
+        },
+        {
+            "id": "urn:ngsi-ld:User:hel.fi:fleet:driver-01",
+            "type": "User",
+            "name": { "type": "Property", "value": "Aino" },
+            "age": { "type": "Property", "value": 41 },
+            "speed": { "type": "Property", "value": 3 },
+            "odometer": { "type": "Property", "value": 5 }
+        }
+    ])
+}
+
 type Hops = Arc<Mutex<Vec<String>>>;
 
 async fn broker() -> (String, Hops) {
@@ -80,6 +103,31 @@ async fn broker() -> (String, Hops) {
                 .expect("the hop log")
                 .push(request.uri().query().unwrap_or_default().to_owned());
             axum::Json(json!([vehicle()]))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let address = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{address}"), hops)
+}
+
+async fn broker_answering(body: Value) -> (String, Hops) {
+    let hops: Hops = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&hops);
+    let answer = Arc::new(body);
+    let app = Router::new().fallback(any(move |request: Request| {
+        let recorder = Arc::clone(&recorder);
+        let answer = Arc::clone(&answer);
+        async move {
+            recorder
+                .lock()
+                .expect("the hop log")
+                .push(request.uri().query().unwrap_or_default().to_owned());
+            axum::Json((*answer).clone())
         }
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -133,6 +181,25 @@ fn endpoint(policy: PolicySpec, projection: Option<Arc<ModelProjectionSpec>>) ->
 
 async fn query(endpoint: Endpoint, uri: &str) -> (StatusCode, Value, Vec<String>) {
     let (upstream, hops) = broker().await;
+    through(endpoint, uri, upstream, hops).await
+}
+
+/// The same, against a broker answering a body of this test's choosing.
+async fn query_answering(
+    endpoint: Endpoint,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value, Vec<String>) {
+    let (upstream, hops) = broker_answering(body).await;
+    through(endpoint, uri, upstream, hops).await
+}
+
+async fn through(
+    endpoint: Endpoint,
+    uri: &str,
+    upstream: String,
+    hops: Hops,
+) -> (StatusCode, Value, Vec<String>) {
     let gateway = Arc::new(
         Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint]),
     );
@@ -348,5 +415,119 @@ fn the_schema_surface_serves_the_projected_model() {
     assert_ne!(
         index_before, index_after,
         "the projection changes what is published"
+    );
+}
+
+/// MP-02, T-1862: a projection says which slots belong to which class, so two classes sharing an
+/// endpoint do not share their slots.
+///
+/// The partner view gives `Vehicle` `[name, speed]` and `User` `[name, age]`. Asked for both, the
+/// gateway can only tell the broker one `attrs` list — their union — and the answer used to be
+/// stripped by that union, so a Vehicle that carries `age` was served with it. That is the whole
+/// of the leak: the schema surface tells this caller a Vehicle has no `age` while the wire hands
+/// them one.
+#[tokio::test]
+async fn one_types_slots_are_not_served_on_another() {
+    let (status, body, asked) = query_answering(
+        endpoint(policy(""), Some(projection())),
+        "/ngsi-ld/v1/entities?type=Vehicle,User",
+        mixed_fleet(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let entities = body.as_array().expect("a list of entities");
+    assert_eq!(entities.len(), 2, "both types are granted: {body}");
+    let vehicle = &entities[0];
+    let user = &entities[1];
+
+    assert_eq!(vehicle["type"], json!("Vehicle"));
+    assert_eq!(vehicle["speed"]["value"], json!(32), "its own slot stays");
+    assert_eq!(vehicle["name"]["value"], json!("Bus 01"));
+    assert!(
+        vehicle.get("age").is_none(),
+        "`age` is a User's slot, not a Vehicle's: {vehicle}"
+    );
+
+    assert_eq!(user["type"], json!("User"));
+    assert_eq!(user["age"]["value"], json!(41), "its own slot stays");
+    assert!(
+        user.get("speed").is_none(),
+        "`speed` is a Vehicle's slot, not a User's: {user}"
+    );
+
+    // Neither keeps what the projection names for nobody.
+    assert!(
+        vehicle.get("odometer").is_none() && user.get("odometer").is_none(),
+        "{body}"
+    );
+    // The broker is still asked for the union, because CIM 009 has one `attrs` list.
+    assert!(asked[0].contains("attrs="), "{}", asked[0]);
+}
+
+/// The same rule on a single entity a retrieve addresses by id: a request that names no type
+/// gets every granted type's slots joined, and the entity is cut by its own type all the same.
+#[tokio::test]
+async fn a_retrieve_that_names_no_type_is_cut_by_the_entity_s_own_type() {
+    let (status, body, _) = query_answering(
+        endpoint(policy(""), Some(projection())),
+        "/ngsi-ld/v1/entities/urn:ngsi-ld:Vehicle:hel.fi:fleet:bus-01",
+        mixed_fleet()[0].clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["speed"]["value"], json!(32));
+    assert!(body.get("age").is_none(), "{body}");
+}
+
+/// An entity carrying two types keeps the union of the two classes' slots, and nothing else:
+/// each of them is a type this caller may read it as.
+#[tokio::test]
+async fn an_entity_of_two_types_keeps_both_their_slots() {
+    let both = json!([{
+        "id": "urn:ngsi-ld:Vehicle:hel.fi:fleet:pool-car",
+        "type": ["Vehicle", "User"],
+        "name": { "type": "Property", "value": "Pool car" },
+        "speed": { "type": "Property", "value": 12 },
+        "age": { "type": "Property", "value": 3 },
+        "odometer": { "type": "Property", "value": 9 }
+    }]);
+    let (status, body, _) = query_answering(
+        endpoint(policy(""), Some(projection())),
+        "/ngsi-ld/v1/entities?type=Vehicle,User",
+        both,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entity = &body[0];
+    assert_eq!(entity["speed"]["value"], json!(12));
+    assert_eq!(entity["age"]["value"], json!(3));
+    assert!(entity.get("odometer").is_none(), "{entity}");
+}
+
+/// A type the projection does not name keeps its identity and nothing else, however it reached
+/// the answer: a broker that ignores `type`, a federated source, a registration answering for a
+/// neighbour (T-2131 is the wider sweep; this is the projection's own half of it).
+#[tokio::test]
+async fn an_unprojected_type_in_the_answer_keeps_nothing_but_its_identity() {
+    let depot = json!([{
+        "id": "urn:ngsi-ld:Depot:hel.fi:fleet:north",
+        "type": "Depot",
+        "name": { "type": "Property", "value": "North depot" },
+        "speed": { "type": "Property", "value": 0 }
+    }]);
+    let (status, body, _) = query_answering(
+        endpoint(policy(""), Some(projection())),
+        "/ngsi-ld/v1/entities?type=Vehicle,User",
+        depot,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Dropped whole or cut to its identity — either is a truthful answer, and neither may carry
+    // an attribute of a type this endpoint does not publish.
+    let raw = body.to_string();
+    assert!(
+        !raw.contains("North depot") && !raw.contains("\"speed\""),
+        "{body}"
     );
 }

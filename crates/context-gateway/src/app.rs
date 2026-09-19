@@ -990,7 +990,7 @@ async fn project_answer(
                 projection::permitted(entity, constraints)
                     && areas.as_ref().is_none_or(|areas| areas.admits(entity))
             });
-            projection::project(&mut payload, &constraints.attrs, &constraints.hidden);
+            projection::project_by_type(&mut payload, constraints);
         }
         entity if entity.is_object() && entity.get("id").is_some() => {
             if !projection::permitted(entity, constraints)
@@ -998,7 +998,7 @@ async fn project_answer(
             {
                 return ProblemDetails::not_found().into_response();
             }
-            projection::project(&mut payload, &constraints.attrs, &constraints.hidden);
+            projection::project_by_type(&mut payload, constraints);
         }
         // A type list, an attribute list, a problem document: not entities, nothing to
         // project.
@@ -1802,7 +1802,7 @@ async fn query_entities(
                 && areas.as_ref().is_none_or(|areas| areas.admits(entity))
         });
     }
-    projection::project(&mut entities, &constraints.attrs, &constraints.hidden);
+    projection::project_by_type(&mut entities, &constraints);
     Ok((entities, constraints.restricted))
 }
 
@@ -1883,7 +1883,7 @@ async fn query_temporal(
     {
         return Ok((Value::Null, constraints.restricted));
     }
-    projection::project(&mut entity, &constraints.attrs, &constraints.hidden);
+    projection::project_by_type(&mut entity, &constraints);
     temporal::keep_windows(&mut entity, &constraints.temporal_windows);
     Ok((entity, constraints.restricted))
 }
@@ -2343,7 +2343,7 @@ async fn paged_entities(
     }
 
     let mut entities = Value::Array(collected);
-    projection::project(&mut entities, &constraints.attrs, &constraints.hidden);
+    projection::project_by_type(&mut entities, &constraints);
     Ok((entities, constraints.restricted))
 }
 
