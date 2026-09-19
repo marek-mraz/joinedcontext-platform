@@ -5,6 +5,7 @@
 
 use crate::audit::{log_request, AuditEntry};
 use crate::auth::authenticate;
+use crate::routes::portal_bearer;
 use crate::ProxyState;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -51,12 +52,11 @@ pub async fn handler(
     url.set_path(&path);
     url.set_query(Some(&format!("after={}&wait={wait}", query.after)));
 
-    let resp = state
-        .http
-        .get(url)
-        .bearer_auth(state.credentials.get_proxy_token())
-        .send()
-        .await;
+    let bearer = match portal_bearer(&state.credentials).await {
+        Ok(token) => token,
+        Err(response) => return *response,
+    };
+    let resp = state.http.get(url).bearer_auth(&bearer).send().await;
 
     let (status, bytes) = match resp {
         Ok(r) => {

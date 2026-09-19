@@ -3,6 +3,7 @@
 
 use crate::audit::{log_request, AuditEntry};
 use crate::auth::authenticate;
+use crate::routes::portal_bearer;
 use crate::ProxyState;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -138,12 +139,11 @@ pub async fn handler(
     let mut url = state.config.portal_base.clone();
     url.set_path(&path);
 
-    let resp = state
-        .http
-        .get(url)
-        .bearer_auth(state.credentials.get_proxy_token())
-        .send()
-        .await;
+    let bearer = match portal_bearer(&state.credentials).await {
+        Ok(token) => token,
+        Err(response) => return *response,
+    };
+    let resp = state.http.get(url).bearer_auth(&bearer).send().await;
 
     let (status, body) = match resp {
         Ok(r) => {

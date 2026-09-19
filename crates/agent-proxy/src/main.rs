@@ -18,9 +18,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.require_secrets()?;
     tracing::info!(bind = %config.bind, "starting jc-agent-proxy daemon");
 
-    let runs = RunResolver::new(config.portal_base.clone(), config.proxy_token.clone());
     let config_arc = Arc::new(config.clone());
+    // The credentials come first: the resolver asks the Portal with a token of this proxy's own
+    // client now, not with a string both sides held (AG-52, T-2271).
     let credentials = CredentialManager::new(config_arc.clone());
+    let runs = RunResolver::new(config.portal_base.clone(), credentials.clone());
     let limits = LimitManager::default();
     let http = reqwest::Client::new();
     // No redirect of its own: the fetch route checks every hop against the run's allow-list.

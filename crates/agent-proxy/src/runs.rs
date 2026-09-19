@@ -55,12 +55,23 @@ impl RunContext {
 /// Run records the proxy has fetched, with the moment each was fetched.
 type RunCache = Arc<RwLock<HashMap<String, (Instant, Arc<RunContext>)>>>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RunResolver {
     http: reqwest::Client,
     portal_base: Url,
-    proxy_token: String,
+    /// How the resolver names itself to the Portal (AG-52, T-2271): its own client's token, minted
+    /// and held by the credential manager. `None` is a resolver in a test, which asks nobody.
+    credentials: Option<crate::inject::CredentialManager>,
     cache: RunCache,
+}
+
+impl std::fmt::Debug for RunResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunResolver")
+            .field("portal_base", &self.portal_base.as_str())
+            .field("credentials", &self.credentials.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -74,14 +85,14 @@ pub enum RunError {
 }
 
 impl RunResolver {
-    pub fn new(portal_base: Url, proxy_token: String) -> Self {
+    pub fn new(portal_base: Url, credentials: crate::inject::CredentialManager) -> Self {
         Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
                 .unwrap_or_default(),
             portal_base,
-            proxy_token,
+            credentials: Some(credentials),
             cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -95,7 +106,7 @@ impl RunResolver {
         Self {
             http: reqwest::Client::new(),
             portal_base: Url::parse("http://portal").unwrap(),
-            proxy_token: "test".to_string(),
+            credentials: None,
             cache: Arc::new(RwLock::new(map)),
         }
     }
@@ -135,8 +146,12 @@ impl RunResolver {
         url.set_path(&format!("internal/agent-runs/{run_id}"));
 
         let mut req = self.http.get(url);
-        if !self.proxy_token.is_empty() {
-            req = req.bearer_auth(&self.proxy_token);
+        if let Some(credentials) = &self.credentials {
+            let bearer = credentials
+                .get_portal_token()
+                .await
+                .map_err(RunError::Transport)?;
+            req = req.bearer_auth(bearer);
         }
 
         let resp = req

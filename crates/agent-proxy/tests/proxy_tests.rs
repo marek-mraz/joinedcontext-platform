@@ -1469,3 +1469,147 @@ mod mesh_identity {
         );
     }
 }
+
+/// AG-52, T-2271: the proxy names itself to the Portal with a token of its own client, minted from
+/// the realm and audience-bound to the internal listener. It presented `JC_PROXY_TOKEN` — one string
+/// the Portal held as well, which never rotates and which either side can leak.
+#[tokio::test]
+async fn a_callback_presents_a_minted_token_and_never_a_configured_string() {
+    use wiremock::matchers::{body_string_contains, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let realm = MockServer::start().await;
+    // The grant this proxy asks for: its own client, for the Portal's internal listener.
+    Mock::given(method("POST"))
+        .and(path("/realms/dev/protocol/openid-connect/token"))
+        .and(body_string_contains("grant_type=client_credentials"))
+        .and(body_string_contains("audience=portal-internal"))
+        .and(body_string_contains("client_id=helsinki-agent-proxy"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "minted-for-the-listener",
+            "expires_in": 300,
+        })))
+        .expect(1..)
+        .mount(&realm)
+        .await;
+
+    let portal = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/internal/agent-runs/events"))
+        .and(header("authorization", "Bearer minted-for-the-listener"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&portal)
+        .await;
+
+    let portal_uri = portal.uri();
+    let realm_uri = realm.uri();
+    let config = Config::from_lookup(|k| match k {
+        "JC_PROXY_BIND" => Some("127.0.0.1:0".to_string()),
+        "JC_GATEWAY_BASE" => Some("http://context-gateway:8080".to_string()),
+        "JC_MODEL_BASE" => Some("https://api.anthropic.com".to_string()),
+        "JC_FORGE_BASE" => Some("http://gitea-http:3000".to_string()),
+        "JC_MODEL_KEY" => Some("mock-model-key".to_string()),
+        "JC_FORGE_TOKEN" => Some("mock-forge-token".to_string()),
+        "JC_PORTAL_BASE" => Some(portal_uri.clone()),
+        "JC_OIDC_ISSUER" => Some(format!("{realm_uri}/realms/dev")),
+        "JC_OIDC_CLIENT_ID" => Some("helsinki-agent-proxy".to_string()),
+        // A secret is what makes the manager mint rather than answer a stub, and the token URL is
+        // the one the deployment names: a pod cannot dial its own cluster's public hostname.
+        "JC_OIDC_CLIENT_SECRET" => Some("the-proxys-own-secret".to_string()),
+        "JC_OIDC_TOKEN_URL" => Some(format!(
+            "{realm_uri}/realms/dev/protocol/openid-connect/token"
+        )),
+        _ => None,
+    })
+    .unwrap();
+
+    let config_arc = Arc::new(config);
+    let credentials = CredentialManager::new(config_arc.clone());
+    let state = Arc::new(ProxyState {
+        config: config_arc,
+        runs: RunResolver::with_cached(sample_run(false, "building")),
+        credentials,
+        limits: LimitManager::default(),
+        http: reqwest::Client::new(),
+        egress: reqwest::Client::new(),
+    });
+
+    let resp = router(state)
+        .oneshot(ticketed(
+            "POST",
+            "/v1/runs/events",
+            Body::from(
+                serde_json::json!({ "kind": "thought", "payload": { "text": "hm" } }).to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    realm.verify().await;
+    portal.verify().await;
+}
+
+/// A realm that cannot be reached costs the callback a 503, and the reason — which names the realm
+/// and the client — never reaches the run.
+#[tokio::test]
+async fn a_callback_with_no_token_answers_503_and_says_nothing_about_the_realm() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let realm = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/realms/dev/protocol/openid-connect/token"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": "invalid_client",
+            "error_description": "Invalid client or Invalid client credentials",
+        })))
+        .mount(&realm)
+        .await;
+
+    let realm_uri = realm.uri();
+    let config = Config::from_lookup(|k| match k {
+        "JC_PROXY_BIND" => Some("127.0.0.1:0".to_string()),
+        "JC_GATEWAY_BASE" => Some("http://context-gateway:8080".to_string()),
+        "JC_MODEL_BASE" => Some("https://api.anthropic.com".to_string()),
+        "JC_FORGE_BASE" => Some("http://gitea-http:3000".to_string()),
+        "JC_MODEL_KEY" => Some("mock-model-key".to_string()),
+        "JC_FORGE_TOKEN" => Some("mock-forge-token".to_string()),
+        "JC_PORTAL_BASE" => Some("http://portal.invalid".to_string()),
+        "JC_OIDC_ISSUER" => Some(format!("{realm_uri}/realms/dev")),
+        "JC_OIDC_CLIENT_ID" => Some("helsinki-agent-proxy".to_string()),
+        "JC_OIDC_CLIENT_SECRET" => Some("the-wrong-secret".to_string()),
+        _ => None,
+    })
+    .unwrap();
+
+    let config_arc = Arc::new(config);
+    let credentials = CredentialManager::new(config_arc.clone());
+    let state = Arc::new(ProxyState {
+        config: config_arc,
+        runs: RunResolver::with_cached(sample_run(false, "building")),
+        credentials,
+        limits: LimitManager::default(),
+        http: reqwest::Client::new(),
+        egress: reqwest::Client::new(),
+    });
+
+    let resp = router(state)
+        .oneshot(ticketed(
+            "POST",
+            "/v1/runs/events",
+            Body::from(
+                serde_json::json!({ "kind": "thought", "payload": { "text": "hm" } }).to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(!text.contains("invalid_client"), "{text}");
+    assert!(!text.contains("the-wrong-secret"), "{text}");
+    assert!(!text.contains("realms/dev"), "{text}");
+}

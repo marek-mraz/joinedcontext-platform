@@ -21,7 +21,10 @@ pub struct Config {
     pub model_base: Url,
     pub model_key: String,
     pub model_provider: String,
-    pub proxy_token: String,
+    /// Where the realm's token endpoint is, for the same reason the gateway needs one
+    /// (`JC_OIDC_TOKEN_URL`, T-2272): the issuer is the address a browser uses, and a pod cannot
+    /// dial its own cluster's ingress hostname. The issuer's own endpoint when none is named.
+    pub oidc_token_url: Option<String>,
     pub require_mesh_identity: bool,
 }
 
@@ -40,7 +43,7 @@ impl std::fmt::Debug for Config {
             .field("model_base", &self.model_base.as_str())
             .field("model_key", &"[redacted]")
             .field("model_provider", &self.model_provider)
-            .field("proxy_token", &"[redacted]")
+            .field("oidc_token_url", &self.oidc_token_url)
             .field("require_mesh_identity", &self.require_mesh_identity)
             .finish()
     }
@@ -73,7 +76,6 @@ impl Config {
             (&self.oidc_client_secret, "JC_OIDC_CLIENT_SECRET_FILE"),
             (&self.forge_token, "JC_FORGE_TOKEN_FILE"),
             (&self.model_key, "JC_MODEL_KEY_FILE"),
-            (&self.proxy_token, "JC_PROXY_TOKEN"),
         ] {
             if value.is_empty() {
                 return Err(ConfigError::Missing(var));
@@ -146,12 +148,16 @@ impl Config {
         let model_key = read_secret(&lookup, "JC_MODEL_KEY_FILE", "JC_MODEL_KEY")?;
         let model_provider = lookup("JC_MODEL_PROVIDER").unwrap_or_else(|| "anthropic".to_string());
 
-        let proxy_token = lookup("JC_PROXY_TOKEN").unwrap_or_default();
+        // `JC_PROXY_TOKEN` was here until T-2271: one string this proxy and the Portal both held,
+        // presented on every callback. The proxy asks the realm for a token of its own client now,
+        // audience-bound to the Portal's internal listener, and it expires by itself.
+        let oidc_token_url = lookup("JC_OIDC_TOKEN_URL").filter(|v| !v.trim().is_empty());
         let require_mesh_identity = lookup("JC_REQUIRE_MESH_IDENTITY").is_some_and(|v| v == "true");
 
         Ok(Self {
             bind,
             portal_base,
+            oidc_token_url,
             gateway_base,
             forge_base,
             forge_repo,
@@ -162,9 +168,23 @@ impl Config {
             model_base,
             model_key,
             model_provider,
-            proxy_token,
             require_mesh_identity,
         })
+    }
+}
+
+impl Config {
+    /// The realm's token endpoint: what the deployment named, else the issuer's own.
+    pub fn token_url(&self) -> String {
+        if let Some(url) = &self.oidc_token_url {
+            return url.clone();
+        }
+        let mut url = self.oidc_issuer.clone();
+        url.set_path(&format!(
+            "{}/protocol/openid-connect/token",
+            url.path().trim_end_matches('/')
+        ));
+        url.to_string()
     }
 }
 

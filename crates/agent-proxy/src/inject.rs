@@ -6,6 +6,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+/// What a token for the Portal's internal listener must be issued for; the Portal refuses any other
+/// audience on those routes.
+pub const PORTAL_INTERNAL_AUDIENCE: &str = "portal-internal";
+
 #[derive(Clone)]
 pub struct CredentialManager {
     config: Arc<Config>,
@@ -42,11 +46,7 @@ impl CredentialManager {
             return Ok(format!("mock-token-for-{endpoint_slug}"));
         }
 
-        let mut token_url = self.config.oidc_issuer.clone();
-        token_url.set_path(&format!(
-            "{}/protocol/openid-connect/token",
-            token_url.path().trim_end_matches('/')
-        ));
+        let token_url = self.config.token_url();
 
         let params = [
             ("grant_type", "client_credentials"),
@@ -93,7 +93,11 @@ impl CredentialManager {
         &self.config.model_key
     }
 
-    pub fn get_proxy_token(&self) -> &str {
-        &self.config.proxy_token
+    /// The token this proxy presents on the Portal's internal listener (AG-52, T-2271): its own
+    /// client's, audience-bound to that listener, minted and held like every other one. It was a
+    /// string shared with the Portal, which is the static key between cluster services CLAUDE.md
+    /// rules out.
+    pub async fn get_portal_token(&self) -> Result<String, String> {
+        self.get_endpoint_token(PORTAL_INTERNAL_AUDIENCE).await
     }
 }

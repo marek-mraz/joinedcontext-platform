@@ -9,6 +9,27 @@ pub mod llm;
 pub mod mcp;
 pub mod packages;
 
+/// The bearer this proxy presents on the Portal's internal listener, or the answer a caller gets
+/// when the realm cannot be reached (AG-52, T-2271).
+///
+/// Every callback goes through here, so there is one place where a realm outage is visible and one
+/// place that decides what a run is told: 503, because the run may retry, and never the reason —
+/// which names the realm and the client.
+pub(crate) async fn portal_bearer(
+    credentials: &crate::inject::CredentialManager,
+) -> Result<String, Box<axum::response::Response>> {
+    use axum::response::IntoResponse;
+    credentials.get_portal_token().await.map_err(|error| {
+        tracing::warn!(%error, "no token for the Portal's internal listener");
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "the proxy could not obtain a token of its own",
+        )
+            .into_response()
+            .into()
+    })
+}
+
 /// Whether a path a workspace sends would leave the base it is appended to once the outbound URL
 /// is parsed. axum has decoded the path once; the URL parser follows WHATWG, which reads `%2e%2e`
 /// as a `..` segment and a backslash as a slash in an http(s) URL, so nothing still encoded, no

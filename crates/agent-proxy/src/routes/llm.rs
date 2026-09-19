@@ -146,15 +146,22 @@ pub async fn handler(
             state.limits.record_tokens(&run.id, tokens).await;
             // Report usage asynchronously to Portal
             let portal_base = state.config.portal_base.clone();
-            let proxy_token = state.credentials.get_proxy_token().to_string();
             let run_id = run.id.clone();
             let http = state.http.clone();
+            let credentials = state.credentials.clone();
             tokio::spawn(async move {
+                // The report travels on the same identity as every other callback, minted in the
+                // spawned task so the answer to the run is never held up for the realm. A realm
+                // that cannot be reached costs this report and nothing else.
+                let Ok(bearer) = credentials.get_portal_token().await else {
+                    tracing::warn!(run = %run_id, "no token to report usage with");
+                    return;
+                };
                 let mut url = portal_base;
                 url.set_path("internal/agent-runs/events");
                 let _ = http
                     .post(url)
-                    .bearer_auth(proxy_token)
+                    .bearer_auth(bearer)
                     .json(&serde_json::json!({
                         "runId": run_id,
                         "kind": "usage",
