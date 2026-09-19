@@ -82,6 +82,19 @@ pub fn addressed_entity(path: &str) -> Option<&str> {
     }
 }
 
+/// The one type or attribute name a discovery path addresses, when it addresses one.
+///
+/// `GET /types/{type}` and `GET /attributes/{attr}` are the two reads that name a member of the
+/// vocabulary rather than an entity, and whether the caller may learn that the name exists is
+/// decided before the broker is asked (EP-25, T-2134).
+pub fn addressed_vocabulary(path: &str) -> Option<&str> {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    match segments.as_slice() {
+        ["types", name] | ["attributes", name] => Some(name),
+        _ => None,
+    }
+}
+
 /// The single attribute a path addresses, when it addresses one.
 ///
 /// The body of such a write is the bare attribute value, so the enforcement point has to

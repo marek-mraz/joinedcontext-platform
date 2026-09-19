@@ -19,7 +19,7 @@ use crate::handlers::{endpoint_surface, schema, space_surface};
 use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::evaluator::{Constraints, Subject, Verdict};
 use crate::pdp::{conditional, write_guard};
-use crate::pdp::{geo, projection, temporal, Pdp};
+use crate::pdp::{geo, projection, temporal, vocabulary, Pdp};
 use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, Model, SlugResolver, Space};
 use crate::translators::{cql2, geojson, ogc, sta, tabular, view_mapping, zip_export};
@@ -48,7 +48,7 @@ const MAX_BODY: usize = 8 * 1024 * 1024;
 
 // The header that tells a caller their answer was narrowed by policy, and the layer that
 // removes it again when they did not ask (R22).
-use crate::middleware::response::RESULTS_RESTRICTED;
+use crate::middleware::response::{RESULTS_COUNT, RESULTS_RESTRICTED};
 
 /// The methods a view endpoint answers at all (RFC 9110 section 9.2.1).
 const SAFE: &[Method] = &[Method::GET, Method::HEAD, Method::OPTIONS];
@@ -586,10 +586,27 @@ async fn serve_ngsi_ld(
     // answer is genuinely nothing, so it is answered here: forwarding it without a
     // temporal window would ask the broker for everything (GW26).
     if constraints.empty {
-        return match operations::addressed_entity(&path) {
-            Some(_) => ProblemDetails::not_found().into_response(),
-            None => empty_list(&constraints),
+        return match (
+            operations::addressed_entity(&path),
+            operations::addressed_vocabulary(&path),
+        ) {
+            (Some(_), _) | (_, Some(_)) => ProblemDetails::not_found().into_response(),
+            _ => empty_list(&constraints),
         };
+    }
+
+    // EP-25: discovery is enforcement. A type or attribute this endpoint does not serve is not
+    // found, and the broker is not asked at all, so neither the status nor the timing of the
+    // answer can be read as a directory of the names the grants withhold (T-2134).
+    if let Some(name) = operations::addressed_vocabulary(&path) {
+        if !vocabulary::reaches(operation, &query::decode(name), &constraints) {
+            tracing::info!(
+                slug = %endpoint.slug,
+                %operation,
+                "a vocabulary name this endpoint does not serve is answered as not found"
+            );
+            return ProblemDetails::not_found().into_response();
+        }
     }
 
     // The identifier in the path belongs to this organization and this space or the
@@ -695,7 +712,11 @@ async fn serve_ngsi_ld(
         }
     }
 
-    let sent_query = if operation.is_write() {
+    let sent_query = if operation.is_write() || vocabulary::describes(operation) {
+        // A discovery request takes `details` and nothing else (CIM 009 clause 5.7.10): the
+        // grants' `type`, `attrs` and `q` say which entities may be read, and a broker asked for
+        // the vocabulary of a type filter would either ignore them or answer something else.
+        // The narrowing of these answers happens on their own members instead (T-2134).
         query::passthrough(&params)
     } else {
         query::upstream(&params, &constraints, &[])
@@ -983,13 +1004,38 @@ async fn project_answer(
         return proxy::with_body(parts, bytes.to_vec());
     };
 
+    // A document about the vocabulary of the space carries an `id` and a `type` like an entity
+    // does, and is not one: the entity projection would strip `typeList` and `attributeDetails`
+    // — the members it exists for — and the type guard would refuse it for declaring a type no
+    // grant names. It is narrowed on its own members instead (EP-26, T-2134).
+    if vocabulary::describes(operation) {
+        vocabulary::narrow(&mut payload, constraints);
+        return match serde_json::to_vec(&payload) {
+            Ok(bytes) => proxy::with_body(parts, bytes),
+            Err(error) => {
+                tracing::error!(%error, "the narrowed vocabulary document does not serialize");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        };
+    }
+
     let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
     match &mut payload {
         Value::Array(entities) => {
+            let answered = entities.len();
             entities.retain(|entity| {
                 projection::permitted(entity, constraints)
                     && areas.as_ref().is_none_or(|areas| areas.admits(entity))
             });
+            // The broker counted what it answered, this counts what the caller may read, and the
+            // difference is the number of entities dropped here: a total that says two where one
+            // entity came back is the same oracle the entity itself would have been (R22, T-2131).
+            if entities.len() < answered {
+                parts.headers.remove(RESULTS_COUNT);
+                parts
+                    .headers
+                    .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
+            }
             projection::project_by_type(&mut payload, constraints);
         }
         entity if entity.is_object() && entity.get("id").is_some() => {

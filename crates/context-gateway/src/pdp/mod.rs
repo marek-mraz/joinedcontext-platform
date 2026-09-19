@@ -7,6 +7,7 @@ pub mod projection;
 pub mod reaper;
 pub mod scope_folding;
 pub mod temporal;
+pub mod vocabulary;
 pub mod write_guard;
 
 use crate::resolver::Endpoint;
