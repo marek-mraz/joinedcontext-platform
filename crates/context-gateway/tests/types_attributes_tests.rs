@@ -243,6 +243,27 @@ fn whole_space_endpoint() -> Endpoint {
     }
 }
 
+/// An endpoint whose grant names a type this space does not hold: every listing narrows to
+/// nothing, which is an empty listing and not an error.
+fn stranger_endpoint() -> Endpoint {
+    let policy: PolicySpec = serde_norway::from_str(&format!(
+        "contextSpaceRef: {SPACE}\n\
+         assigner: did:web:{DOMAIN}\n\
+         assignee: {{ kind: role, id: public }}\n\
+         operations: [queryEntity, retrieveEntityTypes, retrieveAttrTypes]\n\
+         information:\n\
+         \x20 - entities:\n\
+         \x20     - type: Ghost\n"
+    ))
+    .expect("the policy spec parses");
+    Endpoint {
+        projection: None,
+        hidden_attributes: Default::default(),
+        policies: vec![policy],
+        ..endpoint()
+    }
+}
+
 /// One request through the gateway, with the answer, its text and every path the broker was
 /// asked for.
 async fn ask(uri: &str) -> (StatusCode, Value, String, Vec<String>) {
@@ -251,6 +272,46 @@ async fn ask(uri: &str) -> (StatusCode, Value, String, Vec<String>) {
 
 async fn ask_through(endpoint: Endpoint, uri: &str) -> (StatusCode, Value, String, Vec<String>) {
     let (upstream, hops) = broker().await;
+    ask_upstream(endpoint, uri, upstream, hops).await
+}
+
+/// The same against a broker answering one document to every path, whatever the document is: a
+/// gateway that trusts the shape of what comes back is a gateway a broker can crash.
+async fn ask_answering(
+    endpoint: Endpoint,
+    uri: &str,
+    document: Value,
+) -> (StatusCode, Value, String, Vec<String>) {
+    let hops: Hops = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&hops);
+    let answer = Arc::new(document);
+    let app = Router::new().fallback(any(move |request: Request| {
+        let recorder = Arc::clone(&recorder);
+        let answer = Arc::clone(&answer);
+        async move {
+            recorder
+                .lock()
+                .expect("the hop log")
+                .push(request.uri().path().to_owned());
+            axum::Json((*answer).clone())
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let address = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    ask_upstream(endpoint, uri, format!("http://{address}"), hops).await
+}
+
+async fn ask_upstream(
+    endpoint: Endpoint,
+    uri: &str,
+    upstream: String,
+    hops: Hops,
+) -> (StatusCode, Value, String, Vec<String>) {
     let gateway = Arc::new(
         Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint]),
     );
@@ -476,4 +537,93 @@ async fn the_mcp_listings_are_narrowed_like_the_ngsi_ld_ones() {
             "{name} answered nothing at all: {answer}"
         );
     }
+}
+
+/// EP-26: a caller may address a type by the expanded IRI the broker stores, and the grant names
+/// the term. The two are the same name, so the request is forwarded rather than refused — the
+/// mistake the other way round would let `https://elsewhere.example/Depot` past a `Depot` grant.
+#[tokio::test]
+async fn an_expanded_iri_is_the_same_name_as_the_term_the_grant_uses() {
+    let (_, _, raw, asked) =
+        ask("/ngsi-ld/v1/types/https%3A%2F%2Furi.etsi.org%2Fngsi-ld%2Fdefault-context%2FVehicle")
+            .await;
+    assert!(
+        !asked.is_empty(),
+        "the expanded form of a granted type was refused as an unknown name: {raw}"
+    );
+
+    let (status, _, raw, asked) =
+        ask("/ngsi-ld/v1/types/https%3A%2F%2Felsewhere.example%2FDepot").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an expanded type no grant names is served: {raw}"
+    );
+    assert!(
+        asked.is_empty(),
+        "the broker was asked about a type no grant names: {asked:?}"
+    );
+}
+
+/// EP-26: a grant over a type the space does not hold leaves the listings empty, and an empty
+/// listing is an answer. Answering `404` instead would say the endpoint has no discovery surface,
+/// and answering the broker's list would say what the space holds.
+#[tokio::test]
+async fn a_listing_narrowed_to_nothing_is_an_empty_listing() {
+    let (status, body, raw, _) = ask_through(stranger_endpoint(), "/ngsi-ld/v1/types").await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(body["typeList"], json!([]), "{raw}");
+    assert!(
+        !raw.contains("Depot") && !raw.contains("Vehicle"),
+        "the emptied listing still names the types of the space: {raw}"
+    );
+}
+
+/// A broker is not trusted for the shape of its own documents either: a list of numbers, a null
+/// list, a missing member and a bare array all have to come back as something, never a panic.
+#[tokio::test]
+async fn a_vocabulary_document_of_the_wrong_shape_is_answered_not_trusted() {
+    for document in [
+        json!({ "id": "urn:ngsi-ld:EntityTypeList:stub", "type": "EntityTypeList",
+                "typeList": [7, null, { "Vehicle": true }, "Vehicle"] }),
+        json!({ "id": "urn:ngsi-ld:EntityTypeList:stub", "type": "EntityTypeList",
+                "typeList": Value::Null }),
+        json!({ "id": "urn:ngsi-ld:EntityTypeList:stub", "type": "EntityTypeList" }),
+        json!([]),
+        json!("not a document at all"),
+    ] {
+        let (status, body, raw, _) =
+            ask_answering(endpoint(), "/ngsi-ld/v1/types", document.clone()).await;
+        assert!(
+            status.is_success(),
+            "the gateway could not answer {document}: {status} {raw}"
+        );
+        // Whatever the broker put in the list, what leaves is a list of names this grant reaches.
+        if let Some(listed) = body.get("typeList").and_then(Value::as_array) {
+            assert_eq!(
+                listed,
+                &vec![json!("Vehicle")],
+                "the narrowed list kept something that is not a granted type name: {raw}"
+            );
+        }
+    }
+}
+
+/// R20: the broker's own miss stays a miss. A name the grants reach that the space does not hold
+/// is `404`, with the gateway's wording rather than the broker's, which is the same body the
+/// refusal of a withheld name carries.
+#[tokio::test]
+async fn a_granted_name_the_space_does_not_hold_is_the_same_not_found() {
+    // `Vehicle` is granted and projected; the stub holds no `/attributes/location` document.
+    let (status, body, raw, asked) = ask("/ngsi-ld/v1/attributes/location").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{raw}");
+    assert!(
+        !asked.is_empty(),
+        "a name the grants reach is looked up rather than refused: {asked:?}"
+    );
+    let (_, withheld, _, _) = ask("/ngsi-ld/v1/attributes/odometer").await;
+    assert_eq!(
+        body, withheld,
+        "the broker's miss and the gateway's refusal answer different bodies: {raw}"
+    );
 }

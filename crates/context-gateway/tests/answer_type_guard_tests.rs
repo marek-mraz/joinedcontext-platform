@@ -131,6 +131,17 @@ async fn answered(
     sent: &[(&str, &str)],
 ) -> (StatusCode, axum::http::HeaderMap, String) {
     let upstream = careless_broker().await;
+    through(upstream, method, uri, body, sent).await
+}
+
+/// The same, against a broker of the caller's choosing.
+async fn through(
+    upstream: String,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    sent: &[(&str, &str)],
+) -> (StatusCode, axum::http::HeaderMap, String) {
     let gateway = Arc::new(
         Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint()]),
     );
@@ -252,6 +263,53 @@ async fn the_count_of_a_narrowed_answer_is_not_the_brokers_count() {
             .and_then(|value| value.to_str().ok()),
         Some("true"),
         "the answer dropped an entity and does not say it narrowed: {answer}"
+    );
+}
+
+/// A broker that answers only what it was asked, and counts it: the other half of the count
+/// rule, because a header removed from every answer would pass the test above and tell a
+/// well-behaved caller nothing about how many entities match their query.
+async fn honest_broker() -> String {
+    let app = Router::new().fallback(any(|| async {
+        (
+            [("NGSILD-Results-Count", "1")],
+            axum::Json(json!([
+                {
+                    "id": "urn:ngsi-ld:Vehicle:hel.fi:fleet:bus-01",
+                    "type": "Vehicle",
+                    "name": { "type": "Property", "value": "Bus 01" }
+                }
+            ])),
+        )
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let address = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{address}")
+}
+
+/// R22: the count of an answer the gateway did not narrow is the broker's count, unchanged.
+#[tokio::test]
+async fn the_count_survives_an_answer_nothing_was_dropped_from() {
+    let (status, headers, answer) = through(
+        honest_broker().await,
+        Method::GET,
+        "/ngsi-ld/v1/entities?type=Vehicle&count=true",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        headers
+            .get("ngsild-results-count")
+            .and_then(|value| value.to_str().ok()),
+        Some("1"),
+        "the caller cannot count what they may read: {answer}"
     );
 }
 
