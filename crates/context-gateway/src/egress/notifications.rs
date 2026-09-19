@@ -190,9 +190,14 @@ pub async fn deliver(
         return ProblemDetails::not_found().into_response();
     };
 
-    let granted = attributes_of(&stored);
+    let judged = delivery_constraints(&stored, &endpoint);
     if let Some(data) = notification.get_mut("data") {
-        projection::project(data, &granted, &endpoint.hidden_attributes);
+        // An entity of a type this endpoint does not serve is not delivered, and what is
+        // delivered keeps the slots of its own type (EP-26, MP-02, T-1862).
+        if let Some(entities) = data.as_array_mut() {
+            entities.retain(|entity| projection::permitted(entity, &judged));
+        }
+        projection::project_by_type(data, &judged);
         if let Some(filter) = stored.get("q").and_then(Value::as_str) {
             if let Err(problem) =
                 keep_matching(&gateway.broker, &endpoint.space, filter, data).await
@@ -420,6 +425,65 @@ fn attributes_of(stored: &Value) -> BTreeSet<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The types a stored subscription selects; empty is a subscription over whatever the grants
+/// cover.
+fn types_of(stored: &Value) -> BTreeSet<String> {
+    stored
+        .get("entities")
+        .and_then(Value::as_array)
+        .map(|selectors| {
+            selectors
+                .iter()
+                .filter_map(|selector| selector.get("type").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The constraint set one delivery is judged by, per type (MP-02, T-1862).
+///
+/// A subscription carries one attribute list, so a grant over two classes with different slots is
+/// stored as the union of both: `User: [age]` and `Vehicle: [weight]` become `[age, weight]`. That
+/// union applied to every entity delivers a `Vehicle`'s `age` to a subscriber who may only read a
+/// `User`'s. The endpoint's own projection is therefore read again at delivery and the union is
+/// split back into the slots of each class, exactly as a read is projected.
+fn delivery_constraints(stored: &Value, endpoint: &Endpoint) -> Constraints {
+    let granted = attributes_of(stored);
+    let mut constraints = Constraints {
+        attrs: granted.clone(),
+        hidden: endpoint.hidden_attributes.clone(),
+        types: types_of(stored),
+        ..Default::default()
+    };
+    let Some(projection) = &endpoint.projection else {
+        return constraints;
+    };
+    let classes: BTreeSet<String> = projection
+        .classes
+        .iter()
+        .map(|class| class.name.clone())
+        .collect();
+    constraints.attrs_by_type = classes
+        .iter()
+        .map(|class| {
+            let slots = projection.attributes_of(class).unwrap_or_default();
+            let allowed = match granted.is_empty() {
+                true => slots,
+                false => narrow(&granted, &slots),
+            };
+            (class.clone(), allowed)
+        })
+        .collect();
+    // A type the projection does not name is not this endpoint's to deliver, whatever the
+    // subscription says: the same rule the read path applies to an answer (EP-26).
+    constraints.types = match constraints.types.is_empty() {
+        true => classes,
+        false => narrow(&constraints.types, &classes),
+    };
+    constraints
 }
 
 /// Drops the entities the subscription's own filter no longer matches (R46).

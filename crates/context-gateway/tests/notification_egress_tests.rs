@@ -1049,3 +1049,147 @@ async fn a_stored_endpoint_whose_name_resolves_inside_the_platform_is_not_delive
         "nothing left the gateway"
     );
 }
+
+/// MP-02, T-1862: the projection of the endpoint the subscription belongs to, applied per type at
+/// delivery.
+///
+/// A subscription carries one attribute list, so a grant over two classes with different slots is
+/// stored as the union of both. Applying that union to every entity delivers a `Device`'s
+/// `temperature` to a subscriber who may only read an `AirQualityObserved`'s — the leak the read
+/// path closed in T-1862, on the path where the answer arrives later.
+const TWO_CLASS_VIEW: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: ModelProjection
+metadata: { name: sensors, namespace: banskabystrica }
+spec:
+  contextSpaceRef: ovzdusie
+  dataModelRef: { kind: DataModel, name: ovzdusie, version: "1" }
+  classes:
+    - name: AirQualityObserved
+      slots: [temperature, location]
+    - name: Device
+      slots: [battery, location]
+"#;
+
+/// One delivery through an endpoint that carries the two-class projection, with what the sink saw.
+async fn deliver_projected(
+    stored_subscription: Value,
+    entities: Vec<Value>,
+) -> (StatusCode, Value) {
+    let (webhook, seen, _) = sink().await;
+    let subscription = {
+        let mut subscription = stored_subscription;
+        subscription["notification"]["endpoint"]["uri"] = json!(format!(
+            "{PUBLIC_URL}/api/endpoint/{SLUG}/egress/notifications?to={}",
+            percent(&webhook)
+        ));
+        subscription
+    };
+    let matching: Vec<String> = entities
+        .iter()
+        .filter_map(|entity| entity["id"].as_str().map(str::to_owned))
+        .collect();
+    let (upstream, _) = broker(BrokerState {
+        stored: Some(subscription),
+        matching,
+        forwarded: Arc::new(Mutex::new(Vec::new())),
+    })
+    .await;
+
+    let projection =
+        jc_core::envelope::ResourceEnvelope::<jc_core::kinds::ModelProjectionSpec>::from_yaml(
+            TWO_CLASS_VIEW,
+        )
+        .expect("the projection parses");
+    let realm = common::Realm::new();
+    let gateway = Arc::new(
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
+            .authenticate(
+                Arc::new(realm.verifier()),
+                ServiceAccounts::new(),
+                Some(PUBLIC_URL.to_owned()),
+            )
+            .deliver_privately_to(vec!["127.0.0.1".to_owned()])
+            .serve([Endpoint {
+                projection: Some(Arc::new(projection.spec)),
+                ..endpoint(&[])
+            }]),
+    );
+    let response = router(gateway)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/endpoint/{SLUG}/egress/notifications?to={}",
+                    percent(&webhook)
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(notification(entities).to_string()))
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    let status = response.status();
+    let delivered = seen.lock().expect("the delivery log").clone();
+    (status, delivered.first().cloned().unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn a_delivered_entity_keeps_the_slots_of_its_own_type() {
+    let (status, delivered) = deliver_projected(
+        json!({
+            "id": SUBSCRIPTION,
+            "type": "Subscription",
+            "entities": [{ "type": "AirQualityObserved" }, { "type": "Device" }],
+            "notification": {
+                // The union of both classes' slots, which is what one subscription can carry.
+                "attributes": ["battery", "location", "temperature"],
+                "endpoint": { "uri": "replaced by the helper", "accept": "application/json" }
+            }
+        }),
+        vec![
+            json!({
+                "id": SENSOR,
+                "type": "AirQualityObserved",
+                "temperature": { "type": "Property", "value": 19.5 },
+                "battery": { "type": "Property", "value": 42 }
+            }),
+            json!({
+                "id": "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:device-01",
+                "type": "Device",
+                "temperature": { "type": "Property", "value": 31.0 },
+                "battery": { "type": "Property", "value": 88 }
+            }),
+            // A type the projection does not name is not this endpoint's to deliver at all.
+            json!({
+                "id": "urn:ngsi-ld:Camera:banskabystrica.sk:ovzdusie:cam-01",
+                "type": "Camera",
+                "location": { "type": "GeoProperty", "value": { "type": "Point", "coordinates": [19.1, 48.7] } }
+            }),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT, "{delivered}");
+    let data = delivered["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a delivery carries its data: {delivered}"));
+    assert_eq!(data.len(), 2, "the Camera was delivered too: {delivered}");
+
+    let sensor = &data[0];
+    assert_eq!(sensor["temperature"]["value"], json!(19.5), "{sensor}");
+    assert!(
+        sensor.get("battery").is_none(),
+        "an AirQualityObserved carried a Device's battery: {sensor}"
+    );
+
+    let device = &data[1];
+    assert_eq!(device["battery"]["value"], json!(88), "{device}");
+    assert!(
+        device.get("temperature").is_none(),
+        "a Device carried an AirQualityObserved's temperature: {device}"
+    );
+    assert!(
+        !delivered.to_string().contains("Camera"),
+        "the type outside the projection is named in the delivery: {delivered}"
+    );
+}

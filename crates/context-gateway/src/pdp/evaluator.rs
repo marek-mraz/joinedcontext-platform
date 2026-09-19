@@ -154,6 +154,14 @@ pub struct Constraints {
     /// Whether the caller asked for more than the grants cover, so the answer is a
     /// narrowed one and says so (R22).
     pub restricted: bool,
+    /// The types this query was not allowed to select on, because it filters or orders on an
+    /// attribute they may not serve (T-1862, MP-02).
+    ///
+    /// Every one of them is a type the caller may read — that is what makes it safe to name in a
+    /// warning: what the answer cannot say is *why* a row is missing, and a caller reading an
+    /// empty list with no explanation debugs it by asking the same question with more filters,
+    /// which is the behaviour the rule exists to discourage.
+    pub dropped: BTreeSet<String>,
 }
 
 impl Constraints {
@@ -385,6 +393,8 @@ fn intersect(
         temporal_q: clamped.temporal_q,
         temporal_windows: clamped.windows,
         empty: clamped.empty || no_type_left || no_attr_left,
+        // Filled by the filter rule, which runs after this and knows which types it took out.
+        dropped: BTreeSet::new(),
     }
 }
 

@@ -1063,7 +1063,34 @@ fn empty_list(constraints: &Constraints) -> Response<Body> {
             .headers_mut()
             .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
     }
+    warn_about_dropped_types(response.headers_mut(), constraints);
     response
+}
+
+/// Says which types this query was not allowed to select on, and why (CIM 009 clause 6.3.11,
+/// T-1862 rule 4).
+///
+/// An answer narrowed by the filter rule is an empty list or a shorter one, and nothing in it says
+/// so. A developer reading that guesses, and the way they guess is by filtering harder — which is
+/// the oracle the rule closed. So the answer says it out loud, naming only types the caller may
+/// read.
+fn warn_about_dropped_types(headers: &mut HeaderMap, constraints: &Constraints) {
+    if constraints.dropped.is_empty() {
+        return;
+    }
+    let named: Vec<&str> = constraints.dropped.iter().map(String::as_str).collect();
+    let warning = format!(
+        "199 joinedcontext \"{} {} not queried: this request selects or orders on an attribute \
+         they do not serve on this endpoint\"",
+        named.join(", "),
+        match named.len() {
+            1 => "was",
+            _ => "were",
+        }
+    );
+    if let Ok(value) = HeaderValue::from_str(&warning) {
+        headers.insert(crate::middleware::response::WARNING, value);
+    }
 }
 
 async fn project_answer(
@@ -1077,6 +1104,7 @@ async fn project_answer(
             .headers
             .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
     }
+    warn_about_dropped_types(&mut parts.headers, constraints);
     if !parts.status.is_success() {
         // A read the grants do not reach is answered with the gateway's own miss, so the
         // broker's wording — which names the id it could not find — cannot be told apart from

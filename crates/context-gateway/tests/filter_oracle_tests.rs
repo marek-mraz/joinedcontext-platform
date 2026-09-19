@@ -635,3 +635,87 @@ async fn a_body_whose_filter_and_selector_disagree_asks_for_nothing() {
         "the broker was asked for the one type the caller did not name: {asked:?}"
     );
 }
+
+/// T-1862 rule 4: an answer the filter rule narrowed says which types it left out, and why.
+///
+/// Every named type is one this caller may read — the rule took it out of *this* query, not out of
+/// the grant — so naming it tells them nothing they could not read another way, and it is the
+/// difference between an empty list a developer fixes and one they bisect until it answers.
+#[tokio::test]
+async fn an_answer_says_which_types_the_filter_left_out() {
+    let (upstream, _) = broker().await;
+    let gateway = Arc::new(
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
+            .serve([endpoint(true, &[])]),
+    );
+    let response = router(gateway)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=User,Vehicle&q=age%3E30"
+                ))
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let warning = response
+        .headers()
+        .get("ngsild-warning")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        warning.contains("Vehicle") && warning.contains("not queried"),
+        "the answer does not say the Vehicle was left out: {warning:?}"
+    );
+    assert!(
+        !warning.contains("User"),
+        "the type that was queried is named as left out: {warning}"
+    );
+}
+
+/// The same, in the channel a model reads: a tool result carries the warning, because a header is
+/// no use to somebody calling `query_entities` (AG-13).
+#[tokio::test]
+async fn a_tool_result_carries_the_same_warning() {
+    let (upstream, _) = broker().await;
+    let gateway = Arc::new(
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([Endpoint {
+            representations: vec![Representation::NgsiLd, Representation::Mcp],
+            ..endpoint(true, &[])
+        }]),
+    );
+    let call = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {
+            "name": "query_entities",
+            // One type per call is what the tool schema takes; `age` is a `User` slot, so the
+            // `Vehicle` is the type this query may not select on and the answer is empty.
+            "arguments": { "type": "Vehicle", "q": "age>30" }
+        }
+    });
+    let response = router(gateway)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/endpoint/{SLUG}/mcp"))
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .body(Body::from(call.to_string()))
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("a body");
+    let answer: Value = serde_json::from_slice(&bytes).expect("a JSON-RPC answer");
+    let warnings = answer["result"]["structuredContent"]["warnings"].to_string();
+    assert!(
+        warnings.contains("Vehicle"),
+        "the tool result does not say the Vehicle was left out: {answer}"
+    );
+}

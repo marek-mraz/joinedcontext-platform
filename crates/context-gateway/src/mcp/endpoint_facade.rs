@@ -800,6 +800,16 @@ async fn call_tool(
     let restricted = answer
         .headers()
         .contains_key(&crate::middleware::response::RESULTS_RESTRICTED);
+    // What a model has to know to read its own empty result: which types this query was not
+    // allowed to select on. A header is no use to a tool caller, so it travels in the result
+    // (T-1862 rule 4, AG-13).
+    let warnings: Vec<String> = answer
+        .headers()
+        .get_all(&crate::middleware::response::WARNING)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .collect();
     let payload = axum::body::to_bytes(answer.into_body(), 8 * 1024 * 1024)
         .await
         .ok()
@@ -811,7 +821,10 @@ async fn call_tool(
     match status.is_success() {
         true => result(
             id,
-            answered(&payload, tool.result_key, restricted, &members),
+            warned(
+                answered(&payload, tool.result_key, restricted, &members),
+                &warnings,
+            ),
         ),
         false => result(id, refused(&refusal_text(status, &payload), &payload)),
     }
@@ -1055,6 +1068,24 @@ fn answered(payload: &Value, result_key: &str, restricted: bool, sources: &[Stri
         }],
         "structuredContent": structured,
     })
+}
+
+/// Adds to a tool result what the read path said in a warning header (T-1862 rule 4).
+///
+/// A model reading an empty list has no header to look at and no way to ask why. The warning names
+/// the types the query was not allowed to select on, all of which the caller may read, so the next
+/// call can ask a question this endpoint can answer instead of narrowing the filter until it does.
+fn warned(mut result: Value, warnings: &[String]) -> Value {
+    if warnings.is_empty() {
+        return result;
+    }
+    if let Some(structured) = result
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    {
+        structured.insert("warnings".to_owned(), json!(warnings));
+    }
+    result
 }
 
 /// A tool error: what was refused, in the agent's own channel for it.
