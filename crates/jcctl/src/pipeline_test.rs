@@ -192,6 +192,17 @@ pub fn harness(
             "timeout": "3s",
             "retries": 0,
             "max_in_flight": 1,
+            // The capture route on the Portal's internal listener answers this project's runner and
+            // nobody else (AG-52, T-2271), so the harness names itself the way every other pipeline
+            // of this runner does: `client_credentials` on the runner's own Keycloak client, whose
+            // audience mapper binds the token to that listener. The three variables are the runner
+            // pod's own; a token never appears in this configuration, which the Portal stores.
+            "oauth2": {
+                "enabled": true,
+                "client_key": "${JC_CLIENT_ID}",
+                "client_secret": "${JC_CLIENT_SECRET}",
+                "token_url": "${JC_TOKEN_URL}",
+            },
         }},
     }))
 }
@@ -426,6 +437,19 @@ mod tests {
             "http://portal:9090/internal/pipeline-tests/abc"
         );
         assert_eq!(config["output"]["http_client"]["verb"], "POST");
+        // T-2271: the capture is a route of the internal listener, so the harness mints the runner's
+        // own token for it — the secret is a variable of the runner pod and never a value here.
+        let oauth2 = &config["output"]["http_client"]["oauth2"];
+        assert_eq!(oauth2["enabled"], true);
+        assert_eq!(oauth2["client_key"], "${JC_CLIENT_ID}");
+        assert_eq!(oauth2["client_secret"], "${JC_CLIENT_SECRET}");
+        assert_eq!(oauth2["token_url"], "${JC_TOKEN_URL}");
+        assert!(
+            !serde_json::to_string(&config)
+                .expect("json")
+                .contains("Bearer "),
+            "no token is ever written into a harness"
+        );
         assert!(
             config.get("resources").is_none(),
             "no secret, no resource: MF-38"
