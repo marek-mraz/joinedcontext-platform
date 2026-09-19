@@ -1353,3 +1353,119 @@ async fn a_path_that_would_leave_its_base_is_refused_on_the_data_and_packages_ro
         1
     );
 }
+
+/// AG-52: the mesh identity is the second factor, so only the run's own workload passes it.
+///
+/// `l5d-client-id` was matched with `contains`, which admitted every identity that merely held the
+/// string: a longer run id, and any ServiceAccount or namespace named around it (T-1477).
+mod mesh_identity {
+    use super::*;
+
+    const RUN: &str = "e3b0c442-98fc-1c14-9afb-4c7b2756a120";
+    const TICKET: &str = "secret-ticket-123";
+
+    /// A proxy that demands the mesh identity, with a stub gateway to answer what passes.
+    async fn proxy_and_gateway() -> (Arc<ProxyState>, wiremock::MockServer) {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let gateway = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&gateway)
+            .await;
+        let uri = gateway.uri();
+        let config = Config::from_lookup(|key| match key {
+            "JC_PROXY_BIND" => Some("127.0.0.1:0".to_string()),
+            "JC_GATEWAY_BASE" => Some(uri.clone()),
+            "JC_MODEL_BASE" => Some("https://api.anthropic.com".to_string()),
+            "JC_FORGE_BASE" => Some("http://gitea-http:3000".to_string()),
+            "JC_MODEL_KEY" => Some("mock-model-key".to_string()),
+            "JC_FORGE_TOKEN" => Some("mock-forge-token".to_string()),
+            "JC_REQUIRE_MESH_IDENTITY" => Some("true".to_string()),
+            _ => None,
+        })
+        .expect("the test configuration parses");
+        assert!(
+            config.require_mesh_identity,
+            "this suite is about the check being on"
+        );
+        let config = Arc::new(config);
+        let state = Arc::new(ProxyState {
+            credentials: CredentialManager::new(config.clone()),
+            runs: RunResolver::with_cached(sample_run(false, "building")),
+            limits: LimitManager::default(),
+            http: reqwest::Client::new(),
+            egress: reqwest::Client::new(),
+            config,
+        });
+        (state, gateway)
+    }
+
+    async fn read_as(state: Arc<ProxyState>, identity: Option<&str>) -> StatusCode {
+        let mut request = Request::builder()
+            .uri("/v1/data/ngsi-ld/v1/entities?type=Bike")
+            .header("x-jc-run", RUN)
+            .header("x-jc-ticket", TICKET);
+        if let Some(identity) = identity {
+            request = request.header("l5d-client-id", identity);
+        }
+        router(state)
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn a_mesh_identity_that_only_contains_the_run_is_refused() {
+        let (state, _gateway) = proxy_and_gateway().await;
+        for identity in [
+            // The run id with one more character: another run's workload.
+            &format!("agent-run-{RUN}1.jc-agents.serviceaccount.identity.linkerd.cluster.local"),
+            // An account named around this run's name.
+            &format!("x-agent-run-{RUN}.jc-agents.serviceaccount.identity.linkerd.cluster.local"),
+            // The name in a later label rather than in the ServiceAccount.
+            &format!(
+                "something-else.agent-run-{RUN}.serviceaccount.identity.linkerd.cluster.local"
+            ),
+        ] {
+            assert_eq!(
+                read_as(state.clone(), Some(identity)).await,
+                StatusCode::FORBIDDEN,
+                "{identity} is not this run's workload"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_runs_own_mesh_identity_passes() {
+        let (state, gateway) = proxy_and_gateway().await;
+        let identity =
+            format!("agent-run-{RUN}.jc-agents.serviceaccount.identity.linkerd.cluster.local");
+        assert_eq!(
+            read_as(state, Some(&identity)).await,
+            StatusCode::OK,
+            "the run's own workload reads"
+        );
+        assert_eq!(
+            gateway.received_requests().await.unwrap_or_default().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_empty_mesh_identity_is_refused() {
+        let (state, gateway) = proxy_and_gateway().await;
+        assert_eq!(read_as(state.clone(), None).await, StatusCode::FORBIDDEN);
+        assert_eq!(read_as(state, Some("")).await, StatusCode::FORBIDDEN);
+        assert!(
+            gateway
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "a refused request never reaches the gateway"
+        );
+    }
+}

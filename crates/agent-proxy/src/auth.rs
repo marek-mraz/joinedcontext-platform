@@ -70,8 +70,7 @@ pub async fn authenticate(
             .get("l5d-client-id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default();
-        let expected = format!("agent-run-{}", run.id);
-        if !client_id.contains(&expected) {
+        if !is_runs_own_workload(client_id, &run.id) {
             return Err(Box::new(
                 jc_core::ProblemDetails::forbidden().with_detail("mesh workload identity mismatch"),
             ));
@@ -79,4 +78,19 @@ pub async fn authenticate(
     }
 
     Ok(run)
+}
+
+/// Whether a Linkerd client identity is this run's own workload (AG-52).
+///
+/// A mesh identity is `<serviceaccount>.<namespace>.serviceaccount.identity.linkerd.cluster.local`
+/// and the ServiceAccount is the workload, so the first label is compared whole. `contains` used to
+/// admit any identity that merely held the string: a run whose id extends this one
+/// (`agent-run-abc1…` for run `abc`) and any account or namespace named to hold it
+/// (`x-agent-run-abc…`) passed as the second factor (T-1477).
+fn is_runs_own_workload(client_id: &str, run_id: &str) -> bool {
+    !run_id.is_empty()
+        && client_id
+            .split('.')
+            .next()
+            .is_some_and(|account| account == format!("agent-run-{run_id}"))
 }
