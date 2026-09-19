@@ -1074,6 +1074,7 @@ spec:
 async fn deliver_projected(
     stored_subscription: Value,
     entities: Vec<Value>,
+    hidden: &[&str],
 ) -> (StatusCode, Value) {
     let (webhook, seen, _) = sink().await;
     let subscription = {
@@ -1111,7 +1112,7 @@ async fn deliver_projected(
             .deliver_privately_to(vec!["127.0.0.1".to_owned()])
             .serve([Endpoint {
                 projection: Some(Arc::new(projection.spec)),
-                ..endpoint(&[])
+                ..endpoint(hidden)
             }]),
     );
     let response = router(gateway)
@@ -1166,6 +1167,7 @@ async fn a_delivered_entity_keeps_the_slots_of_its_own_type() {
                 "location": { "type": "GeoProperty", "value": { "type": "Point", "coordinates": [19.1, 48.7] } }
             }),
         ],
+        &[],
     )
     .await;
 
@@ -1191,5 +1193,70 @@ async fn a_delivered_entity_keeps_the_slots_of_its_own_type() {
     assert!(
         !delivered.to_string().contains("Camera"),
         "the type outside the projection is named in the delivery: {delivered}"
+    );
+}
+
+/// EP-26, MP-02, EP-61, T-2261: the one delivery that has to carry nothing it should not — a
+/// notification about entities of three types, one of them outside the projection, each carrying a
+/// canary for every attribute including the one the endpoint hides.
+///
+/// The sweep asks the read surfaces this question 105 ways. A notification is the same answer sent
+/// later and to somebody else, so it is asked here once, with the same kind of fixture: whatever is
+/// delivered is searched for every marker it may not hold.
+#[tokio::test]
+async fn a_notification_carries_only_what_the_subscriber_may_read() {
+    let canary = |kind: &str, id: &str| {
+        let mut entity = json!({ "id": id, "type": kind });
+        for attr in ["temperature", "battery", "location", UNGRANTED] {
+            entity[attr] = json!({ "type": "Property", "value": format!("CANARY-{kind}-{attr}") });
+        }
+        entity
+    };
+    let (status, delivered) = deliver_projected(
+        json!({
+            "id": SUBSCRIPTION,
+            "type": "Subscription",
+            "entities": [{ "type": "AirQualityObserved" }, { "type": "Device" }],
+            "notification": {
+                "attributes": ["battery", "location", "temperature", UNGRANTED],
+                "endpoint": { "uri": "replaced by the helper", "accept": "application/json" }
+            }
+        }),
+        vec![
+            canary("AirQualityObserved", SENSOR),
+            canary(
+                "Device",
+                "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:device-01",
+            ),
+            canary(
+                "Camera",
+                "urn:ngsi-ld:Camera:banskabystrica.sk:ovzdusie:cam-01",
+            ),
+        ],
+        &[UNGRANTED],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{delivered}");
+
+    let sent = delivered.to_string();
+    // What each type may serve, per the projection the endpoint carries.
+    for forbidden in [
+        "CANARY-AirQualityObserved-battery",
+        "CANARY-Device-temperature",
+        "CANARY-AirQualityObserved-operatorPhone",
+        "CANARY-Device-operatorPhone",
+        "Camera",
+        UNGRANTED,
+    ] {
+        assert!(
+            !sent.contains(forbidden),
+            "the delivery carries {forbidden}: {sent}"
+        );
+    }
+    // And it is still a delivery: a guard that sends nothing proves nothing.
+    assert!(
+        sent.contains("CANARY-AirQualityObserved-temperature")
+            && sent.contains("CANARY-Device-battery"),
+        "the delivery carries nothing at all: {sent}"
     );
 }

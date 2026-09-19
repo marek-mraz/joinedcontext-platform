@@ -780,3 +780,134 @@ async fn an_entity_of_another_type_is_not_retrieved_by_id() {
         );
     }
 }
+
+/// SP-01, EP-26: the same canary space, reached by its own name instead of an Endpoint slug.
+///
+/// `/cs/{space}/ngsi-ld` and `/cs/{space}/mcp` are a second door to the same decision point, with
+/// their own resolver and their own record. A projection that is only applied behind a slug would
+/// pass every probe above and leak here, so the NGSI-LD and MCP probes are asked again through it.
+#[tokio::test]
+async fn no_surface_of_the_space_leaks() {
+    let asked: Vec<Probe> = probes()
+        .into_iter()
+        .filter(|probe| probe.uri.starts_with("/ngsi-ld") || probe.uri.starts_with("/mcp"))
+        .collect();
+    assert!(
+        asked.len() > 40,
+        "the space sweep asks {} probes",
+        asked.len()
+    );
+
+    let mut failures = Vec::new();
+    for probe in asked {
+        let (upstream, hops) = broker(false).await;
+        let published = endpoint();
+        let space = context_gateway::resolver::Space {
+            endpoint: Arc::new(Endpoint {
+                slug: "fleet".to_owned(),
+                base_path: "/cs/fleet".to_owned(),
+                ..published
+            }),
+            title: Default::default(),
+            description: Default::default(),
+            is_sandbox: false,
+            default_locale: None,
+        };
+        let gateway = Arc::new(
+            Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve_spaces([space]),
+        );
+        let mut request = Request::builder()
+            .method(probe.method.clone())
+            .uri(format!("/cs/fleet{}", probe.uri))
+            .header("accept", probe.accept);
+        let body = match &probe.body {
+            Some(json) => {
+                request = request.header("content-type", "application/json");
+                Body::from(json.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response = router(gateway)
+            .oneshot(request.body(body).expect("a request"))
+            .await
+            .expect("the gateway answers");
+        let status = response.status();
+        let headers = format!("{:?}", response.headers());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a body");
+        let sent = format!(
+            "{} {}",
+            probe.uri,
+            probe
+                .body
+                .as_ref()
+                .map(Value::to_string)
+                .unwrap_or_default()
+        );
+        let mut found = leaks(&readable(&headers, &bytes), &sent);
+        found.sort();
+        found.dedup();
+        if !found.is_empty() {
+            failures.push(format!(
+                "space {} ({status}) served {}",
+                probe.label,
+                found.join(", ")
+            ));
+        }
+        failures.extend(oracle(&hops.lock().expect("the hop log"), &probe));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// R9, T-2261: two callers share a URL and are answered differently, so no answer of this gateway
+/// may be stored by a cache that serves more than one of them.
+///
+/// The gateway says so itself rather than relying on the edge to say it: `private` is the answer
+/// belonging to one caller, `no-store` is a cache not keeping it at all, and `Vary: Authorization`
+/// is what the difference depends on.
+#[tokio::test]
+async fn a_cached_answer_is_never_served_across_grants() {
+    for uri in [
+        "/ngsi-ld/v1/entities?type=User,Vehicle",
+        "/ngsi-ld/v1/types",
+        "/file.csv?type=Vehicle",
+        "/schema/index.json",
+        "/access",
+    ] {
+        let (upstream, _) = broker(true).await;
+        let gateway = Arc::new(
+            Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint()]),
+        );
+        let response = router(gateway)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/endpoint/{SLUG}{uri}"))
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("the gateway answers");
+        let headers = response.headers().clone();
+        let cache = headers
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            cache.contains("private"),
+            "{uri} does not say the answer is one caller's: {cache:?}"
+        );
+        assert!(
+            cache.contains("no-store") || cache.contains("no-cache"),
+            "{uri} may be stored and replayed: {cache:?}"
+        );
+        let vary = headers
+            .get("vary")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            vary.contains("Authorization"),
+            "{uri} does not vary by who is asking: {vary:?}"
+        );
+    }
+}

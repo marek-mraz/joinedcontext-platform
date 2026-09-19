@@ -7,7 +7,7 @@
 //! cannot forget it.
 
 use axum::extract::Request;
-use axum::http::HeaderName;
+use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::Next;
 use axum::response::Response;
 
@@ -39,8 +39,8 @@ pub fn asked_about_narrowing(request: &Request) -> bool {
         .any(|value| value.as_bytes().eq_ignore_ascii_case(b"true"))
 }
 
-/// Removes the tenant from every answer, and the narrowing signal from every answer nobody
-/// asked for it in.
+/// Removes the tenant from every answer, the narrowing signal from every answer nobody asked for
+/// it in, and says that no answer of this gateway belongs in a shared cache.
 pub async fn scrub(request: Request, next: Next) -> Response {
     let asked = asked_about_narrowing(&request);
     let mut response = next.run(request).await;
@@ -51,5 +51,37 @@ pub async fn scrub(request: Request, next: Next) -> Response {
     if !asked {
         while headers.remove(&RESULTS_RESTRICTED).is_some() {}
     }
+    keep_out_of_shared_caches(headers);
     response
+}
+
+/// Says that every answer here is one caller's (R9, EP-26, T-2261).
+///
+/// Two callers share a URL and are answered differently, because the answer is the intersection of
+/// that URL with their own grants. A shared cache that stored one and replayed it to the other
+/// would serve an answer nobody decided — so every answer says whose it is, and on what the
+/// difference depends. The edge sets `no-store` on top of this today; the gateway is the
+/// enforcement point and does not depend on the edge for it, exactly as it does not depend on the
+/// broker for the projection.
+///
+/// A document the gateway wants revalidated keeps its own `Cache-Control` (the schema artifacts
+/// carry `no-cache` with a strong `ETag`, EP-51) and only gains `private` and the `Vary`.
+fn keep_out_of_shared_caches(headers: &mut axum::http::HeaderMap) {
+    let revalidated = headers
+        .get(axum::http::header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("no-cache"));
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        match revalidated {
+            true => HeaderValue::from_static("private, no-cache"),
+            false => HeaderValue::from_static("private, no-store"),
+        },
+    );
+    // `Authorization` is what the answer differs by; the two request headers a caller may narrow
+    // themselves with are named so a cache keyed on them cannot mix them either.
+    headers.insert(
+        axum::http::header::VARY,
+        HeaderValue::from_static("Authorization, Accept, NGSILD-Results-Restricted"),
+    );
 }

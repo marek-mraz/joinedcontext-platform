@@ -655,8 +655,8 @@ async fn a_strong_etag_revalidates_instead_of_going_stale() {
     );
     assert_eq!(
         header(&headers, "cache-control"),
-        Some("no-cache"),
-        "a grant that changes changes the schema"
+        Some("private, no-cache"),
+        "a grant that changes changes the schema, and the schema is one caller's (T-2261)"
     );
 
     let conditional = Request::builder()
