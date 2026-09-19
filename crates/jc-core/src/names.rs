@@ -125,3 +125,75 @@ pub fn validate_locale(l: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// The prefixes a minted credential wears, lowercased, with the separator both spellings use.
+///
+/// Only shapes a token announces itself by: a rule that guessed from length or entropy would
+/// refuse real secret names, and a name nobody can use is a worse failure than the one this
+/// catches. The list is the tokens a person has in their clipboard while they configure a source.
+const CREDENTIAL_PREFIXES: &[&str] = &[
+    "ghp_",
+    "ghp-",
+    "gho_",
+    "gho-",
+    "ghu_",
+    "ghu-",
+    "ghs_",
+    "ghs-",
+    "ghr_",
+    "ghr-",
+    "github_pat_",
+    "github-pat-",
+    "glpat_",
+    "glpat-",
+    "gldt_",
+    "gldt-",
+    "glrt_",
+    "glrt-",
+    "xoxb_",
+    "xoxb-",
+    "xoxp_",
+    "xoxp-",
+    "xoxa_",
+    "xoxa-",
+    "xapp_",
+    "xapp-",
+    "sk_",
+    "sk-",
+    "pk_live_",
+    "pk-live-",
+    "sk_live_",
+    "sk-live-",
+    "rk_live_",
+    "rk-live-",
+    "dckr_pat_",
+    "dckr-pat-",
+    "npm_",
+    "npm-",
+    "hf_",
+    "hf-",
+    "sbp_",
+    "sbp-",
+    "akia",
+    "asia",
+    "aiza",
+    "ya29.",
+];
+
+/// Whether a value carries the shape of a minted credential rather than the name of one (MF-24).
+///
+/// Used where a person types the *name* of a secret: a name is free text, and the mistake this
+/// catches is pasting the credential itself into it, which would commit a live token to Git. A
+/// token whose prefix is also a valid DNS-1123 label (`glpat-…`, `xoxb-…`, `sk-…`) passes every
+/// other rule the platform has, which is why this one exists.
+pub fn looks_like_a_credential(value: &str) -> bool {
+    let lowered = value.to_ascii_lowercase();
+    if CREDENTIAL_PREFIXES
+        .iter()
+        .any(|prefix| lowered.starts_with(prefix))
+    {
+        return true;
+    }
+    // A PEM block or a JWT: three dot-separated base64url segments starting with a JSON header.
+    lowered.starts_with("-----begin") || (value.starts_with("eyJ") && value.split('.').count() == 3)
+}

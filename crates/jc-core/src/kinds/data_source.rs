@@ -402,6 +402,8 @@ impl DataSourceSpec {
             }
         }
 
+        self.validate_secret_references()?;
+
         match &self.source_type {
             DataSourceType::Mqtt => {
                 self.validate_typed_common()?;
@@ -436,6 +438,37 @@ impl DataSourceSpec {
         }
     }
 
+    /// Every credential reference this source carries, by the field a person typed it into.
+    ///
+    /// Until T-2238 only the runner path checked anything, and it checked the name alone: a typed
+    /// `passwordRef` naming a GitHub token was checked green and would have been committed to the
+    /// configuration repository in the clear. Each block is walked whatever `type` says, because a
+    /// block that does not belong to the type is refused elsewhere and a reference in it is still a
+    /// reference a person wrote.
+    fn validate_secret_references(&self) -> Result<()> {
+        if let Some(mqtt) = &self.mqtt {
+            if let Some(password) = &mqtt.password_ref {
+                password.validate("spec.mqtt.passwordRef")?;
+            }
+        }
+        if let Some(http) = &self.http {
+            if let Some(authorization) = &http.authorization {
+                authorization
+                    .header_ref
+                    .validate("spec.http.authorization.headerRef")?;
+            }
+        }
+        if let Some(tls) = &self.tls {
+            if let Some(ca) = &tls.ca_cert_ref {
+                ca.validate("spec.tls.caCertRef")?;
+            }
+        }
+        for (index, secret) in self.secrets.iter().enumerate() {
+            secret.validate(&format!("spec.secrets[{index}]"))?;
+        }
+        Ok(())
+    }
+
     fn validate_typed_common(&self) -> Result<()> {
         if self.input.is_some() {
             return Err(Error::Name {
@@ -467,7 +500,8 @@ impl DataSourceSpec {
         };
 
         for sref in &self.secrets {
-            names::validate_dns1123_label(&sref.name)?;
+            // The name and the key are checked for every type by `validate_secret_references`,
+            // which names the field and never repeats what it refused (T-2238).
             match &sref.env_var {
                 Some(ev) if ENV_VAR_RE.is_match(ev) => {}
                 Some(ev) => {

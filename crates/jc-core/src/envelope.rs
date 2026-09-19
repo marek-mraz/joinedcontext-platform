@@ -3,9 +3,15 @@
 use crate::error::{Error, Result};
 use crate::i18n::Text;
 use crate::names;
+use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
+
+/// A key inside a Kubernetes secret (`^[-._a-zA-Z0-9]+$`), which is what `SecretRef.key` names.
+static SECRET_KEY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[-._a-zA-Z0-9]+$").expect("valid regex"));
 
 /// The canonical API version for joinedcontext resources (MF-01).
 pub const API_VERSION: &str = "joinedcontext.com/v1alpha1";
@@ -422,6 +428,57 @@ pub struct SecretRef {
     /// Optional environment variable name for injection into runners.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_var: Option<String>,
+}
+
+impl SecretRef {
+    /// Checks that a reference names a secret and does not carry one (MF-24, MF-35, T-2238).
+    ///
+    /// `field` is the path a person typed into, e.g. `spec.mqtt.passwordRef`. Two rules, because
+    /// either alone lets a credential through: the name is a DNS-1123 label, which is what a
+    /// secret in the store can be called, and neither the name nor the key wears the shape of a
+    /// minted token — `glpat-…`, `xoxb-…` and `sk-…` are all valid labels, and a token pasted into
+    /// the name box would otherwise be committed to Git in the clear.
+    ///
+    /// No refusal repeats what it refused: the thing pasted is live, and an error message travels
+    /// into logs and chats. The field is what the person is told.
+    pub fn validate(&self, field: &str) -> Result<()> {
+        let refuse = |what: &str, reason: &str| Error::Invalid {
+            field: format!("{field}.{what}"),
+            reason: reason.to_string(),
+        };
+
+        if names::looks_like_a_credential(&self.name) {
+            return Err(refuse(
+                "name",
+                "carries the shape of a credential; this field takes the name of the secret that \
+                 holds it, never the credential itself (MF-24)",
+            ));
+        }
+        if names::validate_dns1123_label(&self.name).is_err() {
+            return Err(refuse(
+                "name",
+                "must be the name of a secret in the store: a DNS-1123 label of 1 to 63 \
+                 characters (MF-35)",
+            ));
+        }
+        if let Some(key) = &self.key {
+            if names::looks_like_a_credential(key) {
+                return Err(refuse(
+                    "key",
+                    "carries the shape of a credential; this field takes the key inside the \
+                     secret, never the credential itself (MF-24)",
+                ));
+            }
+            if key.is_empty() || key.len() > 253 || !SECRET_KEY_RE.is_match(key) {
+                return Err(refuse(
+                    "key",
+                    "must be a key inside a Kubernetes secret: ^[-._a-zA-Z0-9]+$, 1 to 253 \
+                     characters (MF-35)",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Server-computed lifecycle and reconciliation status (MF-04). Never stored in Git.
