@@ -32,6 +32,11 @@ pub struct Config {
     pub oidc_issuer: Option<String>,
     /// The realm's JWKS, fetched in the background (`JC_OIDC_JWKS_URL`).
     pub oidc_jwks_url: Option<String>,
+    /// The gateway's own Keycloak client and its secret (`JC_OIDC_CLIENT_ID`,
+    /// `JC_OIDC_CLIENT_SECRET`): the identity it presents when it calls the Portal's internal
+    /// listener (PF-46, AG-52). Absent means it presents none and that listener refuses it, which
+    /// is what an instance without previews looks like.
+    pub oidc_client: Option<(String, String)>,
     /// The gateway's own public base URL (`JC_GATEWAY_PUBLIC_URL`), which makes the full
     /// RFC 8707 resource URI an acceptable token audience alongside the endpoint slug.
     pub public_url: Option<String>,
@@ -109,6 +114,17 @@ impl Config {
             org_domain,
             oidc_issuer,
             oidc_jwks_url,
+            oidc_client: match (
+                std::env::var("JC_OIDC_CLIENT_ID")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty()),
+                std::env::var("JC_OIDC_CLIENT_SECRET")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty()),
+            ) {
+                (Some(id), Some(secret)) => Some((id, secret)),
+                _ => None,
+            },
             public_url: std::env::var("JC_GATEWAY_PUBLIC_URL")
                 .ok()
                 .map(|url| url.trim_end_matches('/').to_owned()),

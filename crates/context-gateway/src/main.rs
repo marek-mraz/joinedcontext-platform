@@ -114,7 +114,27 @@ async fn main() -> ExitCode {
         let reaper = match config.previews_url.clone() {
             Some(url) => {
                 let mirror = context_gateway::previews::Mirror::new(config.previews_dir.clone());
-                tokio::spawn(mirror.follow(url));
+                // The Portal's internal listener answers a workload it can name (PF-46, AG-52):
+                // the gateway's own client, audience-bound to that listener. Without a client
+                // configured the poller sends no token and the Portal refuses it, which says so
+                // in the log rather than relying on the port's NetworkPolicy.
+                let token = match (config.oidc_issuer.as_deref(), config.oidc_client.as_ref()) {
+                    (Some(issuer), Some((id, secret))) => Some(std::sync::Arc::new(
+                        context_gateway::previews::WorkloadToken::new(
+                            issuer,
+                            id.clone(),
+                            secret.clone(),
+                        ),
+                    )),
+                    _ => {
+                        tracing::warn!(
+                            "previews are listed without a workload token: set JC_OIDC_ISSUER, \
+                             JC_OIDC_CLIENT_ID and JC_OIDC_CLIENT_SECRET"
+                        );
+                        None
+                    }
+                };
+                tokio::spawn(mirror.follow(url, token));
                 reaper.with_previews(config.previews_dir.clone())
             }
             None => reaper,

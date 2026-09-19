@@ -128,7 +128,12 @@ impl Mirror {
 
     /// Asks the Portal every [`INTERVAL`]. A failed call changes nothing: the previews last
     /// listed keep answering until the Portal says otherwise.
-    pub async fn follow(mut self, url: String) {
+    ///
+    /// `token` is the gateway's own workload identity (PF-46, AG-52). Without one the Portal's
+    /// internal listener refuses the call, which is what an instance that configured no client
+    /// looks like: previews stop being served and a line says why, rather than the listener
+    /// answering anybody who reaches the port.
+    pub async fn follow(mut self, url: String, token: Option<std::sync::Arc<WorkloadToken>>) {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .build()
@@ -137,7 +142,17 @@ impl Mirror {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            let listed = match client.get(&url).send().await {
+            let mut request = client.get(&url);
+            if let Some(token) = token.as_ref() {
+                match token.get().await {
+                    Ok(bearer) => request = request.bearer_auth(bearer),
+                    Err(error) => {
+                        tracing::warn!(%error, "no token for the Portal's preview list");
+                        continue;
+                    }
+                }
+            }
+            let listed = match request.send().await {
                 Ok(response) if response.status().is_success() => response.json::<List>().await,
                 Ok(response) => {
                     tracing::warn!(status = %response.status(), "the Portal did not list the previews");
@@ -157,6 +172,89 @@ impl Mirror {
                 Err(error) => tracing::warn!(%error, "the preview list is not readable"),
             }
         }
+    }
+}
+
+/// The gateway's own identity when it asks the Portal for the previews (PF-46, AG-52).
+///
+/// `client_credentials` on the gateway's confidential client, cached until shortly before it
+/// expires. The token is audience-bound to the Portal's internal listener by an audience mapper on
+/// that client, so it opens this one route and nothing else — and the Portal refuses the call
+/// without it, which is the whole point: the NetworkPolicy on port 9090 is the second control.
+pub struct WorkloadToken {
+    token_url: String,
+    client_id: String,
+    client_secret: String,
+    http: reqwest::Client,
+    held: tokio::sync::Mutex<Option<(std::time::Instant, String)>>,
+}
+
+/// How long before expiry a held token is replaced, so a call is never made with one that dies
+/// on the way.
+const EARLY: Duration = Duration::from_secs(30);
+
+impl WorkloadToken {
+    /// `issuer` is the realm URL; the token endpoint is its `openid-connect/token`.
+    pub fn new(issuer: &str, client_id: String, client_secret: String) -> Self {
+        Self {
+            token_url: format!(
+                "{}/protocol/openid-connect/token",
+                issuer.trim_end_matches('/')
+            ),
+            client_id,
+            client_secret,
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("a client with a timeout builds"),
+            held: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// The held token while it lasts, else one fetched now.
+    pub async fn get(&self) -> Result<String, String> {
+        let mut held = self.held.lock().await;
+        if let Some((expires, token)) = held.as_ref() {
+            if *expires > std::time::Instant::now() + EARLY {
+                return Ok(token.clone());
+            }
+        }
+        let (token, lifetime) = self.fetch().await?;
+        *held = Some((std::time::Instant::now() + lifetime, token.clone()));
+        Ok(token)
+    }
+
+    async fn fetch(&self) -> Result<(String, Duration), String> {
+        #[derive(Deserialize)]
+        struct Granted {
+            access_token: String,
+            #[serde(default)]
+            expires_in: u64,
+        }
+        let answer = self
+            .http
+            .post(&self.token_url)
+            .form(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", self.client_id.as_str()),
+                ("client_secret", self.client_secret.as_str()),
+            ])
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !answer.status().is_success() {
+            // The status and never the body: a token endpoint's error body can carry the grant
+            // back, and this line is read by whoever holds the logs.
+            return Err(format!("the realm refused the grant: {}", answer.status()));
+        }
+        let granted: Granted = answer.json().await.map_err(|error| error.to_string())?;
+        // Exactly the lifetime the realm named, and nothing invented on top of it: a token held
+        // past its expiry is a poll the Portal refuses. A realm that names none leaves the held
+        // token stale at once, so the next poll asks again.
+        Ok((
+            granted.access_token,
+            Duration::from_secs(granted.expires_in),
+        ))
     }
 }
 
