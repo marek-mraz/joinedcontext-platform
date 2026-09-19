@@ -153,6 +153,49 @@ pub fn referenced_attributes(params: &[(String, String)]) -> BTreeSet<String> {
     names
 }
 
+/// The same, for a batch query whose selectors travel in the body (CIM 009 clause 5.6.9).
+///
+/// `POST /entityOperations/query` is the one read whose `q`, `attrs` and geo query are JSON
+/// members rather than query parameters, and a filter is a read wherever it is written: a name
+/// the endpoint does not serve may no more be selected on here than in a URL (T-2259, T-1862).
+pub fn referenced_in_body(body: &serde_json::Value) -> BTreeSet<String> {
+    let text = |member: &str| -> Option<String> {
+        body.get(member)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let mut params: Vec<(String, String)> = Vec::new();
+    for member in ["q", "orderBy", "geoproperty", "timeproperty", "georel"] {
+        if let Some(value) = text(member) {
+            params.push((member.to_owned(), value));
+        }
+    }
+    // `attrs` is a list in the body where the URL spells it comma-separated.
+    if let Some(attrs) = body.get("attrs").and_then(serde_json::Value::as_array) {
+        let listed: Vec<&str> = attrs.iter().filter_map(serde_json::Value::as_str).collect();
+        params.push(("attrs".to_owned(), listed.join(",")));
+    } else if let Some(attrs) = text("attrs") {
+        params.push(("attrs".to_owned(), attrs));
+    }
+    // A `geoQ` of its own, which is where a batch query puts the geo selector.
+    if let Some(geo) = body.get("geoQ") {
+        for member in ["georel", "geoproperty", "geometry", "coordinates"] {
+            if let Some(value) = geo.get(member).and_then(serde_json::Value::as_str) {
+                params.push((member.to_owned(), value.to_owned()));
+            }
+        }
+    }
+    if let Some(temporal) = body.get("temporalQ") {
+        if let Some(value) = temporal
+            .get("timeproperty")
+            .and_then(serde_json::Value::as_str)
+        {
+            params.push(("timeproperty".to_owned(), value.to_owned()));
+        }
+    }
+    referenced_attributes(&params)
+}
+
 /// The attribute names one `q` uses, whatever shape the terms have (CIM 009 4.9).
 ///
 /// Terms are separated by `;`, `|` and parentheses; a term is `path op value`, a bare path

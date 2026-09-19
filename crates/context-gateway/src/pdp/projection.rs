@@ -184,7 +184,7 @@ fn type_granted(entity: &Value, types: &BTreeSet<String>) -> bool {
 /// A broker may answer `https://hel.fi/schema/Depot` where the grant says `Depot`; comparing
 /// the strings as they come would let the expanded form through. Both JSON-LD delimiters are
 /// cut, and a plain term is returned unchanged.
-fn term(iri: &str) -> &str {
+pub fn term(iri: &str) -> &str {
     iri.rsplit(['#', '/']).next().unwrap_or(iri)
 }
 

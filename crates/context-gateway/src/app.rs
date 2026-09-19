@@ -17,7 +17,7 @@ use crate::auth::token::{self, Claims, Verifier};
 use crate::federation::{Federations, Member};
 use crate::handlers::{endpoint_surface, schema, space_surface};
 use crate::middleware::rate_limit::{self, RateLimiter};
-use crate::pdp::evaluator::{Constraints, Subject, Verdict};
+use crate::pdp::evaluator::{self, Constraints, Subject, Verdict};
 use crate::pdp::{conditional, write_guard};
 use crate::pdp::{geo, projection, temporal, vocabulary, Pdp};
 use crate::proxy::{self, Broker};
@@ -685,6 +685,32 @@ async fn serve_ngsi_ld(
         }
     }
 
+    // CIM 009 clause 5.6.9 puts a query's selector in the body, and a filter is a read wherever
+    // it is written. The body is narrowed here rather than in the decision point because the
+    // decision is taken before a body is read (T-2259, T-1862).
+    let mut constraints = constraints;
+    if operation == Operation::QueryBatch && !sent.is_empty() {
+        match narrowed_batch_query(&sent, *constraints) {
+            Ok((narrowed, decided)) => {
+                constraints = decided;
+                if constraints.empty {
+                    tracing::info!(
+                        slug = %endpoint.slug,
+                        "a batch query selects on what this endpoint does not serve; \
+                         the broker is not asked"
+                    );
+                    return empty_list(&constraints);
+                }
+                sent = narrowed;
+                parts.headers.remove(CONTENT_LENGTH);
+                parts
+                    .headers
+                    .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
+            }
+            Err(problem) => return problem.into_response(),
+        }
+    }
+
     // A grant that decides from the stored entity cannot decide a batch, which names its
     // entities in the payload and not in the path (T-0807).
     if let Some(problem) = conditional::batch_refusal(operation, &constraints) {
@@ -955,6 +981,76 @@ fn narrowed_subscription(
     })
 }
 
+/// The body of a batch query, narrowed to the grants, with the decision it leaves behind
+/// (T-2259; EP-26, MP-02, R9).
+///
+/// `POST /entityOperations/query` is the one read whose selector travels in the body: the
+/// `type` of each entry, `attrs` and `q` decide which entities come back, and a broker reads
+/// them in preference to anything in the query string. So the same three narrowings the query
+/// string gets are applied here, and the names the body filters on run through the rule that
+/// takes a type out of a query it may not be filtered on. The returned constraints carry
+/// `empty` when nothing is left to ask for, which is the `200 []` an attribute that does not
+/// exist would answer.
+fn narrowed_batch_query(
+    body: &[u8],
+    constraints: Constraints,
+) -> Result<(Vec<u8>, Box<Constraints>), Box<ProblemDetails>> {
+    let mut payload: Value = serde_json::from_slice(body).map_err(|_| {
+        Box::new(ProblemDetails::bad_request().with_detail("request body is not JSON"))
+    })?;
+    let asked = evaluator::Request {
+        referenced: query::referenced_in_body(&payload),
+        ..Default::default()
+    };
+    let Verdict::Rewrite(mut decided) =
+        crate::pdp::drop_types_that_may_not_be_filtered(constraints, &asked)
+    else {
+        // The rule only ever narrows a REWRITE; a DENY here would mean the decision changed
+        // shape between the two calls.
+        return Err(Box::new(ProblemDetails::internal()));
+    };
+    if decided.empty {
+        return Ok((body.to_vec(), decided));
+    }
+
+    // Each entry selects by type, by id, or by both. An entry naming a type outside the grants
+    // is not this caller's to ask for; an entry naming only an id stays, and the answer's own
+    // type guard judges what comes back for it (T-2130).
+    if let Some(entities) = payload.get_mut("entities").and_then(Value::as_array_mut) {
+        let named = entities.len();
+        if !decided.types.is_empty() {
+            entities.retain(
+                |selector| match selector.get("type").and_then(Value::as_str) {
+                    Some(asked) => decided.types.contains(projection::term(asked)),
+                    None => true,
+                },
+            );
+        }
+        if entities.len() < named {
+            decided.restricted = true;
+        }
+        if entities.is_empty() {
+            decided.empty = true;
+            return Ok((body.to_vec(), decided));
+        }
+    }
+
+    // The grants' own filter joins the caller's, so a body can only ever narrow further.
+    if let Some(q) = &decided.q {
+        let caller = payload.get("q").and_then(Value::as_str).map(str::to_owned);
+        let joined = evaluator::conjoin(caller.as_deref(), std::slice::from_ref(q));
+        if let Some(joined) = joined {
+            payload["q"] = Value::String(joined);
+        }
+    }
+
+    let narrowed = serde_json::to_vec(&payload).map_err(|error| {
+        tracing::error!(%error, "the narrowed batch query does not serialize");
+        Box::new(ProblemDetails::internal())
+    })?;
+    Ok((narrowed, decided))
+}
+
 /// Cuts the broker's answer down to what the grants cover (R9, R22, R24).
 ///
 /// A single entity the grants do not reach is a miss, not a refusal: the caller must not
@@ -981,16 +1077,37 @@ async fn project_answer(
             .headers
             .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
     }
-    if operation.is_write() {
-        return Response::from_parts(parts, body);
-    }
     if !parts.status.is_success() {
         // A read the grants do not reach is answered with the gateway's own miss, so the
         // broker's wording — which names the id it could not find — cannot be told apart from
-        // a refusal (R20, T-2130). Every other status is the broker's to explain.
-        if parts.status == StatusCode::NOT_FOUND {
+        // a refusal (R20, T-2130).
+        if parts.status == StatusCode::NOT_FOUND && !operation.is_write() {
             return ProblemDetails::not_found().into_response();
         }
+        // What a broker says when it fails is whatever it was holding: an entity id in a
+        // message, a fragment of its own query, the name of an attribute this endpoint hides.
+        // The caller gets the gateway's own document and the operator gets the text (T-2260).
+        if parts.status.is_server_error() {
+            let held = axum::body::to_bytes(body, MAX_BODY)
+                .await
+                .unwrap_or_default();
+            tracing::warn!(
+                status = parts.status.as_u16(),
+                broker = %String::from_utf8_lossy(&held),
+                "the broker failed; its own explanation is not passed on"
+            );
+            return ProblemDetails::new(
+                parts.status.as_u16(),
+                "broker-failure",
+                "The context broker could not answer",
+            )
+            .with_detail("the context broker behind this endpoint failed to answer this request")
+            .into_response();
+        }
+        // A `4xx` is the caller's own request coming back, and it explains what to send instead.
+        return Response::from_parts(parts, body);
+    }
+    if operation.is_write() {
         return Response::from_parts(parts, body);
     }
 
@@ -1009,7 +1126,12 @@ async fn project_answer(
     // — the members it exists for — and the type guard would refuse it for declaring a type no
     // grant names. It is narrowed on its own members instead (EP-26, T-2134).
     if vocabulary::describes(operation) {
-        vocabulary::narrow(&mut payload, constraints);
+        if !vocabulary::narrow(&mut payload, constraints) {
+            // The broker answered about a name other than the one the path asked for, and that
+            // name is not one this caller reaches. Serving it would let the broker choose what
+            // the grants cover (EP-26, T-2131).
+            return ProblemDetails::not_found().into_response();
+        }
         return match serde_json::to_vec(&payload) {
             Ok(bytes) => proxy::with_body(parts, bytes),
             Err(error) => {

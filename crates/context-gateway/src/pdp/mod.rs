@@ -177,7 +177,7 @@ const ALWAYS_SERVED: &[&str] = &[
 /// No type left means the answer is genuinely nothing: `constraints.empty` is what the surfaces
 /// already answer with `200 []` for a query and `404` for an addressed read, which is exactly what
 /// an attribute that does not exist would give.
-fn drop_types_that_may_not_be_filtered(
+pub fn drop_types_that_may_not_be_filtered(
     mut constraints: evaluator::Constraints,
     request: &Request,
 ) -> Verdict {

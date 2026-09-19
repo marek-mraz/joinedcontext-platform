@@ -105,7 +105,7 @@ fn policy() -> PolicySpec {
         "contextSpaceRef: {SPACE}\n\
          assigner: did:web:{DOMAIN}\n\
          assignee: {{ kind: role, id: public }}\n\
-         operations: [queryEntity, retrieveEntity]\n"
+         operations: [queryEntity, retrieveEntity, queryBatch]\n"
     ))
     .expect("the policy spec parses")
 }
@@ -481,4 +481,157 @@ async fn a_grants_whitelist_is_judged_and_the_callers_own_attrs_are_not() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!asked.is_empty(), "the broker is asked: {asked:?}");
+}
+
+/// The same broker, recording the body as well: a batch query writes its selector there, so the
+/// hop log has to carry it to prove what the broker was allowed to see (T-2259).
+async fn broker_recording_bodies() -> (String, Hops) {
+    let hops: Hops = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&hops);
+    let app = Router::new().fallback(any(move |request: Request| {
+        let recorder = Arc::clone(&recorder);
+        async move {
+            let query = request.uri().query().unwrap_or_default().to_owned();
+            let body = axum::body::to_bytes(request.into_body(), 1 << 20)
+                .await
+                .unwrap_or_default();
+            recorder
+                .lock()
+                .expect("the hop log")
+                .push(format!("{query} {}", String::from_utf8_lossy(&body)));
+            axum::Json(everything())
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let address = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{address}"), hops)
+}
+
+/// One batch query, with the status, the answer and every request the broker saw.
+async fn post_query(endpoint: Endpoint, body: Value) -> (StatusCode, Value, Vec<String>) {
+    let (upstream, hops) = broker_recording_bodies().await;
+    let gateway = Arc::new(
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint]),
+    );
+    let response = router(gateway)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/endpoint/{SLUG}/ngsi-ld/v1/entityOperations/query"
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("a body");
+    let answered = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let asked = hops.lock().expect("the hop log").clone();
+    (status, answered, asked)
+}
+
+/// R9, MP-02, T-2259: the selector of a batch query lives in its body (CIM 009 clause 5.6.9), so
+/// the rule that takes a type out of a query it may not be filtered on reads the body too. Three
+/// thresholds on a hidden attribute answer the same thing and the broker is never asked.
+#[tokio::test]
+async fn a_filter_in_a_batch_query_body_cannot_be_bisected() {
+    let mut answers = BTreeSet::new();
+    for threshold in ["1000", "6000", "20000"] {
+        let (status, body, asked) = post_query(
+            endpoint(true, &["secretPin"]),
+            json!({
+                "type": "Query",
+                "entities": [{ "type": "User" }, { "type": "Vehicle" }],
+                "q": format!("secretPin>{threshold}"),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            asked.is_empty(),
+            "the broker was asked to filter on a hidden attribute: {asked:?}"
+        );
+        answers.insert(body.to_string());
+    }
+    assert_eq!(
+        answers.len(),
+        1,
+        "three thresholds gave three different answers, which is the value itself: {answers:?}"
+    );
+}
+
+/// MP-02: `age` belongs to `User` in this projection, so a body filtering on it is a query about
+/// Users — the Vehicle leaves the selector before the broker sees it.
+#[tokio::test]
+async fn a_type_outside_the_projection_is_dropped_from_the_body() {
+    let (status, body, asked) = post_query(
+        endpoint(true, &[]),
+        json!({
+            "type": "Query",
+            "entities": [{ "type": "User" }, { "type": "Vehicle" }],
+            "q": "age>30",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hop = asked.first().expect("the broker was asked once").clone();
+    assert!(
+        !hop.contains("Vehicle"),
+        "the broker was asked to filter Vehicles by an attribute they may not serve: {hop}"
+    );
+    assert_eq!(types(&body), vec!["User".to_owned()], "{body}");
+}
+
+/// R9, T-2259: `attrs` in the body is a selector as well as a projection — an entity carrying
+/// none of the names is not returned — so a name this endpoint hides empties the query there
+/// exactly as it does in a URL, without the broker being asked.
+#[tokio::test]
+async fn an_attrs_selector_in_the_body_that_names_a_hidden_attribute_asks_for_nothing() {
+    let (status, body, asked) = post_query(
+        endpoint(true, &["secretPin"]),
+        json!({
+            "type": "Query",
+            "entities": [{ "type": "User" }],
+            "attrs": ["name", "secretPin"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!([]), "{body}");
+    assert!(
+        asked.is_empty(),
+        "the broker was asked for an attribute this endpoint hides: {asked:?}"
+    );
+}
+
+/// MP-02, T-2259: a body whose filter belongs to one type and whose selector names another asks
+/// for nothing — the filter keeps the types that may serve it, the selector keeps the types the
+/// caller named, and there is no type in both.
+#[tokio::test]
+async fn a_body_whose_filter_and_selector_disagree_asks_for_nothing() {
+    let (status, body, asked) = post_query(
+        endpoint(true, &[]),
+        json!({
+            "type": "Query",
+            "entities": [{ "type": "User" }],
+            "q": "weight>100",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!([]), "{body}");
+    assert!(
+        asked.is_empty(),
+        "the broker was asked for the one type the caller did not name: {asked:?}"
+    );
 }

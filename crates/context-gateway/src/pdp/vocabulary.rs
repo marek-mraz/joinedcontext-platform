@@ -106,15 +106,28 @@ const ATTRIBUTE_LISTS: &[&str] = &["attributeList", "attributeNames"];
 const COUNTS: &[&str] = &["entityCount", "attributeCount"];
 
 /// Narrows a vocabulary document, or an array of them, to what the caller may read (EP-26).
-pub fn narrow(payload: &mut Value, constraints: &Constraints) {
+///
+/// Returns whether the answer may be served at all. The name in the path was judged before the
+/// broker was asked, and the broker is not the authority on which name it answered about: a
+/// document that comes back about another type or another attribute is a document this caller
+/// did not reach, whether the broker resolved an alias, followed a registration or has a defect.
+#[must_use]
+pub fn narrow(payload: &mut Value, constraints: &Constraints) -> bool {
     match payload {
         Value::Array(entries) => {
             entries.retain(|entry| about_a_reachable_name(entry, constraints));
             for entry in entries {
                 narrow_document(entry, constraints);
             }
+            true
         }
-        document => narrow_document(document, constraints),
+        document => {
+            if !about_a_reachable_name(document, constraints) {
+                return false;
+            }
+            narrow_document(document, constraints);
+            true
+        }
     }
 }
 

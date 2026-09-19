@@ -627,3 +627,27 @@ async fn a_granted_name_the_space_does_not_hold_is_the_same_not_found() {
         "the broker's miss and the gateway's refusal answer different bodies: {raw}"
     );
 }
+
+/// EP-26, T-2131: the broker is not the authority on which name it answered about. A document
+/// that comes back about an attribute the caller may not reach is not served, however the path
+/// that asked for it was spelled — an alias, a registration answering for a neighbour, a defect.
+#[tokio::test]
+async fn a_document_about_another_name_than_the_path_asked_for_is_not_served() {
+    let answered_about_something_else = json!({
+        "id": "https://uri.etsi.org/ngsi-ld/default-context/odometer",
+        "type": "Attribute",
+        "attributeName": "odometer",
+        "typeNames": ["Vehicle"],
+    });
+    let (status, _, raw, _) = ask_answering(
+        endpoint(),
+        "/ngsi-ld/v1/types/Vehicle",
+        answered_about_something_else,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{raw}");
+    assert!(
+        !raw.contains("odometer"),
+        "the broker chose which attribute this endpoint serves: {raw}"
+    );
+}
