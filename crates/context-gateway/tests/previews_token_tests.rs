@@ -75,15 +75,19 @@ async fn realm(
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://{address}/realms/dev"), asked, seen)
+    (
+        format!("http://{address}/realms/dev/protocol/openid-connect/token"),
+        asked,
+        seen,
+    )
 }
 
 /// PF-46, AG-52: the gateway obtains its own token with `client_credentials` on its own client,
 /// and holds it instead of asking the realm for every poll — the list is read every ten seconds.
 #[tokio::test]
 async fn the_gateway_mints_its_own_token_once_and_holds_it() {
-    let (issuer, asked, seen) = realm(300, false).await;
-    let token = WorkloadToken::new(&issuer, CLIENT.to_owned(), SECRET.to_owned());
+    let (token_url, asked, seen) = realm(300, false).await;
+    let token = WorkloadToken::new(token_url, CLIENT.to_owned(), SECRET.to_owned());
 
     assert_eq!(token.get().await.expect("a token"), "the-gateways-token");
     assert_eq!(token.get().await.expect("a token"), "the-gateways-token");
@@ -97,8 +101,8 @@ async fn the_gateway_mints_its_own_token_once_and_holds_it() {
 /// answer 401 and the previews would stop being served.
 #[tokio::test]
 async fn a_token_about_to_expire_is_minted_again() {
-    let (issuer, asked, _) = realm(5, false).await;
-    let token = WorkloadToken::new(&issuer, CLIENT.to_owned(), SECRET.to_owned());
+    let (token_url, asked, _) = realm(5, false).await;
+    let token = WorkloadToken::new(token_url, CLIENT.to_owned(), SECRET.to_owned());
 
     token.get().await.expect("a token");
     token.get().await.expect("a token");
@@ -110,8 +114,8 @@ async fn a_token_about_to_expire_is_minted_again() {
 /// a poll without a credential.
 #[tokio::test]
 async fn a_refused_grant_is_an_error_and_names_no_secret() {
-    let (issuer, _, _) = realm(300, true).await;
-    let token = WorkloadToken::new(&issuer, CLIENT.to_owned(), SECRET.to_owned());
+    let (token_url, _, _) = realm(300, true).await;
+    let token = WorkloadToken::new(token_url, CLIENT.to_owned(), SECRET.to_owned());
 
     let error = token.get().await.expect_err("no token");
     assert!(error.contains("401"), "{error}");
@@ -129,9 +133,9 @@ async fn a_refused_grant_is_an_error_and_names_no_secret() {
 /// what the internal listener names its caller by.
 #[tokio::test]
 async fn the_preview_list_is_read_with_the_token_in_the_header() {
-    let (issuer, _, _) = realm(300, false).await;
+    let (token_url, _, _) = realm(300, false).await;
     let token = Arc::new(WorkloadToken::new(
-        &issuer,
+        token_url,
         CLIENT.to_owned(),
         SECRET.to_owned(),
     ));

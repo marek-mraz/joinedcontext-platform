@@ -194,13 +194,12 @@ pub struct WorkloadToken {
 const EARLY: Duration = Duration::from_secs(30);
 
 impl WorkloadToken {
-    /// `issuer` is the realm URL; the token endpoint is its `openid-connect/token`.
-    pub fn new(issuer: &str, client_id: String, client_secret: String) -> Self {
+    /// `token_url` is the realm's token endpoint, which the deployment names
+    /// (`Config::token_url`): the issuer is the address a browser uses, and on a single-node
+    /// cluster a pod dialling that public hostname reaches nothing.
+    pub fn new(token_url: String, client_id: String, client_secret: String) -> Self {
         Self {
-            token_url: format!(
-                "{}/protocol/openid-connect/token",
-                issuer.trim_end_matches('/')
-            ),
+            token_url,
             client_id,
             client_secret,
             http: reqwest::Client::builder()

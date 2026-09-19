@@ -32,6 +32,11 @@ pub struct Config {
     pub oidc_issuer: Option<String>,
     /// The realm's JWKS, fetched in the background (`JC_OIDC_JWKS_URL`).
     pub oidc_jwks_url: Option<String>,
+    /// Where the gateway asks for its own token (`JC_OIDC_TOKEN_URL`), for the same reason
+    /// `JC_OIDC_JWKS_URL` exists: the issuer is the address a *browser* uses, and a pod that dials
+    /// its own cluster's public hostname leaves through the ingress or not at all. The realm's
+    /// `openid-connect/token` under the issuer when the deployment names none.
+    pub oidc_token_url: Option<String>,
     /// The gateway's own Keycloak client and its secret (`JC_OIDC_CLIENT_ID`,
     /// `JC_OIDC_CLIENT_SECRET`): the identity it presents when it calls the Portal's internal
     /// listener (PF-46, AG-52). Absent means it presents none and that listener refuses it, which
@@ -71,6 +76,13 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// Where the gateway asks for its own token: what the deployment named, else the realm's own
+    /// endpoint under the issuer. `None` when there is no realm at all, which is an instance that
+    /// presents no identity anywhere.
+    pub fn token_url(&self) -> Option<String> {
+        token_endpoint(self.oidc_token_url.as_deref(), self.oidc_issuer.as_deref())
+    }
+
     /// Reads the configuration from the process environment.
     pub fn from_env() -> Result<Self, ConfigError> {
         let bind = match std::env::var("JC_GATEWAY_BIND") {
@@ -114,6 +126,9 @@ impl Config {
             org_domain,
             oidc_issuer,
             oidc_jwks_url,
+            oidc_token_url: std::env::var("JC_OIDC_TOKEN_URL")
+                .ok()
+                .filter(|url| !url.trim().is_empty()),
             oidc_client: match (
                 std::env::var("JC_OIDC_CLIENT_ID")
                     .ok()
@@ -173,9 +188,61 @@ fn normalize_broker_url(raw: &str) -> Result<String, ConfigError> {
     Ok(trimmed.to_owned())
 }
 
+/// The token endpoint of `Config::token_url`, apart from the struct so both branches are readable:
+/// what the deployment named wins, and the realm's own is derived from the issuer only when it did
+/// not name one.
+fn token_endpoint(named: Option<&str>, issuer: Option<&str>) -> Option<String> {
+    if let Some(url) = named {
+        return Some(url.to_owned());
+    }
+    issuer.map(|issuer| {
+        format!(
+            "{}/protocol/openid-connect/token",
+            issuer.trim_end_matches('/')
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On `dev` the issuer is `https://idm.<node>.sslip.io/realms/dev`, the address a browser uses.
+    /// The gateway pod cannot dial its own cluster's ingress hostname, so the poller asked and got
+    /// nothing for as long as it ran (T-1500); `JC_OIDC_TOKEN_URL` is the in-cluster Service, the
+    /// way `JC_OIDC_JWKS_URL` already is.
+    #[test]
+    fn the_token_endpoint_the_deployment_names_wins_over_the_issuers_own() {
+        assert_eq!(
+            token_endpoint(
+                Some("http://keycloak.dev.svc.cluster.local:80/realms/dev/protocol/openid-connect/token"),
+                Some("https://idm.example/realms/dev"),
+            ),
+            Some(
+                "http://keycloak.dev.svc.cluster.local:80/realms/dev/protocol/openid-connect/token"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn without_one_named_the_endpoint_is_the_issuers_own_whether_or_not_it_ends_in_a_slash() {
+        let expected =
+            Some("https://idm.example/realms/dev/protocol/openid-connect/token".to_owned());
+        assert_eq!(
+            token_endpoint(None, Some("https://idm.example/realms/dev")),
+            expected
+        );
+        assert_eq!(
+            token_endpoint(None, Some("https://idm.example/realms/dev/")),
+            expected
+        );
+    }
+
+    #[test]
+    fn no_realm_is_no_endpoint_and_no_identity_presented_anywhere() {
+        assert_eq!(token_endpoint(None, None), None);
+    }
 
     #[test]
     fn broker_url_is_reduced_to_scheme_and_authority() {

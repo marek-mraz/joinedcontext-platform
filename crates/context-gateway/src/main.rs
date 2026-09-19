@@ -118,10 +118,10 @@ async fn main() -> ExitCode {
                 // the gateway's own client, audience-bound to that listener. Without a client
                 // configured the poller sends no token and the Portal refuses it, which says so
                 // in the log rather than relying on the port's NetworkPolicy.
-                let token = match (config.oidc_issuer.as_deref(), config.oidc_client.as_ref()) {
-                    (Some(issuer), Some((id, secret))) => Some(std::sync::Arc::new(
+                let token = match (config.token_url(), config.oidc_client.as_ref()) {
+                    (Some(token_url), Some((id, secret))) => Some(std::sync::Arc::new(
                         context_gateway::previews::WorkloadToken::new(
-                            issuer,
+                            token_url,
                             id.clone(),
                             secret.clone(),
                         ),
