@@ -86,7 +86,7 @@ fn endpoint(models: Vec<Model>) -> Endpoint {
         project: "ovzdusie".to_owned(),
         audience: Audience::Public,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd],
+        representations: vec![Representation::NgsiLd, Representation::Mcp],
         rate_limit: None,
         file_limits: None,
         hidden_attributes: Default::default(),
@@ -109,15 +109,38 @@ information:
     }
 }
 
-fn app(models: Vec<Model>) -> axum::Router {
+/// The same endpoint under a policy set that grants both classes and names no attribute, so
+/// every slot of both survives the projection and nothing is left out.
+fn keeping_nothing_back(models: Vec<Model>) -> Endpoint {
+    Endpoint {
+        policies: vec![policy(
+            r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+operations: [queryEntity, retrieveEntity]
+information:
+  - entities:
+      - type: AirQualityObserved
+      - type: InternalIncident
+"#,
+        )],
+        ..endpoint(models)
+    }
+}
+
+fn serving(endpoint: Endpoint) -> axum::Router {
     router(Arc::new(
         Gateway::new(
             Broker::new("http://127.0.0.1:1"),
             Box::new(PolicyPdp),
             "banskabystrica.sk",
         )
-        .serve([endpoint(models)]),
+        .serve([endpoint]),
     ))
+}
+
+fn app(models: Vec<Model>) -> axum::Router {
+    serving(endpoint(models))
 }
 
 async fn call(
@@ -177,6 +200,42 @@ async fn text(
         headers,
         String::from_utf8(body.to_vec()).expect("a text document"),
     )
+}
+
+/// One request against an endpoint of the caller's choosing, with the whole answer kept as
+/// text: a leak is looked for in the bytes that were sent, not in the fields a test remembers
+/// to read.
+async fn served(router: axum::Router, request: Request<Body>) -> (StatusCode, String) {
+    let response = router.oneshot(request).await.expect("the gateway answers");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 256 * 1024)
+        .await
+        .expect("a readable body");
+    (
+        status,
+        String::from_utf8(body.to_vec()).expect("a text document"),
+    )
+}
+
+/// What `describe_schema` answers an agent for the summary format: the same index the REST
+/// route serves, inside the MCP result envelope (EP-52).
+fn summary_call() -> Request<Body> {
+    let payload = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "describe_schema", "arguments": { "format": "summary" } }
+    });
+    Request::builder()
+        .method("POST")
+        .uri(format!("/api/endpoint/{SLUG}/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body(Body::from(payload.to_string()))
+        .expect("a request")
+}
+
+fn parsed(raw: &str) -> Value {
+    serde_json::from_str(raw.trim().trim_start_matches("data: ").trim())
+        .unwrap_or_else(|error| panic!("the gateway answered {raw}: {error}"))
 }
 
 fn get(path: &str) -> Request<Body> {
@@ -656,6 +715,93 @@ async fn a_model_without_artifacts_is_derived_from_the_grants() {
     let terms = &document["@context"][1];
     assert!(!terms["pm10"].is_null());
     assert!(terms["internalNote"].is_null());
+}
+
+/// EP-47, T-2133: the index says *that* something was left out and never what.
+///
+/// A list of the hidden slots publishes the three things the projection exists to keep back: that
+/// the attribute exists, which type carries it, and that somebody thought it worth hiding. So the
+/// answer is one boolean — asked anonymously over REST, and over the MCP summary an agent reads.
+#[tokio::test]
+async fn an_endpoint_never_names_what_it_hides() {
+    for (surface, router, request) in [
+        (
+            "REST",
+            app(vec![air_quality(true)]),
+            get(&format!("/api/endpoint/{SLUG}/schema/index.json")),
+        ),
+        ("MCP", app(vec![air_quality(true)]), summary_call()),
+    ] {
+        let (status, raw) = served(router, request).await;
+        assert_eq!(status, StatusCode::OK, "{surface}");
+
+        // `internalNote` is a slot of a granted class, `InternalIncident` a class of its own:
+        // neither name may be anywhere in the bytes, envelope and text content included.
+        for hidden in ["internalNote", "InternalIncident", "severity"] {
+            assert!(
+                !raw.contains(hidden),
+                "{surface} names what it hides ({hidden}):\n{raw}"
+            );
+        }
+
+        let document = parsed(&raw);
+        let model = match surface {
+            "REST" => &document["models"][0],
+            _ => &document["result"]["structuredContent"]["schema"]["models"][0],
+        };
+        assert_eq!(
+            model["redacted"],
+            json!(true),
+            "{surface} hid something and did not say so:\n{raw}"
+        );
+        assert_eq!(
+            model["types"],
+            json!(["AirQualityObserved"]),
+            "{surface} lists the types the caller may read"
+        );
+    }
+}
+
+/// EP-47, T-2133: the other half of the boolean. A caller who may read every class and every
+/// slot is told nothing was left out — the key is absent, not `false`, because a document that
+/// carries it on every answer says "there is more here" about an endpoint that has no more.
+#[tokio::test]
+async fn a_caller_who_sees_everything_is_told_nothing_was_left_out() {
+    for (surface, request) in [
+        (
+            "REST",
+            get(&format!("/api/endpoint/{SLUG}/schema/index.json")),
+        ),
+        ("MCP", summary_call()),
+    ] {
+        let (status, raw) = served(
+            serving(keeping_nothing_back(vec![air_quality(true)])),
+            request,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{surface}");
+
+        let document = parsed(&raw);
+        let model = match surface {
+            "REST" => &document["models"][0],
+            _ => &document["result"]["structuredContent"]["schema"]["models"][0],
+        };
+        assert_eq!(
+            model["types"],
+            json!(["AirQualityObserved", "InternalIncident"]),
+            "{surface}: this grant reaches both classes:\n{raw}"
+        );
+        assert!(
+            model.get("redacted").is_none(),
+            "{surface} claims something was kept back from a caller it kept nothing from:\n{raw}"
+        );
+        // Not under another name either: an empty list of hidden slots is still a field that
+        // teaches a client to look for hidden slots.
+        assert!(
+            !raw.contains("redact"),
+            "{surface} mentions redaction to a caller nothing was redacted from:\n{raw}"
+        );
+    }
 }
 
 /// DM-22: `v{major}` names a major the space actually publishes; anything else is not a

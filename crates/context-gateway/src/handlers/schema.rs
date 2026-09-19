@@ -6,9 +6,11 @@
 //! the checkout is still described: the JSON Schema and the `@context` are derived from
 //! the grants, which is a narrower answer than the compiled one but never a wrong one.
 //!
-//! Whichever half answers, the document is a projection of the policy set: a class or a
-//! slot the caller may not read is absent, and named in `redactedSlots` so the absence is
-//! visible rather than mysterious (EP-47).
+//! Whichever half answers, the document is a projection of the policy set: a class or a slot the
+//! caller may not read is absent, and the index says only *that* something was left out —
+//! `redacted: true`, no names, no count (EP-47, T-2133). A list of what is hidden publishes what was
+//! being kept back: that the attribute exists, on which type, and that somebody thought it worth
+//! hiding. A caller for whom nothing was left out gets no such key at all.
 
 use super::formalisms;
 use crate::pdp::evaluator::{
@@ -340,17 +342,24 @@ pub fn index(endpoint: &Endpoint, visible: &Visible, digest: impl Fn(&[u8]) -> S
             .iter()
             .filter(|class| visible.covers_type(class))
             .collect();
-        redacted.sort();
-        redacted.dedup();
+        // Whether anything was left out, and nothing about what: the names stay here (EP-47).
+        let anything_redacted = !redacted.is_empty()
+            || model
+                .classes
+                .iter()
+                .any(|class| !visible.covers_type(class));
 
-        models.push(json!({
+        let mut described = json!({
             "name": model.name,
             "version": model.major,
             "semver": model.version,
             "types": types,
-            "redactedSlots": redacted,
             "artifacts": artifacts(std::slice::from_ref(&model), visible, &schema, &context, &digest),
-        }));
+        });
+        if anything_redacted {
+            described["redacted"] = json!(true);
+        }
+        models.push(described);
     }
 
     json!({ "endpoint": endpoint.slug, "models": models })

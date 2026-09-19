@@ -55,7 +55,6 @@ impl Peer {
                 "version": 1,
                 "semver": "1.2.0",
                 "types": ["AirQualityObserved"],
-                "redactedSlots": [],
                 "artifacts": artifacts,
             }],
         });
