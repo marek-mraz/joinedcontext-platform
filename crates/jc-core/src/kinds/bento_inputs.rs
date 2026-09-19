@@ -1,7 +1,9 @@
 //! The inputs the pinned runner ships (PL-50): names, the fields Bento marks secret, which
 //! inputs end on their own. Generated from `bento list --format json-full` of
 //! ghcr.io/warpstreamlabs/bento:v1.21.1 by joinedcontext-portal/ui/scripts/bento-inputs.mjs;
-//! change the pin and rerun the script, never edit by hand.
+//! change the pin and rerun the script, never edit by hand. The script appends its own
+//! `ALSO_SECRET` list to what the runner marks: fields the runner's documentation does not flag
+//! and that are credentials all the same, per input, after the tree walk (T-2239).
 
 /// The runner release this catalog was generated from.
 pub const RUNNER_VERSION: &str = "v1.21.1";
@@ -95,9 +97,18 @@ pub const SECRET_FIELDS: &[(&str, &[&str])] = &[
             "sasl.password",
         ],
     ),
-    ("aws_kinesis", &["credentials.secret"]),
-    ("aws_s3", &["credentials.secret"]),
-    ("aws_sqs", &["credentials.secret"]),
+    (
+        "aws_kinesis",
+        &["credentials.secret", "credentials.id", "credentials.token"],
+    ),
+    (
+        "aws_s3",
+        &["credentials.secret", "credentials.id", "credentials.token"],
+    ),
+    (
+        "aws_sqs",
+        &["credentials.secret", "credentials.id", "credentials.token"],
+    ),
     ("azure_blob_storage", &[]),
     ("azure_cosmosdb", &["account_key", "connection_string"]),
     ("azure_queue_storage", &[]),
@@ -173,6 +184,8 @@ pub const SECRET_FIELDS: &[(&str, &[&str])] = &[
             "tls.client_certs[].key",
             "tls.client_certs[].password",
             "negotiate.user.password",
+            "oauth.access_token",
+            "digest_auth.password",
         ],
     ),
     ("http_server", &[]),
@@ -186,6 +199,9 @@ pub const SECRET_FIELDS: &[(&str, &[&str])] = &[
             "sasl.password",
             "sasl.oauth2.client_secret",
             "sasl.aws.credentials.secret",
+            "sasl.access_token",
+            "sasl.aws.credentials.id",
+            "sasl.aws.credentials.token",
         ],
     ),
     (
@@ -271,7 +287,7 @@ pub const SECRET_FIELDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("parquet", &[]),
-    ("pulsar", &[]),
+    ("pulsar", &["auth.token.token"]),
     ("read_until", &[]),
     (
         "redis_list",
@@ -314,11 +330,17 @@ pub const SECRET_FIELDS: &[(&str, &[&str])] = &[
     ),
     ("socket", &[]),
     ("socket_server", &[]),
-    ("sql_raw", &["credentials.secret"]),
-    ("sql_select", &["credentials.secret"]),
+    (
+        "sql_raw",
+        &["credentials.secret", "credentials.id", "credentials.token"],
+    ),
+    (
+        "sql_select",
+        &["credentials.secret", "credentials.id", "credentials.token"],
+    ),
     ("stdin", &[]),
     ("subprocess", &[]),
-    ("twitter_search", &[]),
+    ("twitter_search", &["api_key"]),
     (
         "websocket",
         &[
@@ -328,6 +350,7 @@ pub const SECRET_FIELDS: &[(&str, &[&str])] = &[
             "oauth.consumer_secret",
             "oauth.access_token_secret",
             "basic_auth.password",
+            "oauth.access_token",
         ],
     ),
     ("zmq4n", &[]),
